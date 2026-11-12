@@ -11,7 +11,7 @@ A Switch 2 game: update v131072, SDK 22.2.8 (`Ounce`). Nintendo EPD's engine (se
 | `sys_resource 0x3000000` | `game.tsv` | 48 MB, as the NPDM declares |
 | `render_cond on` | `game.tsv` | agl clears a copy of the prepass depth again under a render condition the console skips. Run unconditionally, the opaque pass's `EQUAL` test fails everywhere ([PR 1299](https://github.com/seedds/nxnative/pull/1299)'s finding) |
 | `gpu_timestamps segment` | `game.tsv` | the game's dynamic resolution decides from GPU timestamps, and with one time per submission it never lowers its resolution ([why](../../../docs/reference/frame-rate.md#dynamic-resolution-that-never-moves-and-draw-passes-that-wait-for-each-other)) |
-| Dynamic-resolution stub | [`patches.py`](patches.py) (frame step rule, `others`) | full resolution unless the launcher's Dynamic resolution is on ([Dynamic resolution](#dynamic-resolution)) |
+| Dynamic-resolution stub | [`patches.py`](patches.py) (frame step rule, `others`) | full resolution unless the launcher's Dynamic resolution is on ([Dynamic resolution](#dynamic-resolution)), or the game's own level nearest the launcher's Render scale ([Render scale](#render-scale)) |
 | `draw_barriers game` | `game.tsv` | about 180 full barriers a frame NVN does not ask for: GPU 25 → 18 ms at full resolution |
 | `tex_flush_upload on`, `tex_dirty_upload on` | `game.tsv` | as Tears of the Kingdom: the CPU writes the terrain tiles' height (R32F), blend and hole (RGBA8) maps into textures after creating them. Without the keys those textures stay zero: flat blue holes in the ground around the path with grass floating in them, and grey stone where the console shows dirt |
 | `shader_groups`, `shader_note` | `game.tsv` | shaders grouped as `/Shader/`, `/Effect/`, `/Lib/`, `/UI/` |
@@ -68,6 +68,25 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
 - Where the full-resolution GPU frame goes (M4 Pro, Metal System Trace, 2026-11-08): vertex/mesh 4.9, fragment 5.2, compute 4.3 ms per 1/60 s, and they do not overlap (their union is 14.4 ms, their sum 14.4). The heaviest passes: the main mesh pass (task `a5288d0a6c4971fd`, mesh `3439aaa071d868ae`, fragment `a1a56cf6d62ae798`), two foliage passes (task `47f9b38490dcf9a2`), and the upscaler's compute (`fa3033d05c0a41d6`, 177 HMMA calls, already on `simdgroup` matrices). Ruled out: the stage serialization is mostly the game's own barriers (about 70 a frame, 39 of them `ORDER_PRIMITIVES | INVALIDATE_TEXTURE`). The relaxed draw-pass barriers of `draw_barriers game` are off whenever an image family heap exists (this game's dynamic-resolution depth buffer makes one). Keeping them on with the alias flush moved to a start barrier skipped 22% of the full barriers, but the real GPU span did not change (14.7 ms p50 either way, two runs each), so that change was not kept. Also ruled out: mesh shaders writing only the vertices their primitives use (the highest index + 1, instead of all `max_v`), as an overlay of the 31 play mesh shaders against the same shaders recompiled: span 14.7 / 15.5 ms against 16.0 / 15.6, so the game's meshlets are full. A shader timeline needs the trace attached before the pipelines are made, and a recording from 3 s to the play window (9 GB, or 45 s with the shader profiler) never finished saving.
 - Measured on the M4 Pro (20-core GPU, 2026-11-08, `kokiri-deck`, one run each): at full resolution (the main passes 1536x864 in pass dumps at 75, 100 and 125 s) 48.1 fps, frame p50 16.74 / p95 33.41 ms, GPU p50 15.0 / p95 16.9 ms: the GPU needs about one vsync a frame, so the frame step holds 2 vsyncs much of the time. With the game's own dynamic resolution and the host fixes above: 60 fps, GPU p50 12.6 ms, at a lower resolution. A second dynamic-resolution run wandered off the route into Saria's dialogue and is not counted.
 
+### Render scale
+
+- The launcher's **Render scale** (`DM_RENDER_SCALE`, 0.5 to 1.0; 1.0, the default, keeps the game's size) fixes the 3D scene at one of the game's own resolution levels, the one whose `ResolutionReduceScale` is nearest that fraction of level 0's, and turns the dynamic resolution off there (2026-11-12). The same stub of the level function ([`patches.py`](patches.py), [Dynamic resolution](#dynamic-resolution)) returns that level every frame, so the game's update walks to it within a second and holds it: the game then sizes its scene targets, its upscaler's input and its shader ratio as it does for its own level, and the HUD, the text and the 1920x1080 (handheld) output keep their size. The stub reads the levels from the controller's own list (the sead list at `+0x190`, each level's scale 8 bytes before its node, the count at `+0x1a0`), the way the original function walks it, so a changed palette would still be followed. The rewriter marks the build `RENDER_SCALE 1` and the launchers offer the setting.
+- The levels (`System/GameGraphics/ModelSceneExtensionParam/Default.game__gfx__ModelSceneExtensionParam.bgyml` in `Pack/Bootup.Nin_Ounce_NVN2.pack.zs`, `DynamicResolutionParam.LevelPaletteDict`): the game keeps two palettes, and `ResolutionParam` names one for each output. The 1920x1080 output, handheld mode (Android's `DM_OPMODE=0`), has eight levels (load threshold 108, reduce counter 3); the 2560x1440 outputs (console mode) have ten (threshold 95, reduce counter 2), the last two 0.37223 and 0.33334 (the Mac's 2048x1152 base: 762x428 and 683x384). The slider value that picks each (the width rounded to the game's alignment):
+
+  | Level | Scale | Of full | Handheld (1920x1080 window) | Slider |
+  |---|---|---|---|---|
+  | 0 | 0.75 | 100 % | 1440x810 | 100 % |
+  | 1 | 0.71112 | 95 % | 1365x768 | 95 % |
+  | 2 | 0.66667 | 89 % | 1280x720 | 90 % |
+  | 3 | 0.62223 | 83 % | 1194x672 | 85 % |
+  | 4 | 0.58334 | 78 % | 1120x630 | 80 %, 75 % |
+  | 5 | 0.53334 | 71 % | 1024x576 | 70 % |
+  | 6 | 0.5 | 67 % | 960x540 | 65 % |
+  | 7 | 0.4445 | 59 % | 854x480 | 60 %, 55 %, 50 % |
+
+  Two or three slider steps share a level where the levels are further apart than 5 %, and the slider's bottom reaches the handheld palette's floor, 854x480, not the console palette's 640x360-class levels. The Mac app and the iPhone offer the same slider (console mode picks from the ten-level palette, 1536x864 to 683x384); on them only the stub was checked, not the picture.
+- What it buys on Android, and what it costs, is in [Android](#android).
+
 ## Memory
 
 - Current: on the walk, run from an external drive with a 3.5 GB pipeline archive: resident 10.9-11.4 GB, wired about 9.4 GB, on a 16 GB Mac. `vmmap` and `footprint`: 6.4 GB of guest memory and 3.8 GB of Metal textures and targets, 1 GB of IOAccelerator memory. [Reading the archive into memory](../../../docs/reference/memory.md#a-pipeline-archive-on-an-external-drive-is-read-into-memory) used to add 3.5 GB (footprint 15.0, peak 16.7). `mem_map_limit on`: a map past the application pool fails as on Horizon, and the SDK's allocator then gives back the pages it keeps. Other apps' memory adds to the swap: other games running beside it can push the Mac over.
@@ -88,6 +107,40 @@ Measured on an M6 Mac with 16 GB, headless, on one walk with camera turns (`walk
   ![The same spot with Fewer plants on: no ferns or flowers, the canopies bare](../../../docs/images/android/ocarina-of-time-kokiri-fewer-plants-oneplus-pad-3.jpg)
   - Memory on the Fold: about 10.4 GB of PSS at Saria's scene at most, the image memory 1.4–2.2 GB, raw global memory 0.4–0.46 GB placed.
 - **Keep the GPU clock up, a launcher setting of every game on an Adreno phone, off by default** (`DM_VK_GPU_FLOOR=100`, a KGSL clock floor on the device's own contexts): on a cool Galaxy Z Fold 8, Kokiri Forest over 15 minutes at 26–29.5 fps against 21, hold 2 held at 1,300 MHz, the battery about 2 °C warmer than the control; on the same Fold warm (battery 33 °C, the bench's `kokiri` route, adjacent runs) 17.6–17.8 fps against 19.9, as the thermal engine held the GPU at 461 MHz for most of each run; on a Galaxy S25 Edge no gain (25 against 26.5 fps). So it stays off here too ([why](../../../docs/reference/rendering.md#the-gpu-clock-held-up-by-a-game-setting-on-qualcomms-kernel-driver-android)).
+- **Render scale, the launcher's slider, 100 % by default** ([Render scale](#render-scale): one of the game's own eight handheld levels, the 3D scene smaller and the HUD as it is; 2026-11-12, a host of main 2e802839, fresh shaders, the bench's `kokiri` route, natural pacing, one run each, the phones warm from the afternoon). The GPU frame falls with the level, but the frame step stayed at hold 3 on both phones, so the frame rate moved little; the Samsung governors' clocks moved between runs, so compare the parts that do not follow the resolution (the dispatches) as the clock's yardstick:
+
+  | Phone | Slider | Scene | fps | GPU p50 | Clock median | Scene-size passes | Dispatches |
+  |---|---|---|---|---|---|---|---|
+  | Galaxy S25 Edge (Adreno 830) | 100 % | 1440x810 | 20.4 | 37.6 ms | 734 MHz | 17.9 ms | 17.4 ms |
+  | | 85 % | 1195x672 | 19.9 | 45.2 ms | 525 MHz | 19.2 ms | 21.4 ms |
+  | | 75 % | 1120x630 | 20.6 | 40.7 ms | 607 MHz | 16.4 ms | 18.0 ms |
+  | | 65 % | 960x540 | 20.7 | 41.5 ms | 566 MHz | 17.4 ms | 20.9 ms |
+  | | 50 % | 854x480 | the GPU was lost at the Kokiri Forest load (fixed since: below) | | | | |
+  | Galaxy Z Fold 8 (Adreno 840) | 100 % | 1440x810 | 18.5, 18.1 | 49.3 ms | 461 MHz (thermal cap) | 22.1 ms | 18.9 ms |
+  | | 85 % | 1195x672 | 20.9 | 36.4 ms | 578 MHz | 15.3 ms | 15.5 ms |
+  | | 75 % | 1120x630 | 20.6 | 42.7 ms | 461 MHz | 18.5 ms | 18.5 ms |
+  | | 65 % | 960x540 | the GPU was lost at the Kokiri Forest load (fixed since: below) | | | | |
+  | | 50 % | 854x480 | 21.1 | 36.0 ms | 578 MHz | 15.4 ms | 17.0 ms |
+
+  Scaled to one clock by the dispatches' time, the GPU frame is about 15 % shorter at 960x540 on the S25 (its scene-size passes a quarter shorter) and about 27 % at 854x480 on the Fold; 1120x630 buys about 8 % on either. Hold 2 needs a GPU frame of about 28 ms, which neither warm phone reached at any level (the S25 fell from 734 to 566 MHz through the afternoon's chain; the Fold's thermal engine held 461–578 MHz). On a cool S25 at its 832 MHz, where the morning's full-size runs held hold 2 at 29.3 fps, the saving is margin for the scenes that fall out of it.
+
+  On main of 2026-11-17 (with the fix below), the Fold again, two interleaved rounds of the five levels, the bench's `kokiri` route, the Fold warm through the chain (thermal status 1, then 2; the thermal engine capped the GPU at 461–578 MHz from the second run on). The last column is the GPU frame at the run's median clock scaled to 1 GHz, the work the level leaves:
+
+  | Slider | Scene | fps | GPU p50 | Clock median | GPU frame at 1 GHz |
+  |---|---|---|---|---|---|
+  | 100 % | 1440x810 | 21.0, 19.3 | 36.0, 47.1 ms | 646, 461 MHz | 23.3, 21.7 ms |
+  | 85 % | 1195x672 | 20.8, 20.9 | 42.6, 42.2 ms | 461, 461 MHz | 19.6, 19.5 ms |
+  | 75 % | 1120x630 | 20.6, 21.2 | 34.6, 34.5 ms | 578, 578 MHz | 20.0, 19.9 ms |
+  | 65 % | 960x540 | 20.6, 20.9 | 36.2, 34.0 ms | 500, 500 MHz | 18.1, 17.0 ms |
+  | 50 % | 854x480 | 25.2, 20.7 | 28.6, 36.3 ms | 578, 500 MHz | 16.6, 18.1 ms |
+
+  No level held 30 fps on the warm Fold: the frame step stayed at hold 3 (about 20.5 fps) everywhere but in one run at 50 %, which probed hold 2 again and again and fell back each time (25.2 fps; its GPU needed 2.1–2.3 vsyncs at hold 2). The lower levels take 15–25 % off the GPU's work, which the thermal engine's swings between 461 and 646 MHz outweigh. The OnePlus Pad 3 (Adreno 830, 12 GB) runs Kokiri at 30 fps (hold 2) at every level, 100 % included (the full route at 100 %: 30.0 fps, GPU p50 25.2 ms, against 29.9 fps and 25.3 ms on main without the stub; 960x540 and 854x480: 29.8 fps on average, GPU p50 22.8 ms); on it Render scale is margin only.
+
+  - **The GPU loss, fixed:** in 2 of 18 loads of Kokiri Forest at a level under 100 % (2026-11-12, the S25 at 854x480 and the Fold at 960x540; none of 8 at 100 %), Qualcomm's driver cut the submission that began with indirect dispatch `d17eefaff4f0bc23` by its hang recovery (`submission N took 2005 ms on the GPU, its end timestamp never written`, then `the GPU was lost (-4)`, no fault address), and the game ran on with nothing drawn. The cause was the replay's, not the level: the level's new textures are uploaded in that dispatch's frame, and the sync moved the dispatch past the chunk that held the GPU copy of its arguments ([An indirect dispatch recorded in a later chunk than its arguments' lookup](../../../docs/reference/rendering.md#an-indirect-dispatch-recorded-in-a-later-chunk-than-its-arguments-lookup-android), fixed in 0.8.13). Rebased onto that fix, on a OnePlus Pad 3 (Adreno 830): 0 of 10 short Kokiri loads lost the GPU at 854x480 and 0 of 10 at 960x540, each logging the re-look-up once; the Fold's 11 runs above lost nothing either (2026-11-17).
+  - **The picture** at 50 % (the handheld floor, 854x480): the same scene, softer in the distance (the canopy, the rocks), every plant, Navi and the lanterns drawn, the HUD and the hint bar as sharp as at 100 %.
+
+  ![Ocarina of Time on a Galaxy Z Fold 8: Kokiri Forest at Render scale 100 % (1440x810)](../../../docs/images/android/ocarina-of-time-kokiri-render-scale-100-galaxy-z-fold-8.jpg)
+  ![The same spot at Render scale 50 % (854x480, the game's handheld floor): softer in the distance, the HUD unchanged](../../../docs/images/android/ocarina-of-time-kokiri-render-scale-50-galaxy-z-fold-8.jpg)
 - **Xclipse 950 (Galaxy Z Flip 7):** lit at about 12 fps, 8.25 GB at most.
 - **Mali (Pixel 9 Pro XL):** lit at about 9 fps with the E5B9G9R9 storage view (#281); the native heap is about 0.4 GB with the dense binding numbers (#276).
 - **Adreno 7xx on older Qualcomm drivers** (the Ayn Odin 2's 740 at V@0676, the Moto Razr Plus 2023's 730 at V@0615): the characters are dark, because the driver rejects `OpConvertUToPtr`, the pointer conversion raw global memory's shaders use. With Turnip T30 the 740 draws them lit at about 9 fps. Raw global memory through a descriptor array ([its entry](../../../docs/reference/rendering.md#raw-global-memory-on-a-driver-that-refuses-opconvertutoptr-android)) builds the shaders on the 740, but their pipelines take 0.63 GB more of the driver's memory, and on the Odin 2 (11.5 GB) the low-memory killer then ended the game at the Kokiri Forest load in 12 of 12 launches. So the profile keeps the array off (`DM_VK_RAW_GMEM_NOPTR=0` in `android_defaults.txt`) and the game runs there as before; `=1` in `env.txt` tries it.

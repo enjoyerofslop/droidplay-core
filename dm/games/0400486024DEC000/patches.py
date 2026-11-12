@@ -49,9 +49,24 @@ def frame_step(ctx):
 # +0x250 the call it was measured at (0 = never). Run against a model of the update (a level moves after the stub asked 5 times up or 2 times down; the load two frames late): a load
 # of 70 at every level climbs from the floor to full size in 9 steps, as does Ocarina's measured 72-80 with a spike every 37 frames and a burst after each change; a load that grows
 # with the pixel count settles at the highest level that fits and tries the one above once per 600 calls; a scene that gets lighter climbs again, a heavier one steps down.
+# Render scale (state +0x10, a float the loader writes from DM_RENDER_SCALE, 0.5 to 1.0; 0 or 1.0 = not set, the paths above): the stub returns the game's own level whose
+# ResolutionReduceScale is nearest that fraction of level 0's, every call, so the update walks there and holds it, whatever the load. The game's levels are the controller's sead
+# list (its sentinel at +0x190, the first node at +0x198, each node's next at +8, the count at +0x1a0; each level's scale sits 8 bytes before its node and its priority 4 before),
+# which the original function walks the same way to price each level. The game sizes its 3D views by the level (its width rounded to its alignment, +0x80), so the picture takes
+# one of its own sizes, not the fraction itself: eight levels in handheld mode (1440x810 to 854x480), ten in console mode (to 0.33334); a slider at 0.75 gives the level nearest
+# 0.5625 (the game note has the table). The rounding keeps
+# every reader of the scale (the upscaler network's input size, the shader ratio) the game's own. A tie keeps the larger picture; no levels (an empty list) gives 0. The level
+# count, not the list alone, ends the walk, as the original's loop does. Checked natively (stub/test.c of the oot-scale session) over the slider's values, a 2-level tie, a count
+# under the list's length, an empty list, and the climb's first call unchanged with the scale at 1.0 (2026-11-12).
 # The function is a leaf: x2..x11, x16, x17 and s0..s2 are free, w0 its only result (the original also stores its predicted cost at +0x18, which only it and the update's own
 # decision read). The update's fingerprint is required too: +0x8 and +0x174 are its fields
 drs_controller = (   # drs_stub.s, assembled with clang; x0 the controller, x16 the state page (the ADRP before it)
+    0xb9401211, 0x340003f1, 0x52091a22, 0x340003a2,                                                   # render scale (state +0x10): 0 or 1.0, the paths below
+    0xf940cc02, 0x91064003, 0xeb03005f, 0x540002e0,                                                   # the level list's first node and sentinel; empty: level 0
+    0x1e270220, 0xbc5f8041, 0x1e210800, 0xb941a004, 0x1e27f002, 0x2a1f03e5, 0x2a1f03e6,               # the scale asked = fraction x level 0's; count; nearest so far
+    0xbc5f8041, 0x1e203821, 0x1e20c021, 0x1e222020, 0x54000065, 0x1e204022, 0x2a0503e6,               # |level's scale - asked| smaller: this level
+    0xf9400442, 0x110004a5, 0xeb03005f, 0x54000060, 0x6b0400bf, 0x54fffe83, 0x2a0603e0, 0xd65f03c0,   # next node, to the sentinel or the count; the nearest level
+    0x2a1f03e0, 0xd65f03c0,                                                                           # no levels: 0
     0xb9404211, 0x35000071, 0x2a1f03e0, 0xd65f03c0,                                                   # off (state +0x40 0): level 0
     0xbd400800, 0xbd401001, 0xb9417402, 0xb941a003, 0x7100005f, 0x1a9fa042, 0x528001e9, 0x6b09005f,   # load, threshold, level (0..15), count
     0x1a89d042, 0xb9420204, 0x11000484, 0xb9020204, 0xb9420605, 0xb9420a06, 0x6b0200bf, 0x1a8617e6,   # calls + 1; calls at this level
@@ -68,7 +83,8 @@ def dynamic_resolution(ctx):
     fs_site(site, '017c40bd')   # ldr s1,[x0,#0x7c]
     start = here(); emit(ADRP(16, here(), FS_STATE_OFF))
     for w in drs_controller: emit(w)
-    fs_put(site, [B(site, start)], 'dynamic resolution level: 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level')
+    fs_put(site, [B(site, start)], 'dynamic resolution level: the game\'s level nearest the host render scale (state +0x10, DM_RENDER_SCALE); else 0 (full resolution), or with state +0x40 (DM_DYNAMIC_RESOLUTION) a climb on the load measured at each level')
+    ctx.render_scale = 1   # the stub takes a render scale (lowering only): the fixups table says RENDER_SCALE 1, and the launchers offer the setting
     ctx.capabilities.add('DYNAMIC_RESOLUTION')
 
 MATCH_FRAME_STEP = {'main': [
@@ -81,7 +97,7 @@ BINDING = [
     {'what': 'frame ratio from the host\'s step', 'now': 'game', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own frame-ratio division, found by its function's fingerprint on any build that keeps the function",
      'checked': 'v131072 main: one function with this fingerprint, the site and its free registers read by disassembly (2026-11-08)'},
-    {'what': 'dynamic resolution: full size, or a climb on the load measured at each level', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
-     'why': "the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION)",
-     'checked': 'v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09)'},
+    {'what': 'dynamic resolution: full size, the level nearest a render scale, or a climb on the load measured at each level', 'now': 'game', 'goal': 'game', 'purpose': 'rendering',
+     'why': "the game's own dynamic-resolution level function and update, found by their functions' fingerprints on any build that keeps both; switchable (DM_DYNAMIC_RESOLUTION, DM_RENDER_SCALE)",
+     'checked': 'v131072 main: one function with each fingerprint (the level function a leaf, x2..x11 / x16 / x17 / s0..s2 free), its callers, the update and the controller fields read by disassembly, the fields read in play (2026-11-08); the climb run natively against a model of the update and in play to full size (2026-11-09); the level list\'s layout read from the original\'s loop and the render-scale pick run natively over the slider\'s values (2026-11-12)'},
 ]

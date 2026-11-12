@@ -325,11 +325,12 @@ def page():
                 lines.append(f'- **function-matched** (`{module}` of builds without CUTS): {r["name"]}: {len(fns)} function{"s" * (len(fns) > 1)}, {ncut} cut{"s" * (ncut > 1)}')
         for module, rules in mfs.items():
             for i, r in enumerate(rules):
-                sites, _, in_others, fs_caps = frame_step_sites(r['stub'], others=r.get('others', {})); n_fs += (len(sites) + sum(map(len, in_others.values()))) * (i == 0)
+                sites, scale, in_others, fs_caps = frame_step_sites(r['stub'], others=r.get('others', {})); n_fs += (len(sites) + sum(map(len, in_others.values()))) * (i == 0)
                 lines.append(f'- **function-matched frame step** (`{module}` of builds without FRAME_STEP): {r["name"]}: a function of {r["size"]:#x} bytes, '
                              + ', '.join(f'`+{off:#x}`' for off, _ in sites) + ' in it'
                              + ''.join(f'; {label}, a function of {r["others"][label]["size"]:#x} bytes, ' + ', '.join(f'`+{off:#x}`' for off, _ in got) + ' in it'
                                        for label, got in in_others.items())
+                             + ('; render scale stub (the launcher offers DM_RENDER_SCALE)' if scale else '')   # as a build-keyed stub's line above
                              + (f'; launcher capabilities: {", ".join(fs_caps)}' if fs_caps else ''))
         sections += lines + ['']
         n_host = sum(len(host.get(b, [])) for b in bids)
