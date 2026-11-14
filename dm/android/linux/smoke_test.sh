@@ -96,7 +96,7 @@ import json, sys
 rows = json.load(open(sys.argv[1]))
 py = [r for r in rows if r["name"].startswith("Python")]
 if not py or not all(r["ok"] for r in py): sys.exit("missing: " + ", ".join(r["name"] for r in py if not r["ok"]))
-print("  found: " + ", ".join(r["name"] for r in py)); print("  missing (installed by hand for now): " + ", ".join(r["name"] for r in rows if not r["ok"]))' "$out/check.json"
+print("  found: " + ", ".join(r["name"] for r in py)); print("  missing (Install tools brings them): " + ", ".join(r["name"] for r in rows if not r["ok"]))' "$out/check.json"
 
 say "HTTPS with the bundled Python and this distribution's certificates"
 "$py" -I -c '

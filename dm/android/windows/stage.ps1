@@ -8,6 +8,7 @@
 #                            Its site-packages load its OpenSSL by full path as each Python starts (_droidplay_dlls.py)
 #   <folder>\core            the tree of HEAD without docs\ and .github\, as a release's source archives have it, with VERSION (the phone app's version)
 #   <folder>\DroidPlay.ico   drawn by the app (--write-icon)
+#   <folder>\licenses        the licences of all of it, and NOTICES.md naming each part, gathered as the AppImage's are (dm\android\licenses\collect.py)
 # then checks it: --check's Python rows, the icon, the native modules under Setup's DLL policy (check_runtime_dlls.py), and the window opened offscreen
 # for a few seconds (-NoLaunch leaves that out: the window reads and writes this user's DroidPlay settings, so leave it out on a computer someone uses).
 # The sizes it prints are the ones the installer has to carry.
@@ -81,6 +82,28 @@ Copy-Item -LiteralPath (Join-Path $PSScriptRoot '_droidplay_dlls.py') -Destinati
 Run $py -m compileall -q -j 0 --invalidation-mode unchecked-hash (Join-Path $runtime 'Lib')   # read-only: no source to check against at each start
 Remove-Item -LiteralPath $env:UV_PYTHON_INSTALL_DIR, $env:UV_PYTHON_BIN_DIR -Recurse -Force -ErrorAction SilentlyContinue
 foreach ($v in 'UV_PYTHON_INSTALL_DIR', 'UV_PYTHON_BIN_DIR', 'UV_PYTHON_PREFERENCE') { Remove-Item "Env:$v" }
+
+# ---- licences: each part's own files, and NOTICES.md naming the parts and their versions. The same texts as the AppImage (dm\android\licenses: the
+# LGPL and GPL that Qt and PySide6 come under, Apache-2.0 for OpenSSL) and the same collector, so Setup no longer ships Qt without its notice
+Say 'licences'
+$lic = Join-Path $Out 'licenses'; New-Item -ItemType Directory -Force $lic | Out-Null
+Copy-Item -LiteralPath (Join-Path $Repo 'LICENSE') -Destination (Join-Path $lic 'DroidPlay-Core-LICENSE.txt')
+Copy-Item -LiteralPath (Join-Path $runtime 'LICENSE.txt') -Destination (Join-Path $lic 'Python-LICENSE.txt')
+Copy-Item -Path (Join-Path $Repo 'dm\android\licenses\*.txt') -Destination $lic
+$collect = Join-Path $Repo 'dm\android\licenses\collect.py'
+Run $py -I $collect pbs $runtime (Join-Path $work 'downloads') (Join-Path $lic 'python-build-standalone')
+$modules = & $py -I $collect modules $site (Join-Path $lic 'python-modules'); if ($LASTEXITCODE) { throw "collect.py modules failed (exit $LASTEXITCODE)" }
+$facts = @{
+    VERSION = $Version; PYTHON_VERSION = (& $py -c "import sys; print(*sys.version_info[:3], sep='.')"); PBS_BUILD = (Get-Content -Raw (Join-Path $runtime 'BUILD')).Trim()
+    OPENSSL_VERSION = (& $py -c "import ssl; print(ssl.OPENSSL_VERSION.split()[1])"); SQLITE_VERSION = (& $py -c "import sqlite3; print(sqlite3.sqlite_version)")
+    PYSIDE_VERSION = (& $py -c "import importlib.metadata as m; print(m.version('PySide6-Essentials'))"); QT_VERSION = (& $py -c "from PySide6.QtCore import qVersion; print(qVersion())")
+    MODULES = ($modules -join "`n")
+}
+$saved = @{}; foreach ($k in $facts.Keys) { $saved[$k] = [Environment]::GetEnvironmentVariable($k); [Environment]::SetEnvironmentVariable($k, [string]$facts[$k]) }
+try { Run $py -I $collect notices (Join-Path $PSScriptRoot 'NOTICES.md') (Join-Path $lic 'NOTICES.md') }
+finally { foreach ($k in $saved.Keys) { [Environment]::SetEnvironmentVariable($k, $saved[$k]) } }   # VERSION is windows-package's own variable too
+if (-not (Select-String -Path (Join-Path $lic 'NOTICES.md') -SimpleMatch 'LGPL-3.0.txt' -Quiet) -or -not (Test-Path (Join-Path $lic 'LGPL-3.0.txt'))) { throw 'the licences are incomplete' }
+Say ('  ' + (@(Get-ChildItem -LiteralPath $lic -Recurse -File).Count) + ' files')
 
 # ---- the icon, then the checks. UTF-8 mode, as the app gives its builds (nxnative's scripts read and write text without naming UTF-8)
 $app = Join-Path $core 'scripts\nxnative_android.py'; $env:PYTHONUTF8 = '1'

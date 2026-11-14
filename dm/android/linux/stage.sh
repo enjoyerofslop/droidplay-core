@@ -132,23 +132,14 @@ say 'licences'
 cp "$repo/LICENSE" "$lic/DroidPlay-Core-LICENSE.txt"
 cp "$rt/lib/python${pyver%.*}/LICENSE.txt" "$lic/Python-LICENSE.txt"
 cp "$repo"/dm/android/licenses/*.txt "$lic/"
-"$py" -I "$here/stage_tools.py" pbs-licenses "$rt" "$cache" "$lic/python-build-standalone"
-modules=''
-for d in "$site"/*.dist-info; do
-    name=$(sed -n 's/^Name: //p' "$d/METADATA" | head -1); ver=$(sed -n 's/^Version: //p' "$d/METADATA" | head -1)
-    lf=$(sed -n 's/^License-Expression: //p;s/^License: //p' "$d/METADATA" | head -1)
-    mkdir -p "$lic/python-modules/$name"
-    if [[ -d $d/licenses ]]; then cp -r "$d/licenses/." "$lic/python-modules/$name/"; else find "$d" -maxdepth 1 -iname '*licen[cs]e*' -exec cp {} "$lic/python-modules/$name/" \;; fi
-    modules+="- $name $ver${lf:+ ($lf)}"$'\n'
-done
+collect=$repo/dm/android/licenses/collect.py   # shared with Windows' stage.ps1, so Setup and the AppImage ship the same notices
+"$py" -I "$collect" pbs "$rt" "$cache" "$lic/python-build-standalone"
+modules=$("$py" -I "$collect" modules "$site" "$lic/python-modules")
 read -r openssl sqlite < <("$py" -c 'import ssl, sqlite3; print(ssl.OPENSSL_VERSION.split()[1], sqlite3.sqlite_version)')
 pyside=$("$py" -c 'import importlib.metadata as m; print(m.version("PySide6-Essentials"))')
 qt=$(QT_QPA_PLATFORM=offscreen "$py" -c 'from PySide6.QtCore import qVersion; print(qVersion())')
 VERSION=$version PYTHON_VERSION=$pyver PBS_BUILD=$(cat "$rt/BUILD") OPENSSL_VERSION=$openssl SQLITE_VERSION=$sqlite QT_VERSION=$qt PYSIDE_VERSION=$pyside \
-MODULES=$modules "$py" -I -c '
-import os, re, sys
-t = open(sys.argv[1], encoding="utf-8").read()
-open(sys.argv[2], "w", encoding="utf-8").write(re.sub(r"@([A-Z_]+)@", lambda m: os.environ[m.group(1)].rstrip(), t))' "$here/NOTICES.md" "$lic/NOTICES.md"
+MODULES=$modules "$py" -I "$collect" notices "$here/NOTICES.md" "$lic/NOTICES.md"
 
 # ---- the AppDir's top: the entry, the desktop entry, the icon (drawn offscreen by the app itself), AppStream metadata. The desktop entry and the icon live
 # under usr/share as on an installed system, where AppStream's validator and AppImage managers look, with the links at the top that AppImage asks for
