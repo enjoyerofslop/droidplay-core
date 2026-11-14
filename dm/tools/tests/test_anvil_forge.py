@@ -1,10 +1,14 @@
 """AnvilNext .forge archives (dm/gfx/tools/anvil_forge.py) and their place in shader_split.py: the LZO1X decoder on hand-made streams of every instruction kind and on damaged ones, a
-synthetic version 27 file read back, its BNSH found through anvil_jobs / anvil_shaders, and the profile's shader_separate pairing every vertex shader. No game files needed."""
+synthetic version 27 file read back, its BNSH found through anvil_jobs / anvil_shaders, synthetic version 25 and 31 files (the Ezio Collection's layout) whose Oodle chunks go to the decoder
+given (a stand-in here: the game's own Oodle runs only in its host), their bare control sections and code areas found by anvil_raw, the Oodle forges counted for the NSP scripts
+(profile_guess.oodle_forges), and the profile's shader_separate pairing every vertex shader. No game files needed."""
+import functools
 import os
 import struct
 import sys
 import tempfile
 import unittest
+import zlib
 from pathlib import Path
 from unittest import mock
 
@@ -14,6 +18,8 @@ import fuzz_shader_split as fz   # its BNSH builder and shader_split with a prof
 ss = fz.ss
 sys.path.insert(0, str(REPO / 'dm/gfx/tools'))
 import anvil_forge as af   # noqa: E402
+sys.path.insert(0, str(REPO / 'dm/games'))
+import profile_guess as pg   # noqa: E402
 
 END = bytes([0x11, 0, 0])   # M4 with distance 0: the end marker
 
@@ -122,7 +128,7 @@ class Forge(unittest.TestCase):
         hdr = 0x20; tab = struct.unpack_from('<q', d, hdr + 0x24)[0]
         def changed(at, fmt, *v): b = bytearray(d); struct.pack_into(fmt, b, at, *v); return bytes(b)
         cases = [
-            ('another version (the Ezio Collection\'s 31)', changed(9, '<I', 31), 'not an AnvilNext forge of version 27'),
+            ('a version the reader doesn\'t know (26)', changed(9, '<I', 26), 'not an AnvilNext forge of version 25, 27, 31'),
             ('a table outside the file', changed(hdr + 0x24, '<q', len(d) + 0x100), 'outside the file'),
             ('a table that points at itself', changed(tab + 0x10, '<q', tab), 'read twice'),
             ('an entry past the end', changed(tab + 0x30 + af.INDEX, '<q', len(d) - 4), 'is outside the file'),
@@ -140,13 +146,132 @@ class Forge(unittest.TestCase):
     def test_split_reads_the_bnsh(self):
         with tempfile.TemporaryDirectory() as t:
             p = os.path.join(t, 'DataNX_Test.forge'); Path(p).write_bytes(forge27(ENTS))
-            other = os.path.join(t, 'Other.forge'); Path(other).write_bytes(b'scimitar\0' + struct.pack('<I', 31) + bytes(0x40))   # Scimitar's layout: not taken
+            other = os.path.join(t, 'Other.forge'); Path(other).write_bytes(b'scimitar\0' + struct.pack('<I', 26) + bytes(0x40))   # a version the reader doesn't know: not taken
             jobs, taken = ss.anvil_jobs([(p, 'DataNX_Test.forge'), (other, 'Other.forge')])
             self.assertEqual(taken, {p})
             found = []
             for path, rel, (kind, ents) in jobs: self.assertEqual(kind, ss.ANVIL); ss.anvil_shaders(path, rel, ents, found)
             self.assertEqual(sorted((w, st) for w, st, _, _ in found), [('/DataNX_Test.forge#MAT_Test#BNSH@0x0#var0', 'ps'), ('/DataNX_Test.forge#MAT_Test#BNSH@0x0#var0', 'vs')])
             self.assertEqual({(ctl, code) for _, _, ctl, code in found}, {fz.VS, fz.PS})
+
+
+def oodle_stream(b):   # a stand-in for the game's Oodle, which only its host runs: the real streams start 8C 0C (version 31) or 8C 0A (25)
+    return b'\x8c\x0c' + zlib.compress(b)
+
+
+def undo(c, n):
+    assert c[:2] == b'\x8c\x0c'; return zlib.decompress(c[2:])
+
+
+def recorded(calls, c, n):   # undo, noting each raw size asked for
+    calls.append(n); return undo(c, n)
+
+
+def oblock(data, typ=6, step=0x8000):
+    """One block of Oodle chunks of at most step bytes each, a chunk that would not get smaller stored as it is"""
+    parts = [data[i:i + step] for i in range(0, len(data), step)]
+    cs = [c if len(c := oodle_stream(p)) < len(p) else p for p in parts]
+    return (af.BLOCK + struct.pack('<HBHHH', 1, typ, 0x8000, 0x8000, len(parts)) + b''.join(struct.pack('<HH', len(p), len(c)) for p, c in zip(parts, cs))
+            + b''.join(struct.pack('<I', 0x12345678) + c for c in cs))
+
+
+def forge31(ents, ver=31):
+    """A version 25 or 31 .forge file of [(name, data)]: as forge27, but the file data header keeps the first table at +0x20, the index entries are 16 bytes, the name records 0xbc, and each
+    entry is its 0x1b8-byte FILEDATA header (the name, the id and size at +0x187) and then the data, 0x800-aligned"""
+    first, fmt, rec, head = af.LAYOUTS[ver]; isz = struct.calcsize(fmt)
+    hdr, tab = 0x416, 0x43e; idx = tab + 0x30; names = idx + isz * len(ents); data = names + rec * len(ents)
+    d = bytearray(data)
+    d[:9] = af.MAGIC; struct.pack_into('<Iq', d, 9, ver, hdr)
+    struct.pack_into('<IIqqIIq', d, hdr, len(ents), 1, 0, -1, 5000, 1, tab); assert first == 0x20
+    struct.pack_into('<IIqqIIqq', d, tab, len(ents), 1, idx, -1, 0, 4999, names, data)
+    for i, (name, e) in enumerate(ents):
+        d += bytes(-len(d) % 0x800)
+        struct.pack_into(fmt, d, idx + isz * i, len(d), 0x100 + i, len(e))
+        r = names + rec * i; struct.pack_into('<IQ', d, r, len(e), 0x5000 + i); d[r + af.NAME_AT:r + af.NAME_AT + len(name)] = name.encode()
+        h = bytearray(head); h[:8] = af.FILEDATA; h[8:8 + len(name)] = name.encode(); struct.pack_into('<II', h, 0x187, 0x100 + i, len(e))
+        d += h + e
+    return bytes(d)
+
+
+def deps(*ids):   # an entry's own table before its blocks: a count, then {u32 id, u32 kind} per entry it refers to
+    return struct.pack('<I', len(ids)) + b''.join(struct.pack('<II', i, 2) for i in ids)
+
+
+# The Ezio Collection's shader entry: no BNSH, each shader a control section directly followed by its code area, at odd offsets among the object's fields; a control magic by chance
+# (not followed by a code area) in between
+STRAY = 0x40 + len(fz.VS[0]) + len(fz.VS[1]) + 3
+SHADERS = (b'\x7a\x3c\xfb\xbc' + b'AC2_Test\0' + bytes(0x40 - 13) + fz.VS[0] + fz.VS[1] + b'\x01\x02\x03' + ss.CTL_MAGIC + bytes(0x7c0) + b'\x05' + fz.PS[0] + fz.PS[1] + bytes(9))
+RES = struct.pack('<H', 1) + struct.pack('<IIH', 0x100, len(SHADERS), 0xffff)   # the resource table: one resource, its id and size
+ENTS31 = [('GlobalMetaFile', bytes(0xcf)), ('AC2_Test', deps() + oblock(RES) + oblock(SHADERS)), ('', deps(0x101, 0x102) + oblock(b'\x05\0' + bytes(40)) + oblock(bytes(0x9000) + b'cell'))]
+
+
+class Oodle(unittest.TestCase):
+    def test_entries_and_blocks(self):
+        for ver, typ in ((31, 6), (25, 4)):
+            ents = [(n, e.replace(struct.pack('<HB', 1, 6), struct.pack('<HB', 1, typ))) for n, e in ENTS31]   # the block type (no other place has these bytes)
+            d = forge31(ents, ver)
+            with self.subTest(ver):
+                self.assertEqual(af.version(d[:13]), ver)
+                es = af.entries(d)
+                self.assertEqual([n for _, _, n in es], ['GlobalMetaFile', 'AC2_Test', '0x102'])   # an entry without a name: its id
+                self.assertTrue(all(d[off - 0x1b8:off - 0x1b0] == af.FILEDATA for off, _, _ in es))   # the offset after each entry's own header, the size the index gives
+                self.assertEqual([size for _, size, _ in es], [len(e) for _, e in ents])
+                calls = []; dec = functools.partial(recorded, calls)
+                self.assertEqual(af.read(d, *es[0][:2], decode=dec), [])
+                self.assertEqual(af.read(d, *es[1][:2], decode=dec), [RES, SHADERS])
+                self.assertEqual(af.read(d, *es[2][:2], decode=dec), [b'\x05\0' + bytes(40), bytes(0x9000) + b'cell'])
+                self.assertEqual(calls, [len(SHADERS), 42, 0x8000, 0x1004])   # only the chunks stored smaller (not the 12-byte table), each with its raw size
+                self.assertTrue(af.oodle(d))
+        self.assertFalse(af.oodle(forge27(ENTS)))
+
+    def test_damaged(self):
+        d = forge31(ENTS31)
+        es = af.entries(d); off, size, _ = es[1]
+        with self.assertRaises(ValueError) as e: af.read(d, off, size, 'AC2_Test')
+        self.assertIn('no decoder', str(e.exception))
+        with self.assertRaises(ValueError) as e: af.read(d, off, size, 'AC2_Test', lambda c, n: bytes(n - 1))
+        self.assertIn('decoded to', str(e.exception))
+        idx = 0x43e + 0x30
+        def changed(at, fmt, *v): b = bytearray(d); struct.pack_into(fmt, b, at, *v); return bytes(b)
+        cases = [('an entry without its FILEDATA header', changed(es[1][0] - 0x1b8, '<8s', b'FILEDAT\0'), 'FILEDATA header'),
+                 ('an entry whose data runs past the end', changed(idx + 16 * 2 + 12, '<I', len(d) - es[2][0] + 1), 'is outside the file'),
+                 ('the first table read where version 27 keeps it', changed(0x416 + 0x20, '<q', len(d)), 'outside the file')]
+        for what, b, msg in cases:
+            with self.subTest(what), self.assertRaises(ValueError) as e: af.entries(b, 'x.forge')
+            self.assertIn(msg, str(e.exception))
+
+    def test_split_reads_the_bare_shaders(self):
+        with tempfile.TemporaryDirectory() as t:
+            p = os.path.join(t, 'DataNX_Test.forge'); Path(p).write_bytes(forge31(ENTS31))
+            jobs, taken = ss.anvil_jobs([(p, 'DataNX_Test.forge')])
+            self.assertEqual(taken, {p})
+            found = []
+            with mock.patch.object(ss, 'oodle', undo):   # the game's decoder in the Mac host (or the phone's cache) in a real split
+                for path, rel, (kind, ents) in jobs: self.assertEqual(kind, ss.ANVIL); ss.anvil_shaders(path, rel, ents, found)
+            vs = 0x40; ps = STRAY + 4 + 0x7c0 + 1
+            self.assertEqual(sorted((w, st) for w, st, _, _ in found), [(f'/DataNX_Test.forge#AC2_Test#RAW@{ps:#x}', 'ps'), (f'/DataNX_Test.forge#AC2_Test#RAW@{vs:#x}', 'vs')])
+            self.assertEqual({(ctl, code) for _, _, ctl, code in found}, {fz.VS, fz.PS})
+        self.assertEqual(ss.anvil_raw(SHADERS[:-9 - len(fz.PS[1]) // 2], 'x'), [('x#RAW@0x40', 'vs', *fz.VS)])   # a code area cut short: not a shader
+
+    def test_main_read_when_the_forges_are_oodle(self):   # anvil_main: AC2's main embeds the same objects, a compute shader among them with no code header
+        cs_ctl = bytearray(0x880); cs_ctl[:4] = ss.CTL_MAGIC; code = bytes.fromhex('f00720e2001c0000') * 4
+        struct.pack_into('<I', cs_ctl, 0x20, 0x880); struct.pack_into('<I', cs_ctl, 0x704, len(code)); struct.pack_into('<3I', cs_ctl, 0x748, 8, 8, 1)
+        img = bytes(0x101) + bytes(cs_ctl) + code + bytes(3) + fz.VS[0] + fz.VS[1]
+        with tempfile.TemporaryDirectory() as t:
+            ez, rebel = os.path.join(t, 'a.forge'), os.path.join(t, 'b.forge'); Path(ez).write_bytes(forge31(ENTS31, 25)); Path(rebel).write_bytes(forge27(ENTS))
+            got = ss.anvil_main(img, 'main', [rebel, ez])
+            self.assertEqual([(w, st) for w, st, _, _ in got], [('main#RAW@0x101', 'cs'), (f'main#RAW@{0x101 + 0x880 + len(code) + 3:#x}', 'vs')])
+            self.assertEqual(ss.anvil_main(img, 'main', [rebel]), [])   # the Rebel Collection's main: left to the other readers, as before
+
+    def test_oodle_forges_counted_for_the_nsp_scripts(self):   # profile_guess.build_sources: oodle_packs, so the split gets the game's decoder (the Mac host, or the phone on Android)
+        with tempfile.TemporaryDirectory() as t:
+            for name, b in (('a/DataNX.forge', forge31(ENTS31)), ('b/DataNX.forge', forge31(ENTS31, 25)), ('c/DataNX.forge', forge27(ENTS)), ('d/Bad.forge', forge31(ENTS31)[:0x500]),
+                            ('e/Other.forge', b'scimitar\0' + struct.pack('<I', 26) + bytes(0x40)), ('f/DataNX.bin', forge31(ENTS31))):
+                Path(t, name).parent.mkdir(); Path(t, name).write_bytes(b)
+            self.assertEqual(pg.oodle_forges(t), 2)   # not the LZO1X one, a cut one, an unknown version or another extension
+        on, why = pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0, oodle_forge=2)['oodle_packs']
+        self.assertTrue(on); self.assertIn('2 AnvilNext .forge archive(s) of Oodle blocks', why)
+        self.assertFalse(pg.shader_sources({'nvnBootstrapLoader'}, 0, [], 0, 0)['oodle_packs'][0])
 
 
 class Separate(unittest.TestCase):

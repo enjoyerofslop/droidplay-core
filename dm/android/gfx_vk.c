@@ -51,6 +51,7 @@
 #include "apipe_rule.h"   // which draws are left out while their new pipeline builds in the background (gfx_vk_draw.inc apipe_ok)
 #include "wb_promote.h"   // whether a read of a draw's pending storage buffer write takes its copy on the GPU after a barrier (gfx_vk_draw.inc wb_promote)
 #include "tex_aspect.h"   // which aspect of its image a texture slot reads: stencil mode (gfx_vk_draw.inc tex_aspect)
+#include "tbuf_rows.h"   // a buffer texture read through a 2D slot as rows of 16384 texels (vt_create, vt_upload_, gfx_vk_draw.inc tex_rows_slot)
 #include "rd_home.h"   // the home ranges of storage buffers draws under rasterizer discard write (gfx_vk_draw.inc rd_bind_w)
 #include "stream_clip.h"   // where an indexed draw's stream is looked up to among forwardable write-backs (gfx_vk_draw.inc stream_clip)
 #include "nvn_fstep.h"   // FSTEP_FIT: the performance hint's target (hint_frame)
@@ -1434,11 +1435,20 @@ static vtex *vt_create(const tex_t *t) {
     uint32_t m = 0; uint8_t swz[4];
     if (nvn_hm_get(&g_img_refused, &t->serial)) return NULL;
     if (!nvn_fmt_to_mtl(t->d.format, &m, swz) || !m) { RED_ONCE(10, "texture format %#x has no Vulkan counterpart yet (first case ser=%llu)", t->d.format, (unsigned long long)t->serial); return NULL; }
-    if (t->d.target == NVN_TEXTURE_TARGET_BUFFER) { RED_ONCE(11, "buffer textures are not on Vulkan yet"); return NULL; }
+    // a buffer texture gets an image only as rows (tbuf_rows.h), asked for by a 2D slot that may read one so (vt_get_s): its other reads are texel buffers (gfx_vk_draw.inc tbuf_view)
+    int rows = t->d.target == NVN_TEXTURE_TARGET_BUFFER; uint32_t rw = 0, rh = 0;
+    if (rows) { int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
+        if (bpb <= 0 || bw != 1 || bh != 1 || !tbr_shape(t->d.width, g_vk.props.limits.maxImageDimension2D, &rw, &rh)) {
+            RED_ONCE(11, "buffer texture of %u elements of format %#x has no rows of %u texels on this GPU (largest 2D image %u): the slot reads 0", (unsigned)t->d.width, t->d.format, TBR_ROW, g_vk.props.limits.maxImageDimension2D); return NULL; } }
     VkFormat nf = vk_of_mtl(m), f = nf; int conv = CONV_NONE, px = 0;
     if (nf == VK_FORMAT_UNDEFINED) { RED_ONCE(12, "Metal format %u not mapped to Vulkan (NVN format %#x)", m, t->d.format); return NULL; }
     if (nf >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && nf <= VK_FORMAT_BC7_SRGB_BLOCK && !g_vk.has_bc) f = bc_target(nf, &conv, &px);
-    else if (!is_linear(t) && !(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && t->d.samples <= 1) { VkFormat h = n16_half(nf, &conv, &px); if (h) f = h; }   // not a storage image: shaders declare those formats
+    else if (!rows && !is_linear(t) && !(t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && t->d.samples <= 1) { VkFormat h = n16_half(nf, &conv, &px); if (h) f = h; }   // not a storage image: shaders declare those formats (rows: fetched, their bits as they are)
+    // rows of 32-bit integers are held as the float format of their size: the translator declares every texture float, and KTGL's light and decal lists (32-bit integer buffer
+    // textures) are fetched through such a slot and their bits taken back from the result (nvn_mtl.m tbuf_view_format). A float image hands its bits over as they are; an
+    // integer image read through a float declaration is undefined in Vulkan
+    if (rows) switch (f) { case VK_FORMAT_R32_UINT: case VK_FORMAT_R32_SINT: f = VK_FORMAT_R32_SFLOAT; break; case VK_FORMAT_R32G32_UINT: case VK_FORMAT_R32G32_SINT: f = VK_FORMAT_R32G32_SFLOAT; break;
+                           case VK_FORMAT_R32G32B32A32_UINT: case VK_FORMAT_R32G32B32A32_SINT: f = VK_FORMAT_R32G32B32A32_SFLOAT; break; default: break; }
     if (nf >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && nf <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK && !g_vk.has_astc) { RED_ONCE(13, "ASTC texture on a GPU without ASTC: not decoded yet"); return NULL; }
     VkFormatProperties fp; vkGetPhysicalDeviceFormatProperties(g_vk.pd, f, &fp);
     VkFormatFeatureFlags ff = fp.optimalTilingFeatures;
@@ -1447,6 +1457,7 @@ static vtex *vt_create(const tex_t *t) {
         if (f2.optimalTilingFeatures & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) { f = VK_FORMAT_D24_UNORM_S8_UINT; ff = f2.optimalTilingFeatures; }
     }
     if (!(ff & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) && !(ff & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT)) { RED_ONCE(14, "format %d not usable as an image on this GPU (NVN format %#x)", f, t->d.format); return NULL; }
+    if (rows && (!(ff & VK_FORMAT_FEATURE_TRANSFER_DST_BIT) || !(ff & VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT))) { RED_ONCE(197, "buffer texture format %d (NVN %#x) can't be filled and sampled as an image here: its rows read 0", f, t->d.format); return NULL; }
     vtex *v = calloc(1, sizeof *v); if (!v) return NULL;
     v->serial = t->serial; v->pool = t->pool; v->store = t->mem; v->desc = t->d; v->fmt = f; v->nvfmt = nf; v->conv = conv; v->px = px; v->aspect = aspect_of(f);
     v->rbx = (uint8_t)rb16_shift(m, swz);   // the swizzle's red / blue exchange: in the bits, so what the GPU draws into the image reads as what it uploads
@@ -1458,6 +1469,9 @@ static vtex *vt_create(const tex_t *t) {
     v->type = t->d.target == 0 || t->d.target == 3 ? VK_IMAGE_TYPE_1D : t->d.target == 2 ? VK_IMAGE_TYPE_3D : VK_IMAGE_TYPE_2D;
     v->w = t->d.width ? t->d.width : 1; v->h = v->type == VK_IMAGE_TYPE_1D ? 1 : (t->d.height ? t->d.height : 1); v->d = v->type == VK_IMAGE_TYPE_3D ? (t->d.depth ? t->d.depth : 1) : 1;
     v->layers = tex_layers(&t->d); v->levels = t->d.levels ? t->d.levels : 1;
+    if (rows) { v->type = VK_IMAGE_TYPE_2D; v->w = rw; v->h = rh; v->d = 1; v->layers = 1; v->levels = 1;
+        static int nl; if (nl++ < 4) LOG("[vk] buffer texture read through a 2D slot: an image of %ux%u rows of %u texels (ser=%llu, %u elements of format %#x; vt_get_s, tbuf_rows.h)", rw, rh, TBR_ROW,
+                                         (unsigned long long)t->serial, (unsigned)t->d.width, t->d.format); }
     v->samples = t->d.samples > 1 ? (VkSampleCountFlagBits)t->d.samples : VK_SAMPLE_COUNT_1_BIT;
     VkImageUsageFlags u = 0;
     if (ff & VK_FORMAT_FEATURE_TRANSFER_SRC_BIT) u |= VK_IMAGE_USAGE_TRANSFER_SRC_BIT;
@@ -1466,10 +1480,11 @@ static vtex *vt_create(const tex_t *t) {
     if (ff & VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT;
     if (ff & VK_FORMAT_FEATURE_DEPTH_STENCIL_ATTACHMENT_BIT) u |= VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT;
     if ((t->d.flags & NVN_TEXTURE_FLAGS_IMAGE) && (ff & VK_FORMAT_FEATURE_STORAGE_IMAGE_BIT)) u |= VK_IMAGE_USAGE_STORAGE_BIT;
+    if (rows) u &= VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT | VK_IMAGE_USAGE_SAMPLED_BIT;   // only read: written by its uploads alone (vt_get_s keeps it from targets and image slots)
     v->usage = u;   // STORAGE added later if the texture is bound to an image slot all the same (vt_storage_up)
     // an uncompressed colour image may be viewed in another format of its texel size (NVN texture views: sRGB over UNORM and the like): mutable. So may a BC image
     // decoded on the CPU, which holds uncompressed texels: a BC7_SRGB view of a BC7 texture is its RGBA8 image viewed as RGBA8_SRGB (gfx_vk_draw.inc view_format)
-    int mut = v->aspect == VK_IMAGE_ASPECT_COLOR_BIT && !(f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK);
+    int mut = !rows && v->aspect == VK_IMAGE_ASPECT_COLOR_BIT && !(f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK);
     // MUTABLE_FORMAT alone lets a view take any format of the texel size, and Adreno then leaves the image without UBWC, its framebuffer compression: every target
     // stored and loaded uncompressed. nx2android (github.com/shirai91/nx2android, a1b4f54) found that a format list keeps it: Super Mario Bros. Wonder's GPU time
     // 11.8 -> 8.8 ms a frame on an Adreno 830. A colour image that is not a storage image now lists its format and its sRGB twin (MUTABLE_FORMAT only with a twin);
@@ -1624,7 +1639,8 @@ static int vt_upload_(vtex *v, const tex_t *t, int track) {
                 tmp = realloc(tmp, pitch * rows * z);
                 if (nvn_deswizzle(&t->d, l, y, t->mem, tmp, pitch)) { RED_ONCE(21, "deswizzle failed format %#x target %d", t->d.format, t->d.target); free(tmp); return 0; }
                 for (uint32_t k = 0; k < z; k++) bc_decode(v->conv, tmp + k * pitch * rows, pitch, w, h, s.p + off + (size_t)k * w * v->px * h, (size_t)w * v->px, v->px);
-            } else if (is_linear(t)) {   // linear: block rows at the texture's stride (its layer's bytes over its block rows, as GetStorageSize gives them)
+            } else if (t->d.target == NVN_TEXTURE_TARGET_BUFFER) tbr_fill(s.p + off, out, t->mem, t->L.size);   // rows of 16384 texels (vt_create): the buffer's bytes as they lie
+            else if (is_linear(t)) {   // linear: block rows at the texture's stride (its layer's bytes over its block rows, as GetStorageSize gives them)
                 if (l || z > 1) { RED_ONCE(22, "linear texture with levels or depth: only level 0 of a 2D one is read"); off += out; continue; }
                 size_t srow = t->L.layer_size / (rows ? rows : 1); const uint8_t *src = t->mem + (size_t)y * t->L.layer_size;
                 if (srow < pitch) {   // a stride shorter than the row (Skyrim 1.1.404's 1280x720 RGBA8 of 3840-byte rows): each row runs on into the next one's bytes, as the GPU reads it,
@@ -1809,15 +1825,22 @@ static int storage_first_use(const tex_t *t) {
 }
 // The image of a texture: made at first use; a texture whose content lives in guest memory is uploaded, and uploaded again when its pages were written
 static void ev_made(vtex *v);   // gfx_vk_evict.inc
-static vtex *vt_get_(const tex_t *ct) {
+// DM_VK_TBUF_ROWS=0 (env.txt): a buffer texture in a 2D texture slot reads 0, as before it was read as rows (gfx_vk_draw.inc tex_rows_slot; the A/B of that alone)
+static int tbuf_rows_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TBUF_ROWS"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_TBUF_ROWS=0: a buffer texture in a 2D texture slot reads 0"); } return v; }
+// rows: the caller is a 2D texture slot that may read a buffer texture as rows (vt_get_s); any other lookup of a buffer texture has no image (its reads are texel buffers)
+static vtex *vt_get_(const tex_t *ct, int rows) {
     tex_t *t = (tex_t *)ct;
     if (!t || !t->serial || !vkb_up()) return NULL;
     if (t->magic != MAGIC('T', 'E', 'X', 0)) { RED_ONCE(30, "texture object no longer valid (magic %#x)", t->magic); return NULL; }
+    int tbuf = t->d.target == NVN_TEXTURE_TARGET_BUFFER;
+    if (tbuf && !rows) { RED_ONCE(198, "a buffer texture where an image is needed (a texture slot of another type, an image slot, a target, a copy or a texture pool read): it reads 0, and is not drawn into"); return NULL; }
+    // a buffer texture's ID can outlive its pool (Unreal Engine 5.4 keeps them, nvn_mtl.m tbuf_as_2d): its rows are read from guest memory, which must still be mapped
+    if (tbuf && (!t->mem || !mtl_addr((uint64_t)(uintptr_t)t->mem, t->L.size, NULL, NULL))) return NULL;
     vtex *v = nvn_hm_get(&g_tex, &t->serial);
     if (v && (v->store != t->mem || !desc_same(&v->desc, &t->d))) {
         static int n; if (n++ < 8) LOG("[vk] texture ser=%llu met again with %s: made anew (storage %p, now %p)", (unsigned long long)t->serial, v->store != t->mem ? "other storage" : "another description", (const void *)v->store, (const void *)t->mem);
         nvn_hm_del(&g_tex, &t->serial); g_vt_gen++; vt_unref(v); v = NULL; }
-    int pkg = is_packaged(t), took = 0;
+    int pkg = is_packaged(t) || tbuf, took = 0;   // rows: from guest memory, again when its pages change, as a linear texture (vt_upload_)
     if (!v && !pkg && (took = storage_first_use(t))) pkg = 1;
     if (v && v->pkg) {
         uint64_t now = nvn_dirty_now();
@@ -1843,7 +1866,9 @@ static vtex *vt_get_(const tex_t *ct) {
     vt_ref(t->serial, v);
     return v;
 }
-static vtex *vt_get(const tex_t *ct) { vtex *v = vt_get_(ct); if (v) v->last_present = atomic_load(&g_presents); return v; }   // its last lookup, for eviction (gfx_vk_evict.inc)
+static vtex *vt_get(const tex_t *ct) { vtex *v = vt_get_(ct, 0); if (v) v->last_present = atomic_load(&g_presents); return v; }   // its last lookup, for eviction (gfx_vk_evict.inc)
+// A texture slot's lookup (gfx_vk_draw.inc stage_textures, stage_set): rows, the slot may read a buffer texture as rows of 16384 texels (tex_rows_slot), which it then gets
+static vtex *vt_get_s(const tex_t *ct, int rows) { vtex *v = vt_get_(ct, rows); if (v) v->last_present = atomic_load(&g_presents); return v; }
 // A lookup for what the GPU writes (a pass's target, a copy's or a clear's destination): such an image's content is the GPU's from then on, not its storage's, so it is never evicted
 // A texture taken from its storage at its first use (storage_first_use) that the GPU then writes holds what the GPU drew, not what the storage holds: it becomes a GPU texture, so a CPU write
 // beside it no longer uploads the storage over the drawing (nvn_mtl.m cpu_unc_drop)
