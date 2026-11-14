@@ -1,10 +1,7 @@
-# stage.sh's steps that are easier in Python, run on the Python being staged (3.14: tarfile reads zstd):
+# stage.sh's steps that are easier in Python, run on the Python being staged (the licences of PBS and the modules: dm/android/licenses/collect.py):
 #   stage_tools.py debs <xcb_libs.tsv> <download folder> <lib folder> <licence folder>
 #       the packages the list names, from Ubuntu's archive, checked against their SHA-256; their libraries (by soname) into <lib folder>, their copyright files
 #       into <licence folder>
-#   stage_tools.py pbs-licenses <runtime> <download folder> <licence folder>
-#       the licence files of python-build-standalone's build of this runtime: its install archive, which uv installs, has CPython's LICENSE.txt but not the
-#       licences of the libraries built into it (OpenSSL, SQLite, libffi, XZ, zstd...). Its "full" archive of the same build has them, under python/licenses
 #   stage_tools.py elf-check <folder> <highest GLIBC_ version> <highest GLIBCXX_ version>
 #       every ELF file under <folder>: the glibc and libstdc++ symbol versions it needs at most those, and each library it needs either in <folder> or one the
 #       system provides (HOST below); readelf from binutils reads them
@@ -20,7 +17,6 @@ import urllib.request
 from pathlib import Path
 
 UBUNTU = 'https://archive.ubuntu.com/ubuntu/'
-PBS = 'https://github.com/astral-sh/python-build-standalone/releases/download/'
 # What DroidPlay takes from the system, as the README says: glibc and libstdc++ (GCC 11's or newer), OpenGL/EGL through libglvnd, X11 and Wayland's client
 # libraries, fontconfig and FreeType, GLib, D-Bus, zlib and zstd: on AppImage's exclude list or on every desktop. GTK 3's stack only loads with
 # Qt's GTK theme plugin, on a desktop that asks for it and so has GTK
@@ -80,26 +76,6 @@ def debs(tsv, cache, libdir, licdir):
         print(f'  {pkg}: {", ".join(got)}' + ('' if (licdir / f'{pkg}.copyright').is_file() else ' (no copyright file of its own)'))
 
 
-def pbs_licenses(runtime, cache, licdir):
-    runtime, licdir = Path(runtime), Path(licdir)
-    build = (runtime / 'BUILD').read_text(encoding='utf-8').strip()   # python-build-standalone's release, which uv installed from
-    ver = '.'.join(map(str, sys.version_info[:3]))
-    name = f'cpython-{ver}+{build}-x86_64-unknown-linux-gnu-pgo+lto-full.tar.zst'
-    sums = fetch(f'{PBS}{build}/SHA256SUMS', Path(cache) / f'pbs-{build}-SHA256SUMS').read_text(encoding='utf-8')
-    sha = next((ln.split()[0] for ln in sums.splitlines() if ln.split()[-1:] == [name]), None)
-    if not sha: sys.exit(f'{name} is not in python-build-standalone {build}\'s SHA256SUMS')
-    arc = fetch(f'{PBS}{build}/{name.replace("+", "%2B")}', Path(cache) / name, sha)
-    licdir.mkdir(parents=True, exist_ok=True); names = []
-    with tarfile.open(arc, 'r|zst') as t:   # read as a stream: only python/licenses is wanted out of 115 MB
-        for m in t:
-            if m.isfile() and m.name.startswith('python/licenses/'):
-                src = t.extractfile(m)
-                assert src is not None
-                (licdir / Path(m.name).name).write_bytes(src.read()); names.append(Path(m.name).name)
-    if not names: sys.exit(f'{name} has no python/licenses')
-    print(f'  python-build-standalone {build}: {", ".join(sorted(names))}')
-
-
 def readelf(path):   # (sonames it needs, the symbol versions it needs), from readelf
     out = subprocess.run(['readelf', '-d', '-V', '-W', str(path)], capture_output=True, text=True, errors='replace').stdout
     return re.findall(r'\(NEEDED\)\s+Shared library: \[([^\]]+)\]', out), set(re.findall(r'Name: (GLIBC(?:XX)?_[0-9.]+)', out))
@@ -135,6 +111,5 @@ def elf_check(root, glibc, glibcxx):
 if __name__ == '__main__':
     cmd, *a = sys.argv[1:]
     if cmd == 'debs': debs(*a)
-    elif cmd == 'pbs-licenses': pbs_licenses(*a)
     elif cmd == 'elf-check': elf_check(*a)
     else: sys.exit(f'unknown command {cmd}')

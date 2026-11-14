@@ -68,7 +68,7 @@ open-source Turnip driver (on a Samsung Xclipse GPU, a build of Mesa's RADV for 
 
 - **A computer to build on:** a Windows 10 (1809 or later) or Windows 11 PC, 64-bit, for DroidPlay for Windows; or a Mac with Apple silicon and macOS 15 or
   later for [DroidPlay on a Mac](https://github.com/enjoyerofslop/droidplay); or, in preview, an x86_64 Linux with glibc 2.34 or later (Ubuntu 22.04,
-  Debian 12, Fedora 35, SteamOS 3 or newer) for [DroidPlay for Linux](#on-linux-preview). On Windows, DroidPlay and the tools it installs take about 6 GB, and each game's
+  Debian 12, Fedora 35, SteamOS 3 or newer) for [DroidPlay for Linux](#on-linux-preview). On Windows and Linux, DroidPlay and the tools it installs take about 6 GB, and each game's
   build needs room besides, on the drive with the game's files: about the game's size for its extracted files, plus what its shaders need while they translate,
   up to about 20 GB for most games and 90 GB or more for one with over 100,000 shaders, such as Pokémon Pokopia ([Free space](docs/android.md#free-space)).
 - **An Android phone or handheld** with Android 10 or later ([the devices tested](#phones-and-handhelds)), a USB cable (or wireless debugging), and room for
@@ -101,9 +101,11 @@ Every page of the app, uninstalling, and running it from source: [DroidPlay for 
 **DroidPlay for Linux** is the same app as an AppImage, `DroidPlay-<version>-x86_64.AppImage`, for x86_64 Linux with glibc 2.34 or later. It's in preview:
 it isn't on the release page yet, and testers get it from the `linux-package` workflow's **DroidPlay-AppImage** artifact (with its `.sha256`), or build it
 with `dm/android/linux/stage.sh`. Make it executable (`chmod +x`) and open it. The first start of a version prepares it in
-`~/.local/share/DroidPlay/<version>` (about 720 MB, a few seconds); later starts are quick. Get started works as on Windows, except **Install tools**: on
-Linux the JDK, the .NET SDK 10 and the Android SDK are installed by hand for now, and **Settings** lists what's missing and how to get it. Where FUSE is
-missing, `--appimage-extract-and-run` opens it. More: [DroidPlay for Linux](docs/android.md#droidplay-for-linux-preview).
+`~/.local/share/DroidPlay/<version>` (about 720 MB, a few seconds); later starts are quick. Get started works as on Windows: **Install tools** downloads
+Java, .NET and the Android SDK into `~/.local/share/nxnative/android/tools` (about 1.5 GB, 4 GB on disk), with no `sudo`; a phone that Linux won't let
+DroidPlay use over USB shows as **USB access needed**, and **How to connect a phone** says what to install. **Settings** › **Add to the applications
+menu** gives it a menu entry. Where FUSE is missing, `--appimage-extract-and-run` opens it. More:
+[DroidPlay for Linux](docs/android.md#droidplay-for-linux-preview).
 
 ### On a Mac or from the command line
 

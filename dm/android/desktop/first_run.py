@@ -1,4 +1,4 @@
-"""DroidPlay for Windows' "Get started" checklist (scripts/nxnative_android.py's SetupPage): its four steps, worked out each time from what this computer has now
+"""DroidPlay's "Get started" checklist (Windows and Linux) (scripts/nxnative_android.py's SetupPage): its four steps, worked out each time from what this computer has now
 (the keys file, --check's rows, adb's devices, the game folders) and never stored, so a step can't say done when it no longer is. And the one bar Install tools
 shows across all its parts, from --setup's events. Qt-free, so dm/tools/tests/test_android_desktop.py tests it without PySide6."""
 import functools
@@ -9,7 +9,7 @@ from pathlib import Path
 
 import phone_guide   # this folder's: the phone's battery and free space
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
-from phone_id import wifi   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/tools, put on the path above: a serial that is a Wi-Fi connection)
+from phone_id import NO_PERMISSIONS, wifi   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/tools, put on the path above: a serial that is a Wi-Fi connection)
 
 TODO, WORKING, WAITING, DONE, PROBLEM = 'todo', 'working', 'waiting', 'done', 'problem'
 WARN = '#f5b82e'   # the app's amber, for a warning inside a done step's text
@@ -18,7 +18,7 @@ SETUP_TITLE = 'Set up this computer'   # the Builds page's title for --setup, fr
 INTRO = ('<b>Setting up takes about half an hour the first time:</b> the tools download once (1.5 GB), and the first build of a game takes about 10–20 minutes. '
          'After that, a new game takes about 10 minutes, and playing again takes seconds.')
 KEYS_INTRO = ('DroidPlay reads your games with the keys from your own Switch, a file called <b>prod.keys</b> (Lockpick_RCM makes it). '
-              "They stay on this PC. A Switch 2 game's .nup or dump folder doesn't need them.")
+              "They stay on this computer. A Switch 2 game's .nup or dump folder doesn't need them.")
 TOOLS_INTRO = ("DroidPlay builds games with Microsoft's Java and .NET and Google's Android SDK. They download once: about 1.5 GB, 5 GB on disk.")
 PHONE_INTRO = 'Plug in your Android phone or handheld with a USB cable.'
 GAME_INTRO = ("Pick the folder with a game's NSP or XCI files (the base game, and its update if you have it), or the folder that holds a Switch 2 game's "
@@ -74,24 +74,25 @@ def missing_parts(rows):
     return [part for part, has in PARTS if any(has(n) for n in bad)]
 
 
-def tools_step(rows, windows, run=None):
-    """rows: --check's, or None while it runs. run: ('running', fraction, text) while --setup runs, ('failed', message) after it stopped, else None"""
+def tools_step(rows, can_install, run=None):
+    """rows: --check's, or None while it runs. can_install: --setup installs on this computer (Windows, x86_64 Linux: host_setup.unsupported); elsewhere Settings
+    says how to get each part. run: ('running', fraction, text) while --setup runs, ('failed', message) after it stopped, else None"""
     title = 'Tools for building'
     if run and run[0] == 'running': return Step('tools', title, WORKING, esc(run[2]), fraction=run[1])
-    if rows is None: return Step('tools', title, WORKING, 'Looking at what this PC has…')
+    if rows is None: return Step('tools', title, WORKING, 'Looking at what this computer has…')
     bad = [r for r in rows if not r['ok']]
     check = next((r for r in bad if r['name'] == 'check'), None)
-    if check: return Step('tools', title, PROBLEM, f"DroidPlay couldn't look at what this PC has: {esc(check['detail'])}", 'Look again')
+    if check: return Step('tools', title, PROBLEM, f"DroidPlay couldn't look at what this computer has: {esc(check['detail'])}", 'Look again')
     python = [r['name'].split()[-1] for r in bad if r['name'].startswith('Python')]
     parts = missing_parts(rows)
     if run and run[0] == 'failed' and parts:
-        return Step('tools', title, PROBLEM, f'Installing the tools stopped: {esc(run[1])}', 'Try again' if windows else '')
+        return Step('tools', title, PROBLEM, f'Installing the tools stopped: {esc(run[1])}', 'Try again' if can_install else '')
     if parts:
         what = TOOLS_INTRO if len(parts) == len(PARTS) else f"{TOOLS_INTRO.split('. ')[0]}. Still to install: {', '.join(parts)}."
-        return Step('tools', title, TODO, what if windows else f"{what} Settings says how to get each one.", 'Install tools…' if windows else 'Open Settings')
+        return Step('tools', title, TODO, what if can_install else f"{what} Settings says how to get each one.", 'Install tools…' if can_install else 'Open Settings')
     if python:   # the app's own: Setup and uv run bring them, so only a Python picked by hand misses them
         return Step('tools', title, PROBLEM, f"The Python that runs DroidPlay doesn't have {esc(', '.join(python))}. Settings says how to get them.", 'Open Settings')
-    return Step('tools', title, DONE, 'Java, .NET and the Android SDK are on this PC.')
+    return Step('tools', title, DONE, 'Java, .NET and the Android SDK are on this computer.')
 
 
 def phone_name(d): return d.get('name') or d.get('model') or ''
@@ -110,14 +111,17 @@ def phone_step(devs, adb, picked=None, seen=False):
         d = ready[0]; low = phone_guide.battery_warning(d)
         return Step('phone', title, DONE, f'<b>{esc(phone_name(d) or d["serial"])}</b>' + (f' · Android {esc(d["android"])}' if d.get('android') else '') +
                     phone_guide.readout(d) + (f'<br><span style="color:{WARN}">⚠ {esc(low)}</span>' if low else ''))
-    for d in devs:   # adb lists a phone that hasn't allowed this PC with no model or name: "Your phone" then
+    for d in devs:   # adb lists a phone that hasn't allowed this computer with no model or name: "Your phone" then
         name = esc(phone_name(d) or 'Your phone')
         if d['state'] in ('unauthorized', 'authorizing'):
             return Step('phone', title, WAITING, f'<b>{name}</b> is waiting: unlock it and tap <b>Allow</b> on "Allow USB debugging?"', 'Set up my phone…')
+        if d['state'] == NO_PERMISSIONS:   # Linux: adb sees it on USB but may not open it, for want of a udev rule giving it to this user
+            return Step('phone', title, PROBLEM, f"<b>{name}</b> is plugged in, but Linux doesn't let DroidPlay use it over USB yet (adb says \"no permissions\"). "
+                        '<b>Set up my phone…</b> says what to install for it.', 'Set up my phone…')
         if d['state'] == 'offline':
             return Step('phone', title, PROBLEM, f"<b>{name}</b> isn't answering over Wi-Fi: wake it, and check that Wireless debugging is still on." if wifi(d['serial'])
                         else f"<b>{name}</b> isn't answering: unplug it and plug it back in.", 'Set up my phone…')
-    if devs:   # Linux's "no permissions", a phone in recovery: adb's own word, as the Phones page shows it
+    if devs:   # a phone in recovery or sideload: adb's own word, as the Phones page shows it
         d = devs[0]; return Step('phone', title, PROBLEM, f'<b>{esc(phone_name(d) or "Your phone")}</b> is connected but not ready (adb says "{esc(d["state"])}").', 'Set up my phone…')
     if seen: return Step('phone', title, DONE, "Your phone was set up before. It isn't plugged in now.")
     return Step('phone', title, TODO, PHONE_INTRO, 'Set up my phone…')

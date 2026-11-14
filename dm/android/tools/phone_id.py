@@ -4,7 +4,8 @@
 # adb-R5CY51ZLGKH-AbCdEf._adb-tls-connect._tcp. The address changes whenever wireless debugging restarts or the phone reboots, and one phone on a cable and on
 # Wi-Fi at once is listed twice, so anything kept per phone is kept under its stable ID: ro.serialno (what adb shows for it over USB), or, where a maker left that
 # empty or a placeholder, the Android ID the shell reads (aid-<16 hex digits>, the same until a factory reset). Imported by scripts/build_android_from_nsp.py,
-# scripts/bench_android.py, device_lock.py and the desktop app (scripts/nxnative_android.py); Qt-free, so its tests run without PySide6.
+# scripts/bench_android.py, device_lock.py and the desktop app (scripts/nxnative_android.py); Qt-free, so its tests run without PySide6. And adb's list of devices
+# as those read it (devices).
 import re
 
 ID_CMD = 'getprop ro.serialno; settings get secure android_id'   # one adb shell call; its two lines go to from_props
@@ -34,6 +35,28 @@ def mdns_serialno(name):   # the ro.serialno an mDNS service name carries, or No
 def serialno_of(name):   # the serial number in adbd's service name, with or without its type (adb-<serial number>-<suffix>[._adb-tls-….tcp]), or None
     m = re.match(r'^adb-(.+)-[^-.]+(?:\._adb(?:-tls-(?:connect|pairing))?\._tcp\.?)?$', name or '')
     return m[1] if m and m[1].lower() not in PLACEHOLDERS else None
+
+
+# adb's state for a phone it found on USB but can't open (Linux, no udev rule letting this user use it): "no permissions", then why in brackets and the help page,
+# all in the state column, so splitting the line at spaces read it as "no" and the phone was left out of DroidPlay's picker
+NO_PERMISSIONS = 'no permissions'
+_STATE = re.compile(r'(?P<state>no permissions)(?: \((?P<why>[^)]*)\))?(?:; see \[[^\]]*\])?|(?P<word>\S+)')
+
+
+def devices(out):
+    """`adb devices [-l]` → [{'serial', 'state', 'model', 'why'}]: state is adb's word (device, unauthorized, offline, recovery...) or NO_PERMISSIONS, why its reason
+    for that ("user andrew is not in the plugdev group", '' otherwise), model devices -l's (spaces for its _)"""
+    found = []
+    for line in (out or '').splitlines():
+        if not line.strip() or line.startswith(('List of devices', '* ', 'adb server', 'adb: ')): continue
+        p = line.split(None, 1)
+        if len(p) < 2: continue
+        m = _STATE.match(p[1].strip())
+        if not m: continue
+        rest = p[1].strip()[m.end():].split()
+        found.append({'serial': p[0], 'state': m['state'] or m['word'], 'model': next((x[6:] for x in rest if x.startswith('model:')), '').replace('_', ' '),
+                      'why': m['why'] or ''})
+    return found
 
 
 KINDS = {'_adb-tls-pairing._tcp': 'pairing', '_adb-tls-connect._tcp': 'connect', '_adb._tcp': 'tcp'}   # mDNS service types: a pairing code's, wireless debugging's, adb tcpip's
