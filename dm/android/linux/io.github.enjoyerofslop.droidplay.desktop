@@ -1,0 +1,11 @@
+[Desktop Entry]
+Type=Application
+Name=DroidPlay
+GenericName=Switch game packer for Android
+Comment=Build the Switch games you own into Android apps and install them on your phone
+Exec=DroidPlay
+Icon=io.github.enjoyerofslop.droidplay
+Terminal=false
+Categories=Game;
+Keywords=Switch;Android;adb;nxnative;
+StartupWMClass=DroidPlay

@@ -19,6 +19,7 @@ natively on the iPhone, the iPad and the Mac, with an Android port that began as
 
 **Download [DroidPlay for Windows](https://github.com/enjoyerofslop/droidplay-core/releases/latest)**: **DroidPlay-Setup-&lt;version&gt;.exe** from the latest
 release. Run it, and it walks you through the rest ([Get started](#get-started)). On a Mac, use [DroidPlay](https://github.com/enjoyerofslop/droidplay).
+On Linux, [DroidPlay for Linux](#on-linux-preview) is an AppImage in preview, for testers.
 
 - **Runs on** arm64 phones and handhelds with Android 10 or later and a Vulkan GPU. Tested on Qualcomm Adreno (the Ayn Odin 2, the Retroid Pocket 5, the
   Galaxy S25 Edge and others), Arm Mali (the Pixel 9 Pro XL) and Samsung Xclipse (the Galaxy Z Flip 7): [Phones and handhelds](#phones-and-handhelds).
@@ -66,7 +67,8 @@ open-source Turnip driver (on a Samsung Xclipse GPU, a build of Mesa's RADV for 
 ### What you need
 
 - **A computer to build on:** a Windows 10 (1809 or later) or Windows 11 PC, 64-bit, for DroidPlay for Windows; or a Mac with Apple silicon and macOS 15 or
-  later for [DroidPlay on a Mac](https://github.com/enjoyerofslop/droidplay). On Windows, DroidPlay and the tools it installs take about 6 GB, and each game's
+  later for [DroidPlay on a Mac](https://github.com/enjoyerofslop/droidplay); or, in preview, an x86_64 Linux with glibc 2.34 or later (Ubuntu 22.04,
+  Debian 12, Fedora 35, SteamOS 3 or newer) for [DroidPlay for Linux](#on-linux-preview). On Windows, DroidPlay and the tools it installs take about 6 GB, and each game's
   build needs room besides, on the drive with the game's files: about the game's size for its extracted files, plus what its shaders need while they translate,
   up to about 20 GB for most games and 90 GB or more for one with over 100,000 shaders, such as Pokémon Pokopia ([Free space](docs/android.md#free-space)).
 - **An Android phone or handheld** with Android 10 or later ([the devices tested](#phones-and-handhelds)), a USB cable (or wireless debugging), and room for
@@ -94,6 +96,15 @@ On Windows:
 
 Every page of the app, uninstalling, and running it from source: [DroidPlay for Windows](docs/android.md#droidplay-for-windows).
 
+### On Linux (preview)
+
+**DroidPlay for Linux** is the same app as an AppImage, `DroidPlay-<version>-x86_64.AppImage`, for x86_64 Linux with glibc 2.34 or later. It's in preview:
+it isn't on the release page yet, and testers get it from the `linux-package` workflow's **DroidPlay-AppImage** artifact (with its `.sha256`), or build it
+with `dm/android/linux/stage.sh`. Make it executable (`chmod +x`) and open it. The first start of a version prepares it in
+`~/.local/share/DroidPlay/<version>` (about 720 MB, a few seconds); later starts are quick. Get started works as on Windows, except **Install tools**: on
+Linux the JDK, the .NET SDK 10 and the Android SDK are installed by hand for now, and **Settings** lists what's missing and how to get it. Where FUSE is
+missing, `--appimage-extract-and-run` opens it. More: [DroidPlay for Linux](docs/android.md#droidplay-for-linux-preview).
+
 ### On a Mac or from the command line
 
 - **On a Mac:** [DroidPlay](https://github.com/enjoyerofslop/droidplay) builds and installs Android games too: add your games folder, then **Install on
@@ -106,6 +117,8 @@ Every page of the app, uninstalling, and running it from source: [DroidPlay for 
 - **DroidPlay for Windows** says when a new release is out: press **Update**, or **Update to &lt;version&gt;** under Updates in **Settings**. It downloads
   the new Setup, checks it against the release, installs it and opens again; your games, builds and settings stay. Or close DroidPlay and run the new Setup
   yourself.
+- **DroidPlay for Linux** (preview) doesn't update itself yet: open the new AppImage instead of the old one. Its first start prepares the new version and
+  removes the ones before the previous version; your games, builds and settings stay.
 - **Games you've already built** keep what they were built with. Build them again (**Build and install**) to get a release's fixes; what didn't change isn't
   redone, so it's usually quick. Saves stay on the phone.
 - **What changed** in each release is in the [release notes](https://github.com/enjoyerofslop/droidplay-core/releases).
@@ -306,6 +319,7 @@ DroidPlay for Mac's build of the game, its Mac host does it instead. Without eit
 ## Guides
 
 - [DroidPlay for Windows](docs/android.md#droidplay-for-windows): installing, Get started and every page of the app, in detail.
+- [DroidPlay for Linux (preview)](docs/android.md#droidplay-for-linux-preview): the AppImage, what it needs, where it keeps its files.
 - [The Android app](docs/android.md#the-android-app): the launcher, a game's settings, the first start, controls, saves, removing a game and the log.
 - [Game apps](docs/android.md#game-apps): a game as an app of its own.
 - [Another Vulkan driver (Turnip)](docs/android.md#another-vulkan-driver-turnip): on an Adreno or Xclipse GPU, a driver you put on the phone.

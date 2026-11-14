@@ -1,0 +1,10 @@
+#!/bin/sh
+# DroidPlay for Linux's AppImage starts here (dm/android/linux/stage.sh puts this file at the top of the AppDir). It runs unpack.py on the AppImage's own
+# Python: on a version's first start that copies the payload into ~/.local/share/DroidPlay/<version>/, then starts DroidPlay from there (unpack.py says why).
+# The environment is cleaned for that Python and for every Python DroidPlay starts after it: a PYTHONHOME or PYTHONPATH meant for another Python would load
+# its modules, and a pip --user PySide6 in ~/.local/lib/python3.14 would shadow the bundled one. Nothing is added to LD_LIBRARY_PATH or QT_PLUGIN_PATH: the
+# bundled Qt finds its libraries and plugins by RUNPATH, so the tools DroidPlay starts (adb, java, dotnet, the file manager) see the user's own environment.
+here=${APPDIR:-$(dirname "$(readlink -f "$0")")}
+unset PYTHONHOME PYTHONPATH PYTHONSTARTUP PYTHONEXECUTABLE PYTHONSAFEPATH
+export PYTHONNOUSERSITE=1
+exec "$here/payload/runtime/bin/python3" -I "$here/payload/core/dm/android/linux/unpack.py" "$here/payload" "$@"

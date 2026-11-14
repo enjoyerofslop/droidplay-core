@@ -166,11 +166,16 @@ class Windows(unittest.TestCase):
     def test_nx_extract_is_built_once_and_reused(self):   # the desktop app reads every game with --info, each read used to run a dotnet build
         tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp); builds = []
         name = 'nx_extract.exe' if os.name == 'nt' else 'nx_extract'
-        def dotnet(cmd, log, env=None, **k): builds.append(cmd); (Path(cmd[cmd.index('-o') + 1]) / name).write_bytes(b'nx')
+        def dotnet(cmd, log, env=None, **k):
+            builds.append(cmd); out = Path(cmd[cmd.index('-o') + 1]); out.mkdir(parents=True, exist_ok=True); (out / name).write_bytes(b'nx')
         with mock.patch.object(ba, 'data_dir', lambda: tmp / 'data'), mock.patch.object(ba.bi, 'run', dotnet):
             first = ba.build_nx_extract(tmp / 'a', tmp / 'logs', {}); again = ba.bi.build_nx_extract(REPO, tmp / 'b', tmp / 'logs', {})
         self.assertEqual(len(builds), 1); self.assertEqual(first, again); self.assertTrue(first.is_file())
         self.assertTrue(first.parent.name.startswith('nx_extract-') and first.parent.parent == tmp / 'data' / 'tools')
+        self.assertEqual(sorted(p.name for p in first.parent.iterdir()), [name])   # the build's output alone, not its obj/
+        # obj/ outside the project: DroidPlay may run from a tree it can't write, such as an AppImage's mount, where the restore stopped with "Permission denied"
+        obj = next(str(c).split('=', 1)[1] for c in builds[0] if str(c).startswith('-p:BaseIntermediateOutputPath='))
+        self.assertFalse(Path(obj).resolve().is_relative_to(REPO)); self.assertTrue(obj.endswith(os.sep))
 
     def test_game_app_stage_without_symbolic_links(self):   # Windows makes them only with Developer Mode on (or as administrator): the stage takes the files instead
         tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp)
