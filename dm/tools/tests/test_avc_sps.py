@@ -1,5 +1,5 @@
 """dm/android/avc_sps.h (whether an H.264 stream's pictures leave the decoder in decode order, read from its SPS: the VUI's bitstream_restriction, else
-pic_order_cnt_type 2 or the Baseline profile), built for the PC with the system's clang and driven through ctypes on sequence parameter sets written here
+pic_order_cnt_type 2 or the Baseline profile; and the frames its picture buffer holds, by level and picture size), built for the PC with the system's clang and driven through ctypes on sequence parameter sets written here
 field by field (H.264 7.3.2.1.1, E.1.1), emulation prevention bytes included. POSIX only: skipped on Windows, and without a C compiler."""
 import ctypes
 import os
@@ -14,9 +14,10 @@ REPO = Path(__file__).resolve().parents[3]
 CC = ['xcrun', 'clang'] if sys.platform == 'darwin' and shutil.which('xcrun') else [shutil.which('clang') or shutil.which('cc') or '']
 SRC = '''#include "avc_sps.h"
 #define X __attribute__((visibility("default")))
-X int g_parse(const uint8_t *nal, size_t n, int *f) {   // f: profile, poc_type, refs, vui, br, reorder, order
+X int g_parse(const uint8_t *nal, size_t n, int *f) {   // f: profile, poc_type, refs, vui, br, reorder, order, level, mbs, dpb
     avc_rbsp r; avc_sps s; int ok = avc_sps_parse(nal, n, &r, &s);
     f[0] = s.profile; f[1] = s.poc_type; f[2] = s.refs; f[3] = s.vui; f[4] = s.br; f[5] = s.reorder; f[6] = avc_sps_decode_order(&s);
+    f[7] = s.level; f[8] = s.mbs; f[9] = avc_sps_dpb_frames(&s);
     return ok;
 }
 X int g_order(const uint8_t *nal, size_t n) { return avc_decode_order(nal, n); }
@@ -38,10 +39,11 @@ class Bits:
         return bytes(out)
 
 
-def sps(profile=77, poc=2, refs=3, vui=None, high=None, poc1=(0, 0, ()), level=41):
+def sps(profile=77, poc=2, refs=3, vui=None, high=None, poc1=(0, 0, ()), level=41, mbs=(120, 68), frames=1, constraints=0x40):
     """An SPS: 1920x1080 (cropped from 1088), frame_mbs_only; high = (chroma_format_idc, scaling lists or None); vui = a function writing vui_parameters;
-    poc1 = pic_order_cnt_type 1's (offset_for_non_ref_pic, offset_for_top_to_bottom_field, offsets for the reference frames in the cycle)"""
-    w = Bits().u(8, profile).u(8, 0x40).u(8, level).ue(0)
+    poc1 = pic_order_cnt_type 1's (offset_for_non_ref_pic, offset_for_top_to_bottom_field, offsets for the reference frames in the cycle);
+    mbs = the picture's width in macroblocks and height in map units; frames = frame_mbs_only_flag (0: fields, map units of two macroblock rows)"""
+    w = Bits().u(8, profile).u(8, constraints).u(8, level).ue(0)
     if high is not None:
         chroma, lists = high
         w.ue(chroma)
@@ -57,7 +59,9 @@ def sps(profile=77, poc=2, refs=3, vui=None, high=None, poc1=(0, 0, ()), level=4
     elif poc == 1:
         w.u(1, 0).se(poc1[0]).se(poc1[1]).ue(len(poc1[2]))
         for o in poc1[2]: w.se(o)
-    w.ue(refs).u(1, 0).ue(119).ue(67).u(1, 1).u(1, 1)
+    w.ue(refs).u(1, 0).ue(mbs[0] - 1).ue(mbs[1] - 1).u(1, frames)
+    if not frames: w.u(1, 0)   # mb_adaptive_frame_field_flag
+    w.u(1, 1)
     w.u(1, 1).ue(0).ue(0).ue(0).ue(4)   # frame cropping: 8 lines off the bottom
     w.u(1, vui is not None)
     if vui: vui(w)
@@ -100,9 +104,9 @@ class AvcSps(unittest.TestCase):
     def tearDownClass(cls): shutil.rmtree(cls.tmp, ignore_errors=True)
 
     def parse(self, nal):   # → (ok, {field: value})
-        f = (ctypes.c_int * 7)()
+        f = (ctypes.c_int * 10)()
         ok = self.lib.g_parse(nal, len(nal), f)
-        names: list[str] = ['profile', 'poc', 'refs', 'vui', 'br', 'reorder', 'order']
+        names: list[str] = ['profile', 'poc', 'refs', 'vui', 'br', 'reorder', 'order', 'level', 'mbs', 'dpb']
         return ok, dict(zip(names, list(f)))
 
     def check(self, nal, **want):
@@ -139,6 +143,17 @@ class AvcSps(unittest.TestCase):
         self.assertIn(b'\x00\x00\x03', nal)   # the Extended_SAR's zeros needed an emulation prevention byte
         self.check(nal, poc=0, refs=4, vui=1, br=1, reorder=0, order=1)
         self.check(sps(77, 2, 4, vui_full(3)), br=1, reorder=3, order=0)
+
+    def test_picture_buffer(self):   # Table A-1's MaxDpbMbs over the frame's macroblocks, at most 16, at least max_num_ref_frames
+        self.check(sps(100, 0, 3, vui_timing(), high=(1, None), level=41), level=41, mbs=8160, dpb=4)   # 1080p at 4.1
+        self.check(sps(100, 0, 5, vui_timing(), high=(1, None), level=41), dpb=5)   # more reference frames than the level allows: the references
+        self.check(sps(100, 0, 3, vui_timing(), high=(1, None), level=31, mbs=(80, 45)), level=31, mbs=3600, dpb=5)   # 720p at 3.1 (Qualcomm kept 5 back without bitstream_restriction)
+        self.check(sps(100, 0, 3, None, high=(1, None), level=40, mbs=(80, 45)), dpb=9)
+        self.check(sps(100, 0, 3, None, high=(1, None), level=51, mbs=(80, 45)), dpb=16)
+        self.check(sps(77, 0, 2, None, level=31, mbs=(80, 23), frames=0), mbs=3680, dpb=4)   # fields: map units are macroblock pairs
+        self.check(sps(66, 0, 1, None, level=11, mbs=(11, 9), constraints=0x50), level=9, mbs=99, dpb=4)   # level 1b: 11 with constraint_set3_flag
+        self.check(sps(66, 0, 1, None, level=11, mbs=(11, 9)), level=11, dpb=9)
+        self.check(sps(77, 0, 2, None, level=99), dpb=16)   # a level the table does not have
 
     def test_not_an_sps_or_cut_short(self):
         nal = sps(77, 2, 3, vui_timing((0, 3)))

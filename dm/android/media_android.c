@@ -3,8 +3,9 @@
 // H.264: the access units (Annex B, as the SDK's demuxer hands them over) go to an "video/avc" decoder made from SPS / PPS (csd-0 / csd-1). Its pictures go to an
 // AImageReader (YUV_420_888 with explicit plane strides: the byte-buffer output of Qualcomm's decoders is a tiled vendor format) and are copied out as they arrive, to
 // NV12 or, in the native texture mode, RGBA (the stream's colour matrix: BT.709 from 720 lines up, else BT.601; video range). MediaCodec hands pictures out in presentation
-// order already, so none is held back for reordering; at the end of the stream (take with flush) the decoder is drained. Decoding runs on MediaCodec's own threads:
-// for a stream whose pictures leave in decode order (avc_sps.h) a take waits for the picture of the access unit just sent, as VideoToolbox's synchronous decode gives it.
+// order already, so none is held back for reordering; at the end of the stream (take with flush) the decoder is drained. Decoding runs on MediaCodec's own threads, so a take
+// waits for the pictures due: for a stream whose pictures leave in decode order (avc_sps.h) the picture of the access unit just sent, as VideoToolbox's synchronous decode gives it;
+// for one with B-frames every picture but the few the decoder may keep back for reordering (mavc_take).
 // AAC: an "audio/mp4a-latm" decoder configured from the AudioSpecificConfig in the magic cookie (the esds descriptor hle_movie.c builds); FillComplexBuffer feeds it
 // the packets the input procedure gives and returns the PCM16 it has, the decoder's start-up delay giving none for the first packets.
 #include <AudioToolbox/AudioToolbox.h>
@@ -23,6 +24,7 @@ struct mavc {
     AMediaCodec *mc; AImageReader *rd; ANativeWindow *win; int eos;
     pthread_mutex_t mu; pthread_cond_t cv; pic_t q[QMAX]; int nq, w, h; long rendered, arrived;   // pictures sent to the reader / taken from it
     int order, held; long fed;   // order: the SPS's pictures leave in decode order (avc_sps.h); held: this decoder kept one back all the same; fed: access units with a picture sent
+    int hold0, hold;              // reordering streams: the pictures a take leaves in the decoder, as the SPS bounds them (hold0) and as this decoder has shown it keeps (hold)
     uint8_t *au; size_t aucap;
 };
 mavc *mavc_new(void) {
@@ -51,7 +53,14 @@ static void keep_ps(mavc *a, const uint8_t *nal, size_t n) {   // a parameter se
     if (n > sizeof a->sps) { if (!a->red++) LOG("[RED] movie: AVC parameter set of %zu bytes, too long", n); return; }
     if ((size_t)*dn == n && !memcmp(dst, nal, n)) return;
     memcpy(dst, nal, n); *dn = (int)n; a->dirty = 1;
-    if (t == 7) a->order = avc_decode_order(nal, n);
+    if (t == 7) {
+        avc_rbsp r; avc_sps sp; int ok = avc_sps_parse(nal, n, &r, &sp);
+        a->order = ok && avc_sps_decode_order(&sp);
+        // What Qualcomm's decoder keeps back once each access unit is decoded (an Odin 2, c2.qti.avc.decoder, t_media's B-frame clips waited out for 150 ms each): max_num_reorder_frames
+        // pictures, and one more for some of them (1-2 with x264's -bf 3, 2-3 with -b-pyramid); with the SPS's bitstream_restriction taken out, up to its whole picture buffer
+        // (5 at 1280x720, level 3.1). Waiting for fewer would time out on those pictures
+        a->hold0 = a->hold = a->order ? 0 : !ok ? 16 : sp.br ? sp.reorder + 1 : avc_sps_dpb_frames(&sp);
+    }
 }
 static size_t next_sc(const uint8_t *p, size_t n, size_t i) { for (; i + 3 <= n; i++) if (!p[i] && !p[i + 1] && p[i + 2] == 1) return i; return n; }
 static void each_nal(const uint8_t *p, size_t n, void (*fn)(void *, const uint8_t *, size_t), void *ctx) {   // as hle_movie_avc.c: Annex B, or else 4-byte lengths
@@ -129,8 +138,9 @@ static int open_codec(mavc *a) {
     media_status_t st = AMediaCodec_configure(a->mc, f, a->win, NULL, 0); AMediaFormat_delete(f);
     if (st == AMEDIA_OK) st = AMediaCodec_start(a->mc);
     if (st != AMEDIA_OK) { if (!a->red++) LOG("[RED] movie: the H.264 decoder refused its configuration (%d), outputting black frames", st); close_codec(a); return 0; }
-    LOG("[movie] AVC: MediaCodec decoding, profile %d%s", a->nsps > 1 ? a->sps[1] : 0, a->order ? ", pictures in decode order" : "");
-    a->dirty = 0; a->held = 0; return 1;
+    if (a->order) LOG("[movie] AVC: MediaCodec decoding, profile %d, pictures in decode order", a->nsps > 1 ? a->sps[1] : 0);
+    else LOG("[movie] AVC: MediaCodec decoding, profile %d, pictures reordered: takes wait for all but %d", a->nsps > 1 ? a->sps[1] : 0, a->hold0);
+    a->dirty = 0; a->held = 0; a->hold = a->hold0; return 1;
 }
 // the decoder's finished pictures go to the reader (rendered to its window); end: the end of stream was reached
 static int drain(mavc *a, int64_t timeout_us) {
@@ -200,15 +210,20 @@ int mavc_take(mavc *a, int flush, uint8_t *dst, int w, int h, int64_t *pts_us) {
             pthread_mutex_lock(&a->mu);   // the last pictures reach the reader's listener (up to 1 s)
             for (int k = 0; k < 100 && a->arrived < a->rendered; k++) { struct timespec ts; clock_gettime(CLOCK_REALTIME, &ts); ts.tv_nsec += 10000000; if (ts.tv_nsec >= 1000000000) { ts.tv_sec++; ts.tv_nsec -= 1000000000; } pthread_cond_timedwait(&a->cv, &a->mu, &ts); }
             pthread_mutex_unlock(&a->mu);
-        } else if (a->order && !a->held) {
+        } else if (!a->held) {
             // Decode order: the next picture out is the one of the access unit just sent, so it is waited for (up to 0.5 s). A take hands out one picture per packet, and taking
             // only what had come out after 5 ms left any picture of a slow decode behind for the rest of the stream: Donkey Kong Country Returns HD's opening movie fell four
             // pictures behind in its first second on an Odin 2, and its player, which sends no end of stream, never got the last four and held the 3,566th for good.
             // A decoder that keeps a picture back anyway (reordering for its whole picture buffer, whatever the SPS) is not waited for again.
+            // B-frames: every picture but the `hold` the decoder may keep for reordering is due. Taking what had come out after 5 ms let The World Ends with You: Final Remix's opening
+            // movie (720p High profile, I P B B B, one picture reordered) run 6-7 pictures behind its packets on the Thor Pro, where the console runs about one behind: its player
+            // then held every audio output, waited for a picture still in the decoder, and the movie froze (droidplay-core#480). A decoder that keeps more back than the SPS
+            // says is waited for as far as it shows it goes, after one 0.5 s wait.
             int due = 1;
-            for (int k = 0; k < 100 && due; k++) { pthread_mutex_lock(&a->mu); due = a->arrived < a->fed; pthread_mutex_unlock(&a->mu); if (due) drain(a, 5000); }
-            pthread_mutex_lock(&a->mu); due = a->arrived < a->fed; if (due) a->fed = a->arrived; pthread_mutex_unlock(&a->mu);
-            if (due) { a->held = 1; LOG("[movie] AVC: no picture 0.5 s after its access unit: this decoder keeps pictures back, takes no longer wait for them"); }
+            for (int k = 0; k < 100 && due; k++) { pthread_mutex_lock(&a->mu); due = a->arrived < a->fed - a->hold; pthread_mutex_unlock(&a->mu); if (due) drain(a, 5000); }
+            pthread_mutex_lock(&a->mu); long behind = a->fed - a->arrived; due = behind > a->hold; if (due && a->order) a->fed = a->arrived; pthread_mutex_unlock(&a->mu);
+            if (due && (a->order || behind > 16)) { a->held = 1; LOG("[movie] AVC: no picture 0.5 s after its access unit: this decoder keeps pictures back, takes no longer wait for them"); }
+            else if (due) { a->hold = (int)behind; LOG("[movie] AVC: the decoder keeps %ld pictures back, %d more than the SPS says: takes wait for all but %ld", behind, (int)behind - a->hold0, behind); }
         } else drain(a, 0);
     }
     pthread_mutex_lock(&a->mu);

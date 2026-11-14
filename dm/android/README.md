@@ -189,10 +189,20 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
   key, the D-pad, both sticks, two fingers and the game's touch screen (`gamepad check: 44 checks, 0 failed`); `DM_TEXT_TEST=2` opens the text box after the demo and
   types and confirms "Zelda" and an emoji itself, under a minimum of 2 characters (`text box check: … OK with 1 character disabled`, then `text "Zelda😀" (9 bytes)`; `DM_TEXT_TEST=1` waits for a person); `DM_RUMBLE_TEST=1` vibrates half a second (`dumpsys vibrator_manager` shows it).
 - `tests/t_audio`: the AAudio output at real time (a 440 Hz tone for two seconds: the frames rendered, the underruns), Stop and Start again; then with 960-frame data callbacks (`DM_DBG_AU_FRAMES`), through the pacer (240-frame render calls, no short data callback) and with `DM_AAUDIO_RING=0` (960 frames rendered straight).
-- `tests/t_media <h264> <aac> [<h264 without B-frames>]`: the movie decoders on clips ffmpeg makes (`ffmpeg -f lavfi -i color=c=0x2060c0:size=320x240:rate=30 -t 1 -c:v libx264 -profile:v high -bf 2
+- `tests/t_media <h264> <aac> [<h264 without B-frames> [<720p h264 with B-frames>]]`: the movie decoders on clips ffmpeg makes (`ffmpeg -f lavfi -i color=c=0x2060c0:size=320x240:rate=30 -t 1 -c:v libx264 -profile:v high -bf 2
   -pix_fmt yuv420p -x264-params aud=1 -f h264 blue.h264`; `ffmpeg -f lavfi -i sine=frequency=1000:sample_rate=48000 -t 1 -ac 2 -c:a aac -f adts tone.aac`; the same picture
-  with `-profile:v main -bf 0` into `blue_p.h264`): every picture in NV12 and RGBA with its colour, the tone's length and pitch, and every picture of the clip without
-  B-frames before the end of stream, as it is and with its SPS's `bitstream_restriction` taken out (10 of 10 on the Odin 2 on 2026-11-12).
+  with `-profile:v main -bf 0` into `blue_p.h264`; and 1280×720 with B-frames, each frame's number in two grey blocks: `ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=30 -t 4
+  -vf "geq=lum='if(lt(Y\,64)*lt(X\,128)\,if(lt(X\,64)\,16+8*mod(N\,28)\,16+8*mod(floor(N/28)\,28))\,lum(X\,Y))':cb='if(lt(Y\,64)*lt(X\,128)\,128\,cb(X\,Y))':cr='if(lt(Y\,64)*lt(X\,128)\,128\,cr(X\,Y))'"
+  -c:v libx264 -profile:v high -pix_fmt yuv420p -x264-params aud=1:bframes=3:b-adapt=0:b-pyramid=none -f h264 bframes.h264`): every picture in NV12 and RGBA with its colour,
+  the tone's length and pitch, every picture of the clip without B-frames before the end of stream, as it is and with its SPS's `bitstream_restriction` taken out, and every
+  picture of the 720p clip in order with its own number, taken one per access unit no further behind than the decoder may keep pictures (`max_num_reorder_frames` + 1;
+  without `bitstream_restriction`, its picture buffer) (14 of 14 on the Odin 2 on 2026-11-13; main gave 12, its takes 6 and 8 behind).
+- `tests/t_movie_client <mp4> <packets.csv> [strip] [noeos] [gate=<ms>]`: `hle_movie.c`'s AAC and H.264 decoders driven the way The World Ends with You: Final Remix's player
+  drives them (droidplay-core#480; [movies](../../docs/reference/movies.md#android-a-movie-with-b-frames-freezes-holding-every-audio-output)), on the same picture 60 s long with AAC
+  (`ffmpeg -f lavfi -i testsrc2=size=1280x720:rate=30 -f lavfi -i sine=frequency=1000:sample_rate=48000 -t 60 -map 0:v -map 1:a -vf "<the geq above>" -c:v libx264 -profile:v high
+  -pix_fmt yuv420p -x264-params bframes=3:b-adapt=0:b-pyramid=none:keyint=60 -c:a aac -ac 2 clip.mp4`, then `ffprobe -v error -show_entries
+  packet=stream_index,pts_time,dts_time,size,pos -of csv=p=0 clip.mp4 > clip.csv`): the end, or a deadlock with what each side holds, and the video decoder's lag. On the Odin 2
+  (2026-11-13), with `strip` main froze 4 s in and this build played all 1,800 pictures, the decoder 2 pictures behind its packets with `bitstream_restriction` (main 4–7).
 - `-DDM_TESTS=ON`: `t_thread_leak`, `t_condvar`, `t_fs`, `t_fs_commit_list`, `t_svc_memory` (with and without the map limit), `t_nro`, `t_hid`,
   `t_preempt` (both modes) pass on the device. `t_nvn` passes 154 of 154 on `gfx_vk.c` (130 on `gfx_null.c`; two of its checks time the GPU right after a submit and can miss on a
   fast run); before asynchronous submissions three of them failed: they expect the GPU to be

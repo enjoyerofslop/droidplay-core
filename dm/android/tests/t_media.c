@@ -1,10 +1,13 @@
-// The movie decoders on MediaCodec (media_android.c): t_media <h264 file> <aac file> [<h264 file without B-frames>], made by ffmpeg (the README's Checks):
+// The movie decoders on MediaCodec (media_android.c): t_media <h264 file> <aac file> [<h264 file without B-frames> [<720p h264 file with B-frames>]], made by ffmpeg (the README's Checks):
 //   an Annex B H.264 stream of 30 frames of solid 0x2060c0 at 320×240 (High profile with B-frames, access unit delimiters), decoded as hle_movie.c does it (one access
 //   unit per packet, pictures taken as they come and the rest at the end), as NV12 (Y 91, U 180, V 93: ffmpeg's BT.601 video range) and as RGBA (about 32 96 192);
 //   an ADTS AAC stream of one second of a 1 kHz sine at 48 kHz, stereo, decoded through AudioConverter as md_aac does (the configuration in an esds cookie);
 //   the same picture in Main profile without B-frames (pic_order_cnt_type 2), whose every picture must leave before the end of stream, as a player that sends none
 //   needs: as x264 writes it (its VUI says max_num_reorder_frames 0), and with its SPS's bitstream_restriction taken out, as Donkey Kong Country Returns HD's movie has it
-//   (avc_sps.h then goes by pic_order_cnt_type 2).
+//   (avc_sps.h then goes by pic_order_cnt_type 2);
+//   1280×720 High profile with B-frames (I P B B B, as The World Ends with You: Final Remix's opening movie), each frame's number in two grey blocks, taken one picture per access unit
+//   as hle_movie.c takes them: every picture in order, and the takes no further behind the access units sent than the decoder may keep pictures back (max_num_reorder_frames
+//   and one more; without bitstream_restriction, its picture buffer). Before the takes waited for them they ran 6 behind, 9 without bitstream_restriction (droidplay-core#480).
 #include <AudioToolbox/AudioToolbox.h>
 #include <math.h>
 #include <stdio.h>
@@ -42,7 +45,39 @@ static int video(const uint8_t *s, size_t n, int rgba, int *pics, uint8_t px[4])
     mavc_free(a); free(out);
     return frame;
 }
-// s with every SPS's bitstream_restriction_flag cleared (and what followed it dropped) → o (n + 16 bytes are enough); its length
+// The frame number the B-frame clip's two blocks carry (grey 16 + 8 k: k for the frame number mod 28, then for the number / 28)
+static int frame_code(const uint8_t *y, int w) { return (y[32 * w + 32] - 12) / 8 + 28 * ((y[32 * w + 96] - 12) / 8); }
+// One take per access unit, as md_avc does, then the rest at the end of stream: → pictures; *ordered: each carried the next frame number; *behind: the most access units sent past the pictures taken
+static int bframes(const uint8_t *s, size_t n, int *aus, int *ordered, int *behind) {
+    mavc *a = mavc_new(); int w = 1280, h = 720, pics = 0; uint8_t *out = malloc((size_t)w * h * 3 / 2); int64_t pts;
+    *aus = 0; *ordered = 1; *behind = 0;
+    size_t i = next_sc(s, n, 0), start = i;
+    for (;;) {
+        size_t j = next_sc(s, n, i + 3);
+        int last = j >= n, aud = !last && (s[j + 3] & 31) == 9;
+        if (last || aud) {
+            size_t e = last ? n : (j > 0 && !s[j - 1] ? j - 1 : j);
+            mavc_decode(a, s + start, (int)(e - start), (int64_t)*aus * 33333); (*aus)++;
+            if (mavc_take(a, 0, out, w, h, &pts)) { if (frame_code(out, w) != pics % 784) *ordered = 0; pics++; }
+            if (*aus - pics > *behind) *behind = *aus - pics;
+            start = e;
+        }
+        if (last) break;
+        i = j;
+    }
+    while (mavc_take(a, 1, out, w, h, &pts)) { if (frame_code(out, w) != pics % 784) *ordered = 0; pics++; }
+    mavc_free(a); free(out);
+    return pics;
+}
+static int first_sps(const uint8_t *s, size_t n, avc_sps *sp) {   // the stream's first SPS
+    avc_rbsp r;
+    for (size_t b = next_sc(s, n, 0); b < n; b = next_sc(s, n, b + 3)) {
+        size_t nb = b + 3, e = next_sc(s, n, nb); while (e > nb && !s[e - 1]) e--;
+        if (nb < n && (s[nb] & 31) == 7) return avc_sps_parse(s + nb, e - nb, &r, sp);
+    }
+    return 0;
+}
+// s with every SPS's bitstream_restriction_flag cleared (and what followed it dropped) → o (n + n / 4 + 16 bytes are enough: each 3-byte start code comes out as 4 bytes); its length
 static size_t strip_restriction(const uint8_t *s, size_t n, uint8_t *o) {
     size_t i = next_sc(s, n, 0), on = 0;
     while (i < n) {
@@ -66,7 +101,7 @@ static OSStatus feed(AudioConverterRef c, UInt32 *np, AudioBufferList *bl, Audio
     bl->mNumberBuffers = 1; bl->mBuffers[0].mData = (void *)g_pkt; bl->mBuffers[0].mDataByteSize = g_pkt_n; *np = 1; g_pkt = NULL; return 0;
 }
 int main(int argc, char **argv) {
-    if (argc < 3) { printf("usage: t_media <h264> <aac> [<h264 without B-frames>]\n"); return 2; }
+    if (argc < 3) { printf("usage: t_media <h264> <aac> [<h264 without B-frames> [<720p h264 with B-frames>]]\n"); return 2; }
     size_t n; uint8_t *s = slurp(argv[1], &n);
     int pics = 0; uint8_t px[4] = {0};
     int frames = video(s, n, 0, &pics, px);
@@ -111,13 +146,28 @@ int main(int argc, char **argv) {
         pics = 0; frames = video(s, n, 0, &pics, px);
         printf("H.264 without B-frames: %d access units, %d pictures, %d of them before the end of stream\n", frames, pics, g_early);
         EXPECT("decode order, as the SPS says: every picture before the end of stream", frames == 30 && pics == 30 && g_early == 30);
-        uint8_t *t = malloc(n + 64); size_t tn = strip_restriction(s, n, t);
+        uint8_t *t = malloc(n + n / 4 + 64); size_t tn = strip_restriction(s, n, t);   // each 3-byte start code comes out as 4 bytes
         avc_rbsp r; avc_sps sp; size_t sb = next_sc(t, tn, 0) + 3; while (sb < tn && (t[sb] & 31) != 7) sb = next_sc(t, tn, sb) + 3;   // the first SPS, after the delimiter
         size_t se = next_sc(t, tn, sb); while (se > sb && !t[se - 1]) se--;
         EXPECT("the SPS without bitstream_restriction (pic_order_cnt_type 2)", sb < tn && avc_sps_parse(t + sb, se - sb, &r, &sp) && !sp.br && sp.poc_type == 2);
         pics = 0; frames = video(t, tn, 0, &pics, px);
         printf("H.264 without B-frames, no bitstream_restriction: %d pictures, %d of them before the end of stream\n", pics, g_early);
         EXPECT("decode order, the SPS silent: every picture before the end of stream", frames == 30 && pics == 30 && g_early == 30);
+        free(t); free(s);
+    }
+    if (argc > 4) {   // B-frames at 720p: the takes keep up with the access units sent, as far as the decoder lets them
+        s = slurp(argv[4], &n);
+        avc_sps sp; int aus, ordered, behind, ok = first_sps(s, n, &sp);
+        pics = bframes(s, n, &aus, &ordered, &behind);
+        printf("H.264 720p with B-frames (max_num_reorder_frames %d): %d access units, %d pictures, %s, the takes at most %d behind\n", sp.reorder, aus, pics, ordered ? "in order" : "out of order", behind);
+        EXPECT("B-frames: every picture, in order, its frame number in its blocks", ok && sp.br && pics == aus && ordered);
+        EXPECT("B-frames: the takes at most max_num_reorder_frames + 1 behind", ok && behind <= sp.reorder + 1);
+        uint8_t *t = malloc(n + n / 4 + 64); size_t tn = strip_restriction(s, n, t);   // each 3-byte start code comes out as 4 bytes
+        ok = first_sps(t, tn, &sp) && !sp.br;
+        pics = bframes(t, tn, &aus, &ordered, &behind);
+        printf("H.264 720p with B-frames, no bitstream_restriction (picture buffer %d): %d pictures, %s, the takes at most %d behind\n", avc_sps_dpb_frames(&sp), pics, ordered ? "in order" : "out of order", behind);
+        EXPECT("B-frames, the SPS silent: every picture, in order", ok && pics == aus && ordered);
+        EXPECT("B-frames, the SPS silent: the takes at most the picture buffer behind", ok && behind <= avc_sps_dpb_frames(&sp));
         free(t); free(s);
     }
     printf("== %d checks, %d failed ==\n", checks, fails);

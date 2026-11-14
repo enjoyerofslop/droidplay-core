@@ -54,6 +54,7 @@ HLE_FORCE("_ZN5movie9Extractor13SetDataSourceEPKc", "movie demuxer: the host doe
 #define MD_NO_INPUT 0x1011       // SDK: no free input
 #define MD_NO_OUTPUT 0x100e      // SDK: no output ready
 #define MD_STALE_NS 250000000ull // how long an input the client held across a flush stays withheld (h_movie_AcqIn)
+#define MD_SPILL_MAX 64          // AAC packets copied out of their input buffers while the client holds every output, at most (DM_MOVIE_AAC_SPILL, md_spill)
 #define MD_FMT_NV12 4
 #define MD_FMT_ABGR 3            // 4-byte RGBA (memory order R G B A), only with the native texture mode
 #define MD_MODE_TEX 2            // native texture mode: the decoder writes frames into the client's NVN texture
@@ -79,7 +80,8 @@ typedef struct {
     struct { int used, pic, cli, rnd; int64_t pts; uint32_t flags; uint8_t *frm; size_t cap, bytes; } out[MD_NOUT];   // pic: frm holds a decoded picture (audio: bytes of PCM); cli: acquired by the client and not released; rnd: written into the client's texture, waiting for the client's release (md_rendered); cap: bytes in frm
     int tex_rel;                                                          // the client released a slot written into its texture itself: rendered slots wait for its release (md_rendered)
     int outq[MD_NOUT], noutq;                                             // queue of ready output indices
-    struct { int in, off, size; int64_t pts; uint32_t flags; } pend[MD_NIN]; int npend;   // input packets waiting to be decoded (in arrival order)
+    struct { int in, off, size; int64_t pts; uint32_t flags; uint8_t *own; } pend[MD_NIN + MD_SPILL_MAX]; int npend;   // input packets waiting to be decoded (in arrival order);
+                                                                                                                   // own: the packet's copy, its input given back (md_spill; in is then -1)
     // Decoding: dmu lets only one guest thread take and decode packets at a time (packets enter libvpx in order); wmu / wcv hand one job to the host thread and wait for it
     pthread_mutex_t dmu, wmu; pthread_cond_t wcv; pthread_t wk;
     pthread_mutex_t pkm; pthread_cond_t pkc; pthread_t pk; int pk_go, pk_quit, pk_on;   // the decoder's own thread: the SDK decodes on a codec thread, not on the caller's
@@ -474,6 +476,25 @@ static void md_job(mdec_t *d, int job) {
 // the whole frame on the caller (md_out_tex) where the SDK starts a GPU copy and returns (docs/reference/movies.md). Audio decoders decode on the caller and signal at once:
 // their players feed one packet per signal and a packet decodes quickly
 static void md_pump_ev(mdec_t *d, int ev) { if (MD_AUDIO(d)) md_event(d, ev); else md_defer_at(d, ev, now_ns()); }
+// DM_MOVIE_AAC_SPILL=<n> (off by default): while the client holds every output of an AAC decoder, up to n of its queued packets are copied out of their input buffers and the
+// inputs given back, so a player that sends in file order gets past the audio to the video behind it. The World Ends with You: Final Remix's opening movie froze holding all 32
+// AAC outputs with its next packet audio, while the picture its player waited for needed the next video packet (droidplay-core#480). A decoder takes input only when it has a free
+// output, as MediaCodec does, and the console's offers no more: so this is a switch to try where a movie freezes that way, not a default. Called with mu held: → inputs given back
+static int md_spill(mdec_t *d) {
+    static int max = -1; if (max < 0) { const char *e = getenv("DM_MOVIE_AAC_SPILL"); max = e ? atoi(e) : 0; if (max < 0) max = 0; if (max > MD_SPILL_MAX) max = MD_SPILL_MAX; }
+    if (!max || d->type != MD_TYPE_AAC) return 0;
+    for (int k = 0; k < d->nout; k++) if (!d->out[k].used || !d->out[k].cli) return 0;
+    int spilled = 0, n = 0; for (int k = 0; k < d->npend; k++) spilled += d->pend[k].own != NULL;
+    for (int k = 0; k < d->npend && spilled < max; k++) {
+        __typeof__(d->pend[0]) *pk = &d->pend[k];
+        if (pk->own || pk->in < 0) continue;
+        pk->own = malloc(pk->size > 0 ? (size_t)pk->size : 1); if (!pk->own) break;
+        if (pk->size > 0) memcpy(pk->own, d->in[pk->in] + pk->off, (size_t)pk->size);
+        d->infree[d->ninfree++] = pk->in; pk->in = -1; pk->off = 0; spilled++; n++;
+    }
+    if (n) { static _Atomic int once; if (!once++) LOG("[movie] AAC: the client holds every output, %d queued packets copied and their inputs given back (DM_MOVIE_AAC_SPILL, first case)", n); }
+    return n;
+}
 static void md_pump(mdec_t *d);
 static void *md_pump_thread(void *arg) {
     mdec_t *d = arg;
@@ -524,17 +545,18 @@ static void md_pump(mdec_t *d) {
         // `depth` pictures, a black flash before the movie's last frames. No picture carries the flag: CRI Sofdec2 (Catherine: Full Body) drops a picture flagged end-of-stream and then
         // waits for it for good, so every picture leaves as a frame of the movie and an output without one ends it, as for VP9 and Baseline streams whose end-of-stream packet has no data
         if ((pk.size > 0 && (MD_VPX(d) || MD_AUDIO(d) || avc)) || (avc && eos)) {
-            d->jp = d->in[pk.in] + pk.off; d->jn = pk.size; d->jslot = slot; d->jpts = pk.pts; d->jflush = avc && eos; md_job(d, MDJ_DECODE); got = d->jgot; }
+            d->jp = pk.own ? pk.own : d->in[pk.in] + pk.off; d->jn = pk.size; d->jslot = slot; d->jpts = pk.pts; d->jflush = avc && eos; md_job(d, MDJ_DECODE); got = d->jgot; }
         int more = avc && eos && got;   // a picture in this output: the queued ones follow it, then the end-of-stream output (the drain)
         dm_host_mutex_lock(&d->mu);
-        d->infree[d->ninfree++] = pk.in;
+        int copied = pk.own != NULL;
+        if (copied) free(pk.own); else d->infree[d->ninfree++] = pk.in;   // a copied packet's input went back when it was copied
         int ready = got || eos;   // an end-of-stream packet without a picture still yields an output to carry the flag back
         if (ready) { d->out[slot].pic = got; d->out[slot].pts = got && avc ? d->jpts_out : pk.pts; d->out[slot].flags = more ? pk.flags & ~4u : pk.flags; d->outq[d->noutq++] = slot; }
         else d->out[slot].used = 0;
         if (more) { d->avc_drain = 1; d->drain_pts = pk.pts; }
         int ineos = d->in_eos;
         pthread_mutex_unlock(&d->mu);
-        if (!ineos) md_pump_ev(d, 0);   // no input is announced after an end-of-stream packet (h_movie_AcqIn)
+        if (!ineos && !copied) md_pump_ev(d, 0);   // no input is announced after an end-of-stream packet (h_movie_AcqIn)
         if (ready) md_pump_ev(d, 1);
     }
     pthread_mutex_unlock(&d->dmu);
@@ -611,6 +633,7 @@ static void md_free(void **self) {
     dm_host_lock(&d->dmu); md_job(d, MDJ_QUIT); pthread_mutex_unlock(&d->dmu);
     pthread_join(d->wk, NULL);
     for (int i = 0; i < MD_NIN; i++) free(d->in[i]);
+    for (int k = 0; k < d->npend; k++) free(d->pend[k].own);
     for (int k = 0; k < MD_NOUT; k++) free(d->out[k].frm);
     free(d->bgra); free(d->vhdr[0]); free(d->vhdr[1]); free(d->hold);
     pthread_mutex_destroy(&d->pkm); pthread_cond_destroy(&d->pkc);
@@ -673,6 +696,7 @@ static void md_reset(mdec_t *d, int close) {
     // control thread flushes to loop an activity preview, and sends them after the flush (SendInputBufferForDecode claims them back). Those are withheld for a while (h_movie_AcqIn)
     uint64_t now = now_ns();
     for (int i = 0; i < MD_NIN; i++) { d->infree[i] = i; d->instale[i] = d->inown[i] ? now : 0; d->inown[i] = 0; }
+    for (int k = 0; k < d->npend; k++) free(d->pend[k].own);
     d->ninfree = MD_NIN; d->noutq = 0; d->npend = 0; d->avc_drain = 0; d->in_eos = 0; d->hold_n = 0; d->vb_prev = 0;
     // a flush keeps each slot's last picture: the same game reads an output it acquired before the flush right after it (a black frame in the loop otherwise)
     for (int i = 0; i < MD_NOUT; i++) { d->out[i].used = 0; d->out[i].cli = 0; d->out[i].rnd = 0; if (close) d->out[i].pic = 0; }
@@ -749,14 +773,15 @@ HLE_FORCE("_ZN5movie7Decoder24SendInputBufferForDecodeEiiilj", "movie decoder: s
     d->inown[i] = d->instale[i] = 0;
     if (flags & 4) d->in_eos = 1;   // the last input until Flush / Stop (h_movie_AcqIn)
     for (int k = 0; k < d->npend; k++) if (d->pend[k].in == i) { pthread_mutex_unlock(&d->mu); if (!d->red_dec++) LOG("[RED] movie: input index %d sent twice, the second packet is dropped (first case)", i); return 0x100b; }
-    if (d->npend == MD_NIN) { pthread_mutex_unlock(&d->mu); if (!d->red_dec++) LOG("[RED] movie: more packets pending than input buffers, one dropped (first case)"); return 0x100b; }
+    if (d->npend == MD_NIN + MD_SPILL_MAX) { pthread_mutex_unlock(&d->mu); if (!d->red_dec++) LOG("[RED] movie: more packets pending than input buffers, one dropped (first case)"); return 0x100b; }
     int fmt_now = 0;
     if (d->type == MD_TYPE_VP9 && !d->w && size > 0 && vp9_size(d->in[i] + off, size, &d->w, &d->h)) LOG("[movie] VP9 key frame: %d×%d", d->w, d->h);
     if (d->type == MD_TYPE_VP8 && !d->w && size > 0 && vp8_size(d->in[i] + off, size, &d->w, &d->h)) LOG("[movie] VP8 key frame: %d×%d", d->w, d->h);
     if (!d->fmt_sent) { d->fmt_sent = 1; fmt_now = 1; if (!d->w && !MD_AUDIO(d)) { d->w = 1920; d->h = 1080; } }   // the size is fixed from here on (slots are allocated by it)
-    d->pend[d->npend].in = i; d->pend[d->npend].off = off; d->pend[d->npend].size = size; d->pend[d->npend].pts = pts; d->pend[d->npend].flags = flags; d->npend++;
-    int queued = d->npend;
+    d->pend[d->npend].in = i; d->pend[d->npend].off = off; d->pend[d->npend].size = size; d->pend[d->npend].pts = pts; d->pend[d->npend].flags = flags; d->pend[d->npend].own = NULL; d->npend++;
+    int queued = d->npend, spilled = d->in_eos ? 0 : md_spill(d);
     pthread_mutex_unlock(&d->mu);
+    if (spilled) md_event(d, 0);
     MD_TRACE(d, 7, "SendInputBufferForDecode index %d offset %d length %d time %lld µs flags %#x (%d packets queued)", i, off, size, (long long)pts, flags, queued);
     if (fmt_now) md_event(d, 2);
     md_pump_async(d);
@@ -773,7 +798,9 @@ HLE_FORCE("_ZN5movie7Decoder24AcquireOutputBufferIndexEPiPlPjS1_", "movie decode
         int s = d->outq[0]; memmove(d->outq, d->outq + 1, --d->noutq * sizeof *d->outq);
         *idx = s; *pts = d->out[s].pts; *flags = d->out[s].flags; *left = d->noutq; d->out[s].cli = 1; r = 0;
     }
+    int spilled = !r && !d->in_eos ? md_spill(d) : 0;   // the client may hold every output now
     pthread_mutex_unlock(&d->mu);
+    if (spilled) md_event(d, 0);
     if (!r && !MD_AUDIO(d)) atomic_store_explicit(&g_movie_pic_ns, now_ns(), memory_order_relaxed);
     if (!r) MD_TRACE(d, 8, "AcquireOutputBufferIndex → index %d time %lld flags %#x left %d", *idx, (long long)*pts, *flags, *left);
     return r;
