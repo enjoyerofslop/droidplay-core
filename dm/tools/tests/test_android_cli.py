@@ -510,6 +510,7 @@ class Setup(unittest.TestCase):   # --setup (dm/android/tools/host_setup.py): wh
         self.hs.unpack(self.tmp / 'jdk.tar.gz', self.tools / 'jdk', mock.Mock(), 'the JDK', top=True)
         self.assertTrue(os.access(self.tools / 'jdk/bin/java', os.X_OK))
 
+    @unittest.skipIf(os.name == 'nt', "Linux's place: pathlib can't make POSIX paths on Windows")
     def test_a_new_sdk_on_linux_goes_into_the_data_folder_and_is_found_there(self):   # beside the JDK and .NET, not a new ~/Android
         with mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data'), mock.patch.object(ba.os, 'name', 'posix'), \
              mock.patch.dict(os.environ, {'HOME': str(self.tmp / 'home')}):

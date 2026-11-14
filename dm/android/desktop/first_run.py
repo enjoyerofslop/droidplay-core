@@ -117,7 +117,7 @@ def phone_step(devs, adb, picked=None, seen=False):
             return Step('phone', title, WAITING, f'<b>{name}</b> is waiting: unlock it and tap <b>Allow</b> on "Allow USB debugging?"', 'Set up my phone…')
         if d['state'] == NO_PERMISSIONS:   # Linux: adb sees it on USB but may not open it, for want of a udev rule giving it to this user
             return Step('phone', title, PROBLEM, f"<b>{name}</b> is plugged in, but Linux doesn't let DroidPlay use it over USB yet (adb says \"no permissions\"). "
-                        '<b>Set up my phone…</b> says what to install for it.', 'Set up my phone…')
+                        "The phone guide's <b>If it doesn't work</b> says what to install for it.", 'Set up my phone…')
         if d['state'] == 'offline':
             return Step('phone', title, PROBLEM, f"<b>{name}</b> isn't answering over Wi-Fi: wake it, and check that Wireless debugging is still on." if wifi(d['serial'])
                         else f"<b>{name}</b> isn't answering: unplug it and plug it back in.", 'Set up my phone…')

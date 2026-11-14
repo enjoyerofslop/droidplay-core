@@ -206,8 +206,8 @@ def run_time_note(game='', game_app=False):   # → (title, body) of the Builds 
 
 
 # ---- the report ----
-def system_name(os_release=None):   # os_release: /etc/os-release's fields, for the tests
-    if sys.platform == 'win32':
+def system_name(os_release=None):   # os_release: /etc/os-release's fields, for the tests (any system)
+    if sys.platform == 'win32' and os_release is None:
         b = sys.getwindowsversion().build   # pyright: ignore[reportAttributeAccessIssue]  (Windows only)
         return f'Windows {11 if b >= 22000 else 10} (build {b})'
     if sys.platform.startswith('linux') or os_release is not None:   # "Linux 7.2.9" says little: the distribution decides fonts, udev rules, FUSE and libraries
