@@ -19,7 +19,7 @@ natively on the iPhone, the iPad and the Mac, with an Android port that began as
 
 **Download [DroidPlay for Windows](https://github.com/enjoyerofslop/droidplay-core/releases/latest)**: **DroidPlay-Setup-&lt;version&gt;.exe** from the latest
 release. Run it, and it walks you through the rest ([Get started](#get-started)). On a Mac, use [DroidPlay](https://github.com/enjoyerofslop/droidplay).
-On Linux, [DroidPlay for Linux](#on-linux-preview) is an AppImage in preview, for testers.
+On Linux, [DroidPlay for Linux](#on-linux-preview) is an AppImage in preview, **DroidPlay-&lt;version&gt;-x86_64.AppImage**, which releases carry beside Setup.
 
 - **Runs on** arm64 phones and handhelds with Android 10 or later and a Vulkan GPU. Tested on Qualcomm Adreno (the Ayn Odin 2, the Retroid Pocket 5, the
   Galaxy S25 Edge and others), Arm Mali (the Pixel 9 Pro XL) and Samsung Xclipse (the Galaxy Z Flip 7): [Phones and handhelds](#phones-and-handhelds).
@@ -98,9 +98,10 @@ Every page of the app, uninstalling, and running it from source: [DroidPlay for 
 
 ### On Linux (preview)
 
-**DroidPlay for Linux** is the same app as an AppImage, `DroidPlay-<version>-x86_64.AppImage`, for x86_64 Linux with glibc 2.34 or later. It's in preview:
-it isn't on the release page yet, and testers get it from the `linux-package` workflow's **DroidPlay-AppImage** artifact (with its `.sha256`), or build it
-with `dm/android/linux/stage.sh`. Make it executable (`chmod +x`) and open it. The first start of a version prepares it in
+**DroidPlay for Linux** is the same app as an AppImage, `DroidPlay-<version>-x86_64.AppImage`, for x86_64 Linux with glibc 2.34 or later, in preview.
+Download it from the [latest release](https://github.com/enjoyerofslop/droidplay-core/releases/latest), beside Setup, with its `.sha256` (releases from before
+the AppImage have Setup alone); for something newer, testers take the `linux-package` workflow's **DroidPlay-AppImage** artifact, or build it with
+`dm/android/linux/stage.sh`. Make it executable (`chmod +x`) and open it. The first start of a version prepares it in
 `~/.local/share/DroidPlay/<version>` (about 720 MB, a few seconds); later starts are quick. Get started works as on Windows: **Install tools** downloads
 Java, .NET and the Android SDK into `~/.local/share/nxnative/android/tools` (about 1.5 GB, 4 GB on disk), with no `sudo`; a phone that Linux won't let
 DroidPlay use over USB shows as **USB access needed**, and **How to connect a phone** says what to install. **Settings** › **Add to the applications
@@ -119,8 +120,8 @@ menu** gives it a menu entry. Where FUSE is missing, `--appimage-extract-and-run
 - **DroidPlay for Windows** says when a new release is out: press **Update**, or **Update to &lt;version&gt;** under Updates in **Settings**. It downloads
   the new Setup, checks it against the release, installs it and opens again; your games, builds and settings stay. Or close DroidPlay and run the new Setup
   yourself.
-- **DroidPlay for Linux** (preview) says so too, and once releases carry the AppImage, **Update** downloads it into the old one's folder, checks it against
-  the release, puts it in the old one's place and opens it. Its first start prepares the new version and keeps the previous one; your games, builds and
+- **DroidPlay for Linux** (preview) says so too, and **Update** downloads the release's AppImage into the old one's folder, checks it against the release,
+  puts it in the old one's place and opens it. Its first start prepares the new version and keeps the previous one; your games, builds and
   settings stay. An AppImage with the name it was downloaded with takes the new version's (the menu entry DroidPlay added follows it); one you renamed keeps
   your name. Where DroidPlay can't write to the AppImage's folder, **Download** opens the release page instead.
 - **Games you've already built** keep what they were built with. Build them again (**Build and install**) to get a release's fixes; what didn't change isn't

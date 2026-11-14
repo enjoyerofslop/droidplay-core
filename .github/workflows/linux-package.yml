@@ -2,12 +2,11 @@
 # PySide6 cut to what the app uses, and the tree as a release ships it, packed by appimagetool with AppImage's static runtime. stage.sh checks what it staged
 # (--check's Python rows, the fonts, every ELF file's glibc needs, the window offscreen). Then the AppImage is started as players start it: here on Ubuntu
 # 24.04 with FUSE, and in containers of five distributions without it (dm/android/linux/smoke_test.sh), under X11, Wayland and offscreen. The AppImage and its
-# .sha256 are kept as this run's artifact for a few days, for testers. Pull requests that touch what goes in run this.
+# .sha256 are kept as this run's artifact for a few days, for testers. Pull requests that touch what goes in run this; release-assets.yml calls it for a
+# release's AppImage, which it uploads only once the build and every distribution passed.
 name: linux-package
 
 on:
-  push:
-    branches: [linux/appimage-p2, linux/appimage-p3]   # Phases 2 and 3's work branches, for their CI runs before a pull request: come out before merging
   pull_request:
     paths:
       - dm/android/linux/**
