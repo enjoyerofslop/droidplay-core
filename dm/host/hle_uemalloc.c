@@ -57,8 +57,22 @@ static size_t align_of(size_t n, uint32_t a) {
 }
 static void *alloc(size_t n, uint32_t a) {
     size_t alignment = align_of(n, a);
+#ifdef DM_ANDROID
+    // Android's malloc gives only 8-byte alignment to tiny blocks (Malloc(8, 0) came back at ...428 and ...438 on a OnePlus/Adreno 740 phone, DreadOut 2), while Darwin's gives every block 16.
+    // PhysX checks every allocation for 16 bytes ("Allocations must be 16-byte aligned") and aborts, so on Android even the default alignment goes through memalign
+    void *p = malloc_zone_memalign(g_zone, alignment, n ? n : 1);
+#else
     void *p = alignment == 16 ? malloc_zone_malloc(g_zone, n ? n : 1) : malloc_zone_memalign(g_zone, alignment, n ? n : 1);
+#endif
     if (p) used((int64_t)malloc_size(p));
+    // Diagnostics for an Unreal game whose first PhysX allocation aborts with "Allocations must be 16-byte aligned" (DreadOut 2 on Android): a block that is not aligned to what
+    // the engine asked for is a host bug and is reported once with its arguments; DM_UE_MALLOC_TRACE=1 also logs the first 300 requests (size, alignment asked, block, caller)
+    static int g_trace_on = -1, g_trace_n, g_bad_n;
+    if (g_trace_on < 0) { const char *e = getenv("DM_UE_MALLOC_TRACE"); g_trace_on = e && *e == '1'; }
+    if (p && ((uintptr_t)p & (alignment - 1)) && g_bad_n++ < 8)
+        LOG("[RED] Unreal heap: Malloc(%zu, %u) returned %p, not aligned to %zu (caller %p)", n, a, p, alignment, __builtin_return_address(0));
+    if (g_trace_on && g_trace_n++ < 300)
+        LOG("[ue-malloc] n=%zu asked=%u used=%zu -> %p (usable %zu, caller %p)", n, a, alignment, p, p ? malloc_size(p) : (size_t)0, __builtin_return_address(0));
     return p;
 }
 static void release(void *p) { if (p) { used(-(int64_t)malloc_size(p)); malloc_zone_free(g_zone, p); } }
@@ -144,6 +158,7 @@ void dm_ue_malloc_install(void) {
             if (L < 0) { LOG("[RED] main: Unreal's FMallocBinned3 has its name getter at slot %u, a layout the host does not know: Unreal's own allocator runs on cut code", m->ue_malloc_slot); return; }
             if (!gate_obs_present(OBS_UE_MALLOC)) { LOG("[RED] main: the fixups name Unreal's FMallocBinned3 but main has no allocator gate: the allocator would have no vtable"); return; }
             static char what[64]; snprintf(what, sizeof what, "main %.8s", m->build_id);
+            LOG("%s: Unreal allocator slot layout %d (name getter at slot %u, Malloc slot %d, Free slot %d), vtable main+%#llx", what, L, (unsigned)m->ue_malloc_slot, k_lay[L].malloc_, k_lay[L].free_, (unsigned long long)m->ue_malloc_vt);
             fill(b + m->ue_malloc_vt, L, what);
             gate_obs_set(OBS_UE_MALLOC, obj_made);
             return;
