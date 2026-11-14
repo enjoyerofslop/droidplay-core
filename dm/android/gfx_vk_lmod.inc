@@ -10,11 +10,12 @@ typedef struct lmod { _Atomic(VkShaderModule) m; uint32_t miss, idn; int alpha, 
 static _Atomic uint64_t g_lm_ids, g_lm_hit, g_lm_miss;   // modules known by their identifier; pipelines the driver's cache gave for identifiers; pipelines that needed modules after all
 static __thread int t_pool_info;   // what spv_pool did to the modules lm_code made since sh_get cleared it
 static __thread int t_harr_info;   // what spv_harr did to them (SPV_HARR_SHRUNK, SPV_HARR_FAIL), the same way
-// The module's code as it is made (to free): the file; a fragment shader variant's unwritten inputs made constants (spv_drop_inputs), else the vertex pipeline's
+// The module's code as it is made (to free): the file, a vertex or fragment shader's attribute arrays split (spv_inarr); a fragment shader variant's unwritten inputs made constants (spv_drop_inputs), else the vertex pipeline's
 // storage made read-only where the GPU needs it (spv_readonly); then physical pointers through the pools' array where the driver refuses them (gm_np_code), the pool set (spv_pool_fit), arrays longer than stage_set writes (spv_fit_harr), the subgroup rewrites (spv_fit) and, last, the set's binding numbers compacted (spv_bind.h). first: the module's first
 // making, which tells *b0, logs and dumps (made again for a pipeline, it says nothing new)
 static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, int tff, uint64_t e5, const spv_bmap *bm, int first, int *b0, size_t *onw) {
     size_t n = 0; uint32_t *code = spv_read(path, &n); if (!code) return NULL;
+    uint32_t *ia = NULL; size_t ian = spv_fit_inarr(code, n, path, &ia); if (ian) { free(code); code = ia; n = ian; }   // first: a shader's attribute arrays become an input per location, which spv_drop_inputs can then drop one by one
     if (tff) {   // first, so the rewrites below see the wrapper as any other code
         size_t cap = n + 400, k = 0; uint32_t *o = malloc(cap * 4);
         if (o) k = spv_tff_vs(code, n, o, cap);

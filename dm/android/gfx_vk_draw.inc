@@ -210,16 +210,16 @@ static uint32_t *spv_read(const char *path, size_t *nw) {
     if (!code || got != (size_t)n || n % 4 || n < 20) { free(code); return NULL; }
     *nw = (size_t)n / 4; return code;
 }
-static void spv_io(const uint32_t *w, size_t n, uint32_t *in, uint32_t *out) {   // the location masks of the user-defined Input / Output variables
-    *in = *out = 0; uint32_t bound = w[3]; int32_t *loc = malloc(bound * sizeof *loc); if (!loc) return;
-    for (uint32_t i = 0; i < bound; i++) loc[i] = -1;
-    for (size_t i = 5; i < n; ) { uint32_t len = w[i] >> 16, op = w[i] & 0xffff; if (!len || i + len > n) break;
-        if (op == 71 && len >= 4 && w[i + 2] == 30 && w[i + 1] < bound) loc[w[i + 1]] = (int32_t)w[i + 3];   // OpDecorate id Location L
-        i += len; }
-    for (size_t i = 5; i < n; ) { uint32_t len = w[i] >> 16, op = w[i] & 0xffff; if (!len || i + len > n) break;
-        if (op == 59 && len >= 4 && w[i + 2] < bound && loc[w[i + 2]] >= 0 && loc[w[i + 2]] < 32) { if (w[i + 3] == 1) *in |= 1u << loc[w[i + 2]]; else if (w[i + 3] == 3) *out |= 1u << loc[w[i + 2]]; }   // OpVariable Input / Output
-        i += len; }
-    free(loc);
+// the location masks of the user-defined Input / Output variables, an attribute array's every element (spv_inarr_io): its first location alone left a vertex shader
+// that reads attributes through one without the others (the pipeline key keeps only the attributes the shader reads). A fragment shader's input arrays count
+// whole only where spv_fit_inarr splits them (spv_inarr_mask): its input variant can drop a kept array only whole
+static int inarr_on(void);
+static void spv_io(const uint32_t *w, size_t n, uint32_t *in, uint32_t *out) {
+    *in = *out = 0; if (n < 5 || w[3] > 0x3ffffff0u) return;
+    uint32_t *s = malloc(SPV_INARR_SCRATCH(w[3]) * 4); if (!s) return;
+    spv_inarr_io(w, n, s, in, out);
+    if (inarr_on() && spv_inarr_wanted(w, n)) *in |= spv_inarr_mask(w, n, s);
+    free(s);
 }
 static int spv_vid(const uint32_t *w, size_t n) {   // a variable decorated BuiltIn VertexIndex (42)
     for (size_t i = 5; i < n; ) { uint32_t len = w[i] >> 16, op = w[i] & 0xffff; if (!len || i + len > n) break;
@@ -518,6 +518,22 @@ static size_t spv_fit_vsinit(const uint32_t *code, size_t nw, const char *what, 
     if (!k) { free(o); return 0; }
     static _Atomic int logged;
     if (!atomic_exchange(&logged, 1)) LOG("[vk] vertex shader outputs start as (0,0,0,1), as on the hardware, where Vulkan leaves an unwritten component undefined (DM_SPV_VSINIT=0: as translated). First: %s", what);
+    *out = o; return k;
+}
+// The vertex or fragment shader with its attribute arrays split into an input per location (spv_inarr.h), in *out (to free); 0 when it is neither or has no such
+// array. On every GPU: Vulkan matches a stage's interface variable by variable, so a fragment shader's array matches none of the vertex shader's separate outputs,
+// and Qualcomm's Adreno 730 driver linked only its first element. DM_SPV_INARR=0 (env.txt): modules as translated (a vertex shader array's mask still covers every element: spv_io)
+static int inarr_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_INARR"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_SPV_INARR=0: shaders keep their attribute arrays"); } return on; }
+static size_t spv_fit_inarr(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    *out = NULL;
+    if (!inarr_on() || nw < 5 || !spv_inarr_wanted(code, nw)) return 0;
+    uint32_t *s = malloc(SPV_INARR_SCRATCH(code[3]) * 4), *o = NULL; size_t k = 0;
+    size_t need = s ? spv_inarr_need(code, nw, s) : 0;
+    if (need && (o = malloc(need * 4))) k = spv_inarr(code, nw, s, o, need);
+    free(s);
+    if (!k) { free(o); return 0; }
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1)) LOG("[vk] shaders read their attribute arrays from an input per location, as the stage before writes them (DM_SPV_INARR=0: as translated). First: %s", what);
     *out = o; return k;
 }
 // The module with each raw global memory helper keeping its last pool table entry's range and delta in private words (spv_gmcache.h), in *out (to free); 0 when it
