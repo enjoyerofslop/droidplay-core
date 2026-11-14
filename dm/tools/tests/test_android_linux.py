@@ -272,6 +272,11 @@ class AppImageUpdate(unittest.TestCase):   # Update from the AppImage: a stand-i
         with self.assertRaisesRegex(ValueError, "doesn't match the release's checksum"): self.update(img, self.release('a' * 64))
         self.assertEqual(sorted(p.name for p in self.apps.iterdir()), [img.name]); self.assertEqual(img.read_bytes(), b'\x7fELF old AppImage')
 
+    def test_a_cancelled_download_leaves_the_old_appimage(self):   # Cancel in the update bar
+        img = self.appimage()
+        with self.assertRaises(upd.Cancelled): upd.download_appimage(self.release()['appimage'], img, self.core, cancelled=lambda: True)
+        self.assertEqual(sorted(p.name for p in self.apps.iterdir()), [img.name])
+
     def test_no_room_is_said_before_anything_is_written(self):   # the new AppImage, and its first start's copy of the version (unpack.py)
         img = self.appimage()
         with mock.patch.object(upd.shutil, 'disk_usage', return_value=mock.Mock(free=1 << 20)), self.assertRaisesRegex(OSError, 'GB free in .* for the new version'):

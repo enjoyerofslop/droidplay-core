@@ -166,9 +166,18 @@ DroidPlay for Linux is the app of [DroidPlay for Windows](#droidplay-for-windows
 - **Where things go:** your games' builds beside their NSP files (`<title ID>_build`), as on Windows; the game hosts, the APK and the build journals in
   `~/.local/share/nxnative/android` (`$XDG_DATA_HOME/nxnative/android`), shared with the command line; settings in `~/.config/nxnative/android.conf`;
   the signing key in `~/.android/nxnative-debug.jks`.
-- **Updating:** it doesn't update itself yet: open the new AppImage instead. **Uninstalling:** **Remove** the menu entry in Settings if you added one,
-  then delete the AppImage and `~/.local/share/DroidPlay`; the tools Install tools brought are in `~/.local/share/nxnative/android/tools`, and the folders
-  above keep your builds, settings and signing key until you delete them too.
+- **Updating:** DroidPlay says when a newer release is out, as on Windows, and **Update** (or **Update to &lt;version&gt;** under Updates in Settings)
+  downloads the release's AppImage into the folder of the one you opened, checks it against the SHA-256 GitHub lists for it, renames it into place, then
+  closes and opens the new one, whose first start prepares the new version and keeps the previous one. Not during a build.
+  - The file keeps saying its version: `DroidPlay-0.9.0-x86_64.AppImage` becomes `DroidPlay-0.9.1-x86_64.AppImage`, and the menu entry DroidPlay added
+    follows it. A name of your own (`DroidPlay.AppImage`, or one an AppImage manager gave it) stays and the file is replaced in place, so a link or a
+    launcher that starts it still does: rename the AppImage once if you start it from a link.
+  - Before writing anything, DroidPlay checks that it can write to the AppImage's folder and that there's room for the new AppImage and its first start
+    (about 1 GB). A download that is cut short or doesn't match the release is deleted. Either way the old AppImage stays as it was.
+  - **Download** opens the release page instead, and Settings says why, where DroidPlay can't write to the AppImage's folder, for a test build from CI
+    (its version isn't a release's) and for DroidPlay run from source; also while a release has no AppImage.
+- **Uninstalling:** **Remove** the menu entry in Settings if you added one, then delete the AppImage and `~/.local/share/DroidPlay`; the tools Install
+  tools brought are in `~/.local/share/nxnative/android/tools`, and the folders above keep your builds, settings and signing key until you delete them too.
 - **Licences:** each part's licence and a list of what's inside are in `~/.local/share/DroidPlay/<version>/licenses` (`NOTICES.md`). Qt and Qt for
   Python are LGPL: their libraries are in `runtime/lib/python3.14/site-packages/PySide6/Qt/lib` there, and can be replaced. DroidPlay for Windows carries the same notices in
   `%LOCALAPPDATA%\Programs\DroidPlay\licenses`.
