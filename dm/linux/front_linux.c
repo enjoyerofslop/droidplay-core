@@ -100,7 +100,7 @@ static int start_host(void) {
     char code[800], buf[800];
     snprintf(code, sizeof code, "%s/code", g_game);
     snprintf(buf, sizeof buf, "%s/main.fixups.tsv", code);
-    if (!exists(buf)) { LOG("[RED] no game in %s: pack it with scripts/build_linux_from_nsp.py, or give the game folder as the argument", g_game); return 0; }
+    if (!exists(buf)) { LOG("[RED] no game in %s: pack it with scripts/build_android_from_nsp.py --linux, or give the game folder as the argument", g_game); return 0; }
     snprintf(buf, sizeof buf, "%s/saves", g_data); mkdirs(buf);
     snprintf(buf, sizeof buf, "%s/saves/%s", g_data, DM_GAME_ID); setenv("DM_SAVE", buf, 0);
     snprintf(buf, sizeof buf, "%s/temp", g_data); mkdirs(buf); setenv("DM_TEMP", buf, 0);

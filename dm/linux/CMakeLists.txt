@@ -5,7 +5,7 @@
 # Modules are rewritten with DM_TARGET=linux (dm/tools/nso_asm.py: the thread slots at tpidr_el0, plat_linux.c), shaders translated as for Android (dm/android/tools/spv_build.py).
 # Configure on an aarch64 Linux with the game profile, as the Mac host is built per profile:
 #   cmake -G Ninja -S dm/linux -B <build dir> -DCMAKE_C_COMPILER=clang -DGAME=<base game title ID> [-DDM_GAMES_DIR=<profiles folder outside dm/games>]
-# Needs clang, CMake 3.22, glslc (shaderc), Python 3, SDL3 and FFmpeg's libavcodec / libavutil with their development files.
+# Needs clang, CMake 3.22, glslc (shaderc), Python 3, the Vulkan headers, SDL3 and FFmpeg's libavcodec / libavutil with their development files.
 cmake_minimum_required(VERSION 3.22)
 project(dmhost_linux C ASM)
 

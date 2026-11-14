@@ -34,7 +34,7 @@ jobs:
         run: |
           apt-get update -qq
           DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends clang lld llvm cmake ninja-build pkg-config glslc python3 python3-pip \
-            python3-numpy git ca-certificates libsdl3-dev libavcodec-dev libavutil-dev > /dev/null
+            python3-numpy git ca-certificates libsdl3-dev libavcodec-dev libavutil-dev libvulkan-dev > /dev/null
           python3 -m pip install --break-system-packages -q capstone lz4
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:

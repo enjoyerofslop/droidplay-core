@@ -10,6 +10,8 @@
 #   python scripts/build_android_from_nsp.py --check | --info <NSP folder>                              requirements / the game's details, as JSON (the desktop app)
 #   python scripts/build_android_from_nsp.py --setup [--accept-android-licenses]                         install what --check finds missing (Windows: dm/android/tools/host_setup.py)
 #   python scripts/build_android_from_nsp.py <NSP folder> -k <prod.keys> --game-apk [--xapk] [--out <folder>]   the game in an app of its own, to install anywhere (make_game_app)
+#   python scripts/build_android_from_nsp.py <NSP folder> -k <prod.keys> --linux [--out <folder>]   the game for the Linux host (dm/linux): a game folder, with the host when
+#   this computer is aarch64 Linux (linux_game); no Android SDK or phone
 #   --progress json: newline-delimited JSON events on stdout (build_ipa_from_nsp.py Progress), for the desktop app (scripts/nxnative_android.py)
 #   Every build also writes those events to a journal, <data>/builds/<time>-<pid>.jsonl (start and exit events around them), whatever its --progress: the desktop app
 #   shows a build started from a console too
@@ -224,6 +226,35 @@ def build_selftest(ndk, work, logs, env):
     bi.run([sys.executable, REPO / 'dm/android/tests/selftest_nso.py', bin_ / f'clang{exe}', bin_ / f'llvm-objcopy{exe}', d / 'main.nso'], logs / 'android_selftest.log', env=env)
     bi.run([sys.executable, REPO / 'dm/tools/patch_nso.py', d / 'main.nso', d / 'patched', 'main'], logs / 'android_selftest_rewrite.log', env=env)
     return d / 'patched'
+
+
+def build_linux_host(game_id, work, logs, env):   # → the Linux host (dm/linux, CMake + clang), or None when this computer can't run it (not aarch64 Linux)
+    if not (sys.platform.startswith('linux') and platform.machine() in ('aarch64', 'arm64')): return None
+    bdir = work / 'linux_host'
+    bi.run(['cmake', '-G', 'Ninja', '-S', REPO / 'dm/linux', '-B', bdir, '-DCMAKE_C_COMPILER=clang', '-DCMAKE_BUILD_TYPE=', f'-DGAME={game_id}',
+            f'-DPython3_EXECUTABLE={sys.executable}'], logs / 'linux_cmake.log', env=env)
+    bi.run(['ninja', '-C', bdir, 'dmhost'], logs / 'linux_host.log', env=env)
+    return bdir / f'dmhost_{game_id}'
+
+
+def linux_game(g, game, patched, spv, font, aoc, defaults, host, out):   # the game's folder for the Linux host (dm/linux/front_linux.c reads it): push_game's files, copied
+    dst = out / g.id
+    for d in ('code', 'spv', 'font', 'aoc'): shutil.rmtree(dst / d, ignore_errors=True)
+    dst.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(patched, dst / 'code'); shutil.copytree(font, dst / 'font')
+    if spv: shutil.copytree(spv, dst / 'spv')
+    if aoc.is_dir(): shutil.copytree(aoc, dst / 'aoc')
+    rom = bi.rfs.source(game)   # the extraction's RomFS image, cloned or linked where the file system can (clone), else a folder copied
+    for old in (dst / 'RomFS.img', dst / 'RomFS'):
+        if old.is_dir() and not old.is_symlink(): shutil.rmtree(old)
+        elif old.exists() or old.is_symlink(): old.unlink()
+    if bi.rfs.is_image(rom): clone(Path(str(rom)), dst / 'RomFS.img')
+    else: shutil.copytree(rom, dst / 'RomFS')
+    for f in ('icon.jpg', 'control.nacp'):
+        if (game / f).is_file(): shutil.copy2(game / f, dst / f)
+    (dst / 'defaults.txt').write_text(defaults, encoding='utf-8', newline='\n')
+    if host: shutil.copy2(host, dst / host.name)
+    return dst
 
 
 def button_font(work, logs, env):   # the Nintendo extension shared font's stand-in (hle_sdk16.c: button icons at their private-use code points), into <id>_build/font
@@ -1602,7 +1633,8 @@ def main(argv):
     ap.add_argument('--xapk', action='store_true', help='with --game-apk: one .xapk (the APK with the RomFS as its OBB file) for an XAPK installer')
     ap.add_argument('--romfs-beside', action='store_true', help="with --game-apk: the RomFS beside the APK as <name>.romfs whatever the game's size, "
                                                                  'so the APK stays small; the player puts it anywhere on the device and picks it once')
-    ap.add_argument('--out', help='with --game-apk: the folder for the app (default: the NSP folder)')
+    ap.add_argument('--out', help='with --game-apk: the folder for the app (default: the NSP folder); with --linux: the folder the game\'s folder goes in (default: <NSP folder>/<title ID>_build/linux)')
+    ap.add_argument('--linux', action='store_true', help='the game for the Linux host (dm/linux) on an aarch64 Linux device: modules rewritten for it, a game folder instead of an APK, no phone')
     ap.add_argument('--setup', action='store_true', help='install what --check finds missing (Windows: the JDK, the .NET SDK and the Android SDK)')
     ap.add_argument('--accept-android-licenses', action='store_true', help="with --setup: you accept the Android SDK License (https://developer.android.com/studio/terms)")
     a = ap.parse_args(argv)
@@ -1617,6 +1649,9 @@ def main(argv):
     if a.romfs_beside and (a.xapk or not a.game_apk):
         raise BuildError('--romfs-beside goes with --game-apk, without --xapk (an XAPK carries the RomFS as its OBB file)')
     if a.xapk: a.game_apk = True
+    if a.linux:
+        if a.game_apk or a.push_only or a.update_shaders or a.apk_only or a.migrate or a.romfs_dir: raise BuildError('--linux builds a game folder; it goes with none of --game-apk, --push-only, --update-shaders, --apk-only, --migrate, --romfs-dir')
+        a.no_push = True   # no phone: the game folder is copied to the Linux device
     if a.game_apk:
         if a.push_only or a.update_shaders or a.apk_only or a.migrate: raise BuildError('--game-apk builds the game; it goes with none of --push-only, --update-shaders, --apk-only, --migrate')
         a.no_push = True   # a game app goes to no phone from here
@@ -1667,7 +1702,7 @@ def main(argv):
     sys.path.insert(0, str(REPO / 'dm/games')); import game as gamemod
     import profile_guess; bi.pg = profile_guess
     sys.path.insert(0, str(REPO / 'dm/tools')); import nacp; bi.nacp = nacp
-    sdk = sdk_dir(a.sdk)
+    sdk = None if a.linux else sdk_dir(a.sdk)
     env = dict(os.environ); bi.configure_dotnet(env)
     nsp_dir, app, fam, kind = scan(src, keys, env, nsz=False, want=title_id(a.title_id))   # NSZ files are decompressed once the profile is known: a game this computer can't build stops first
     def unpack(fam): return bi.decompress_nsz(nsp_dir, app, fam, keys, env) if kind is None else fam   # nothing left to do for a fam decompressed already
@@ -1709,8 +1744,8 @@ def main(argv):
     fam = unpack(fam)
     global _work; _work = work
     ex.mkdir(parents=True, exist_ok=True); (work / 'tmp').mkdir(exist_ok=True)
-    env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'), DM_TARGET='android', PYTHONUTF8='1')   # the tools' text files in UTF-8 on Windows too (its default is the ANSI code page)
-    patched = work / f'patched_android_{pkg_ver}'
+    env.update(DM_GAME=g.id, DM_ROOT=str(work), WORK=str(work / 'tmp'), DM_TARGET='linux' if a.linux else 'android', PYTHONUTF8='1')   # the tools' text files in UTF-8 on Windows too (its default is the ANSI code page)
+    patched = work / f'patched_{"linux" if a.linux else "android"}_{pkg_ver}'
     serial = None if a.no_push else a.serial or os.environ.get('ANDROID_SERIAL')
     if not a.no_push and not serial:   # the phone now (its captures are pulled before the shader stages); none connected fails at the install, as before, unless only the phone is wanted
         try: serial = pick_device()
@@ -1779,6 +1814,8 @@ def main(argv):
         dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc else []
         sdirs = {v: (game if v == pkg_ver else extract(v)) for v in sv}
         if want and not derived and run_time_missing(g, want, sv, ex, nsp_dir, env, take=True): raise BuildError(run_time_stop(g, want, name))   # a version extracted again lost its own
+        if a.linux and sv and (src['oodle_packs'][0] and not mac_oodle or bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main'])['ue_decode'][0]):
+            raise BuildError(f'{name}\'s shaders are Oodle-compressed, which this script decodes on an Android phone or a Mac: --linux cannot pack it yet')
         if sv and bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main'])['ue_decode'][0]:   # Unreal's Oodle-compressed shaders (ue_decode)
             with phone(serial, f'build_android_from_nsp.py: decoding {g.id}\'s Unreal shaders') if serial else contextlib.nullcontext():
                 ue_decode(sdirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, game)
@@ -1795,6 +1832,17 @@ def main(argv):
             say(f'{reason}: using a shader-only derived profile at {dg.dir}; registered module fixes are preserved')
             return dg
         spv, g = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms, derive_shader_tables, derived, (lambda: mac_oodle) if mac_oodle else None)
+        if a.linux:
+            bi.PROG.stage('Linux host'); so = build_linux_host(g.id, work, logs, env)
+            bi.PROG.end(str(so) if so else 'not built: this computer is not aarch64 Linux')
+            font = button_font(work, logs, env)
+            have_l = nacp.languages(game / 'control.nacp'); lang = bi.game_language(bi.language_code(a.language) or 'en-US', a.language != 'en-US', have_l)
+            bi.PROG.stage('game folder')
+            dst = linux_game(g, game, patched, spv, font, work / 'aoc', defaults_text(g, lang), so, Path(a.out).expanduser().resolve() if a.out else work / 'linux')
+            bi.PROG.end(str(dst))
+            say(f'done: {dst}. On the Linux device, put the folder in ~/.local/share/nxnative/linux/games/ and run its dmhost_{g.id}' if so else
+                f'done: {dst}. On the Linux device (aarch64), build the host with cmake -S dm/linux -DGAME={g.id} (dm/linux/README.md), put the folder in ~/.local/share/nxnative/linux/games/ and run dmhost_{g.id}')
+            return
         bi.PROG.stage('Android host'); so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
         if not a.game_apk: library_add(g.id, so, loader, st, {'title_id': g.id, 'name': nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
                                             'display': nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
