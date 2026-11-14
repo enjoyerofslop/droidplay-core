@@ -448,9 +448,87 @@ class Setup(unittest.TestCase):   # --setup (dm/android/tools/host_setup.py): wh
         with self.assertRaisesRegex(self.hs.SetupError, 'accept-android-licenses'):
             self.hs.setup({'NDK'}, self.sdk, self.tools, ba.sdk_packages(self.sdk), False, mock.Mock(), lambda m: None)
 
-    def test_off_windows_it_says_where_to_go(self):
-        with mock.patch.object(self.hs, 'WINDOWS', False), self.assertRaisesRegex(self.hs.SetupError, 'DroidPlay'):
+    def test_on_a_mac_it_says_where_to_go(self):   # DroidPlay's Setup for the Mac brings the tools with Homebrew
+        with mock.patch.object(self.hs, 'WINDOWS', False), mock.patch.object(self.hs, 'LINUX', False), self.assertRaisesRegex(self.hs.SetupError, "DroidPlay's Setup"):
             self.hs.setup({'NDK'}, self.sdk, self.tools, ba.sdk_packages(self.sdk), True, mock.Mock(), lambda m: None)
+
+    def linux(self, machine='x86_64'):   # host_setup as it runs on Linux, on that processor
+        cms = [mock.patch.object(self.hs, 'WINDOWS', False), mock.patch.object(self.hs, 'LINUX', True), mock.patch.object(self.hs.platform, 'machine', lambda: machine)]
+        for cm in cms: cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+
+    def test_linux_x86_64_installs_and_arm64_is_told_why_not(self):   # Google publishes the SDK's Linux packages for x86_64 alone
+        self.linux(); self.assertEqual(self.hs.unsupported(), '')
+        self.linux('aarch64')
+        with self.assertRaisesRegex(self.hs.SetupError, 'x86_64 Linux only'):
+            self.hs.setup({'NDK'}, self.sdk, self.tools, ba.sdk_packages(self.sdk), True, mock.Mock(), lambda m: None)
+
+    def test_linux_takes_the_linux_archives(self):   # Microsoft's JDK and .NET as .tar.gz, Google's command-line tools for host-os linux
+        self.linux()
+        self.assertEqual(self.hs.jdk_url(), 'https://aka.ms/download-jdk/microsoft-jdk-21-linux-x64.tar.gz')
+        rel = {'latest-sdk': '10.0.404', 'releases': [{'sdk': {'version': '10.0.404', 'files': [
+            {'rid': 'win-x64', 'name': 'dotnet-sdk-win-x64.zip', 'url': 'w', 'hash': 'h'}, {'rid': 'linux-x64', 'name': 'dotnet-sdk-linux-x64.zip', 'url': 'no', 'hash': 'h'},
+            {'rid': 'linux-x64', 'name': 'dotnet-sdk-linux-x64.tar.gz', 'url': 'l', 'hash': 'h'}, {'rid': 'linux-musl-x64', 'name': 'dotnet-sdk-linux-musl-x64.tar.gz', 'url': 'm', 'hash': 'h'}]}}]}
+        self.assertEqual(self.hs.dotnet_file(rel)[1]['url'], 'l')
+        xml = ('<sdk-repository><remotePackage path="cmdline-tools;latest"><archives>'
+               + ''.join(f'<archive><complete><url>tools-{o}.zip</url><checksum>c{o}</checksum></complete><host-os>{o}</host-os></archive>' for o in ('macosx', 'windows', 'linux'))
+               + '</archives></remotePackage></sdk-repository>')
+        got = []
+        with mock.patch.object(self.hs, 'fetch', lambda url: xml.encode()), mock.patch.object(self.hs, 'download', lambda url, dst, algo, digest, *a: got.append((url, digest))), \
+             mock.patch.object(self.hs, 'unpack', lambda *a, **k: None), mock.patch.object(Path, 'unlink', lambda self, *a, **k: None):
+            self.hs.install_cmdline_tools(self.sdk, self.tmp, mock.Mock())
+        self.assertEqual(got, [(self.hs.REPOSITORY + 'tools-linux.zip', 'clinux')])
+
+    def test_linux_packages_go_through_android_with_no_extension(self):   # bin/android, not android.exe
+        self.linux()
+        b = self.sdk / 'cmdline-tools/latest/bin'; b.mkdir(parents=True); (b / 'android').touch()
+        seen = []
+        def run(cmd, input=None, **k): seen.append(cmd); (self.sdk / 'ndk' / ba.NDK).mkdir(parents=True); return mock.Mock(returncode=0, stdout='', stderr='')
+        with mock.patch.object(self.hs.subprocess, 'run', run): self.hs.install_packages(self.sdk, [ba.sdk_packages(self.sdk)['NDK']], mock.Mock())
+        self.assertEqual(seen[0][0], str(b / 'android'))
+
+    @unittest.skipIf(os.name == 'nt', 'Unix file modes')
+    def test_zips_keep_their_unix_modes(self):   # zipfile's extractall made the Linux command-line tools' bin/android non-executable
+        import zipfile
+        z = self.tmp / 'tools.zip'
+        with zipfile.ZipFile(z, 'w') as zf:
+            for name, mode in (('cmdline-tools/bin/android', 0o100755), ('cmdline-tools/lib/a.jar', 0o100644)):
+                i = zipfile.ZipInfo(name); i.create_system = 3; i.external_attr = mode << 16; zf.writestr(i, b'x')
+            i = zipfile.ZipInfo('cmdline-tools/bin/sdkmanager'); i.create_system = 3; i.external_attr = 0o120777 << 16; zf.writestr(i, 'android')   # a link beside it
+        self.hs.unpack(z, self.sdk / 'latest', mock.Mock(), 'tools', top=True)
+        self.assertEqual(os.stat(self.sdk / 'latest/bin/android').st_mode & 0o777, 0o755)
+        self.assertEqual(os.stat(self.sdk / 'latest/lib/a.jar').st_mode & 0o111, 0)
+        self.assertEqual(os.readlink(self.sdk / 'latest/bin/sdkmanager'), 'android')
+        with zipfile.ZipFile(z, 'w') as zf:   # a link out of the folder is refused
+            i = zipfile.ZipInfo('x/evil'); i.create_system = 3; i.external_attr = 0o120777 << 16; zf.writestr(i, '../../../etc/passwd')
+        with self.assertRaisesRegex(self.hs.SetupError, 'points outside it'): self.hs.unpack(z, self.tmp / 'evil', mock.Mock(), 'tools')
+
+    @unittest.skipIf(os.name == 'nt', 'Unix file modes')
+    def test_tarballs_unpack_with_their_modes(self):   # the JDK and the .NET SDK on Linux
+        import tarfile
+        src = self.tmp / 'src/jdk-21.0.9+10/bin'; src.mkdir(parents=True); (src / 'java').write_bytes(b'\x7fELF'); os.chmod(src / 'java', 0o755)
+        with tarfile.open(self.tmp / 'jdk.tar.gz', 'w:gz') as t: t.add(self.tmp / 'src/jdk-21.0.9+10', 'jdk-21.0.9+10')
+        self.hs.unpack(self.tmp / 'jdk.tar.gz', self.tools / 'jdk', mock.Mock(), 'the JDK', top=True)
+        self.assertTrue(os.access(self.tools / 'jdk/bin/java', os.X_OK))
+
+    @unittest.skipIf(os.name == 'nt', "Linux's place: pathlib can't make POSIX paths on Windows")
+    def test_a_new_sdk_on_linux_goes_into_the_data_folder_and_is_found_there(self):   # beside the JDK and .NET, not a new ~/Android
+        with mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data'), mock.patch.object(ba.os, 'name', 'posix'), \
+             mock.patch.dict(os.environ, {'HOME': str(self.tmp / 'home')}):
+            for k in ('ANDROID_HOME', 'ANDROID_SDK_ROOT', 'LOCALAPPDATA'): os.environ.pop(k, None)
+            self.assertEqual(ba.default_sdk(), self.tmp / 'data/tools/android-sdk')
+            (self.tmp / 'data/tools/android-sdk/platform-tools').mkdir(parents=True)
+            self.assertEqual(ba.sdk_dir(None), self.tmp / 'data/tools/android-sdk')
+            (self.tmp / 'home/Android/Sdk/platform-tools').mkdir(parents=True)   # Android Studio's, which --setup then completes
+            self.assertEqual(ba.sdk_dir(None), self.tmp / 'home/Android/Sdk')
+
+    def test_dotnet_runs_without_icu_where_linux_has_none(self):   # .NET stops at its first start without ICU unless told to go without
+        self.linux()
+        with mock.patch.dict(os.environ, {'PATH': '/usr/bin'}), mock.patch.object(self.hs, 'has_icu', lambda: False):
+            os.environ.pop('DOTNET_SYSTEM_GLOBALIZATION_INVARIANT', None); self.hs.add_tool_paths(self.tools)
+            self.assertEqual(os.environ.get('DOTNET_SYSTEM_GLOBALIZATION_INVARIANT'), '1')
+        with mock.patch.dict(os.environ, {'PATH': '/usr/bin'}), mock.patch.object(self.hs, 'has_icu', lambda: True):
+            os.environ.pop('DOTNET_SYSTEM_GLOBALIZATION_INVARIANT', None); self.hs.add_tool_paths(self.tools)
+            self.assertNotIn('DOTNET_SYSTEM_GLOBALIZATION_INVARIANT', os.environ)
 
     def run_install(self, cli):   # install_packages with subprocess stubbed: the command for the NDK, and what it was fed
         b = self.sdk / 'cmdline-tools/latest/bin'; b.mkdir(parents=True); (b / ('android.exe' if cli else 'sdkmanager.bat')).touch()
@@ -715,6 +793,11 @@ class PickDevice(Base):   # the console's default phone: the only one ready, a p
         props = {'R5CY51ZLGKH': 'R5CY51ZLGKH\n9774d56d682e549c\n', '192.168.1.30:5555': 'e7879cce\nf00dfeed12345678\n'}
         with self.assertRaisesRegex(ba.BuildError, r'2 adb devices ready'): self.pick([(s, 'device') for s in props], props)
         self.assertEqual(self.pick([('R5CY51ZLGKH', 'device'), ('192.168.1.30:5555', 'offline')], props), 'R5CY51ZLGKH')
+
+    def test_a_phone_linux_wont_open_is_named_with_why(self):   # adb's "no permissions (...); see [...]": it was listed as "(no)"
+        state = 'no permissions (user andrew is not in the plugdev group); see [http://developer.android.com/tools/device.html]'
+        with self.assertRaisesRegex(ba.BuildError, r'0 adb devices ready \(R5CY51ZLGKH \(no permissions: user andrew is not in the plugdev group\)\).*udev rule'):
+            self.pick([('R5CY51ZLGKH', state)], {})
 
 
 class PhoneSetup(Base):   # adb as a recording stand-in, and a game to copy

@@ -1,8 +1,10 @@
 """DroidPlay for Linux's AppImage and the desktop app's Linux side, without Qt, FUSE or the AppImage itself: the first start of a version unpacking it into
 ~/.local/share/DroidPlay/<version>/ and later starts reusing it, older versions removed but the previous one and any a running DroidPlay holds
 (dm/android/linux/unpack.py); Stop ending a build's whole process group (dm/android/desktop/procs.py); the data folder under XDG_DATA_HOME
-(dm/android/tools/data_home.py); the DejaVu fonts the AppImage carries, where the build looks last. Linux and macOS (flock, process groups); not Windows."""
+(dm/android/tools/data_home.py); the DejaVu fonts the AppImage carries, where the build looks last; Add to the applications menu (dm/android/desktop/menu_entry.py);
+the licences both packages gather (dm/android/licenses/collect.py). Linux and macOS (flock, process groups); not Windows."""
 import importlib.util
+import io
 import os
 from pathlib import Path
 import shutil
@@ -27,6 +29,8 @@ if POSIX:
     unpack = load('unpack', 'dm/android/linux/unpack.py')
 procs = load('procs', 'dm/android/desktop/procs.py')
 data_home = load('data_home', 'dm/android/tools/data_home.py')
+menu_entry = load('menu_entry', 'dm/android/desktop/menu_entry.py')
+collect = load('collect', 'dm/android/licenses/collect.py')
 
 
 def payload(root, version):   # a stand-in for the AppImage's payload: core with its VERSION, a runtime with the python3 link PBS has
@@ -152,6 +156,72 @@ class Fonts(unittest.TestCase):   # DejaVu Sans, which the AppImage carries in d
     def test_stage_puts_them_there(self):
         stage = (REPO / 'dm/android/linux/stage.sh').read_text(encoding='utf-8')
         self.assertIn('"$pay/core/dm/android/fonts/"', stage)
+
+
+class MenuEntry(unittest.TestCase):   # Settings' Add to the applications menu, from the AppImage: the entry starts the AppImage file, wherever it is and however named
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.img = self.tmp / 'My Apps' / 'DroidPlay-0.9.0-x86_64.AppImage'; self.img.parent.mkdir(); self.img.write_bytes(b'AI'); self.img.chmod(0o755)
+        self.env = {'HOME': str(self.tmp / 'home'), 'XDG_DATA_HOME': str(self.tmp / 'share'), 'APPIMAGE': str(self.img)}
+
+    def icon(self, p): Path(p).write_bytes(b'\x89PNG'); return True
+
+    def test_exec_quoting(self):   # the Desktop Entry spec's: quoted, ", `, $ and \\ escaped, then every backslash doubled again, and % doubled
+        self.assertEqual(menu_entry.exec_arg('/home/a b/DroidPlay.AppImage'), '"/home/a b/DroidPlay.AppImage"')
+        self.assertEqual(menu_entry.exec_arg('/x/$HOME"`\\100%'), r'"/x/\\$HOME\\"\\`\\\\100%%"')
+        with self.assertRaises(ValueError): menu_entry.exec_arg('/x/a\nb')
+
+    def test_add_writes_the_entry_and_the_icon_and_remove_takes_them(self):
+        self.assertEqual(menu_entry.state(self.env), 'none')
+        entry = menu_entry.add(menu_entry.appimage(self.env), self.icon, self.env)
+        self.assertEqual(entry, self.tmp / 'share/applications/io.github.enjoyerofslop.droidplay.desktop')
+        text = entry.read_text()
+        self.assertIn(f'Exec="{self.img}"\n', text); self.assertIn(f'TryExec={self.img}\n', text)   # TryExec: the menu drops it once the AppImage is gone
+        self.assertIn('Icon=io.github.enjoyerofslop.droidplay\n', text); self.assertIn('StartupWMClass=DroidPlay\n', text); self.assertNotIn('Exec=DroidPlay\n', text)
+        self.assertTrue((self.tmp / 'share/icons/hicolor/256x256/apps/io.github.enjoyerofslop.droidplay.png').is_file())
+        self.assertEqual([p.name for p in entry.parent.iterdir()], [entry.name])   # no .part file left
+        self.assertEqual(menu_entry.state(self.env), 'this')
+        self.assertTrue(menu_entry.remove(self.env)); self.assertFalse(entry.exists())
+        self.assertFalse((self.tmp / 'share/icons/hicolor/256x256/apps/io.github.enjoyerofslop.droidplay.png').exists())
+        self.assertEqual(menu_entry.state(self.env), 'none')
+
+    def test_an_entry_for_another_copy_is_noticed(self):   # the AppImage moved or renamed, or another download added it
+        menu_entry.add(menu_entry.appimage(self.env), self.icon, self.env)
+        moved = self.tmp / 'DroidPlay.AppImage'; self.img.rename(moved)
+        self.assertEqual(menu_entry.state(dict(self.env, APPIMAGE=str(moved))), 'other')
+        self.assertEqual(menu_entry.current(self.env)[1], self.img)
+
+    def test_without_xdg_data_home_it_goes_under_the_home_folder(self):
+        env = {k: v for k, v in self.env.items() if k != 'XDG_DATA_HOME'}
+        self.assertEqual(menu_entry.entry_path(env), self.tmp / 'home/.local/share/applications/io.github.enjoyerofslop.droidplay.desktop')
+        self.assertEqual(menu_entry.entry_path(dict(env, XDG_DATA_HOME='relative')), menu_entry.entry_path(env))   # a relative one is ignored, as the spec says
+
+    def test_someone_elses_entry_of_that_name_stays(self):   # a distribution's package, say
+        p = menu_entry.entry_path(self.env); p.parent.mkdir(parents=True); p.write_text('[Desktop Entry]\nExec=droidplay\n')
+        self.assertEqual(menu_entry.state(self.env), 'none'); self.assertFalse(menu_entry.remove(self.env)); self.assertTrue(p.exists())
+
+    def test_no_appimage_no_entry(self):   # from source, or APPIMAGE naming a file that's gone
+        self.assertIsNone(menu_entry.appimage({})); self.assertIsNone(menu_entry.appimage({'APPIMAGE': str(self.tmp / 'gone.AppImage')}))
+
+
+class Licences(unittest.TestCase):   # what both stage scripts gather (collect.py): each module's licence files and its line in NOTICES.md
+    def test_modules_and_notices(self):
+        tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, tmp, True)
+        a = tmp / 'site/lz4-4.4.4.dist-info'; (a / 'licenses').mkdir(parents=True); (a / 'METADATA').write_text('Name: lz4\nVersion: 4.4.4\nLicense-Expression: BSD-3-Clause\n')
+        (a / 'licenses/LICENSE').write_text('bsd')
+        b = tmp / 'site/zbic-1.0.dist-info'; b.mkdir(); (b / 'METADATA').write_text('Name: zbic\nVersion: 1.0\nLicense: MIT\n'); (b / 'LICENSE.txt').write_text('mit')
+        out = io.StringIO()
+        with mock.patch('sys.stdout', out): collect.modules(tmp / 'site', tmp / 'lic')
+        self.assertEqual(out.getvalue().splitlines(), ['- lz4 4.4.4 (BSD-3-Clause)', '- zbic 1.0 (MIT)'])
+        self.assertEqual((tmp / 'lic/lz4/LICENSE').read_text(), 'bsd'); self.assertEqual((tmp / 'lic/zbic/LICENSE.txt').read_text(), 'mit')
+        (tmp / 'T.md').write_text('DroidPlay @VERSION@\n@MODULES@\n')
+        with mock.patch.dict(os.environ, {'VERSION': '0.9.0', 'MODULES': out.getvalue()}): collect.notices(tmp / 'T.md', tmp / 'N.md')
+        self.assertEqual((tmp / 'N.md').read_text(), 'DroidPlay 0.9.0\n- lz4 4.4.4 (BSD-3-Clause)\n- zbic 1.0 (MIT)\n')
+
+    def test_both_packages_notice_qt_with_the_same_texts(self):   # Setup shipped Qt without its LGPL notice; the texts are shared (dm/android/licenses)
+        for t in ('dm/android/linux/NOTICES.md', 'dm/android/windows/NOTICES.md'):
+            text = (REPO / t).read_text()
+            for f in ('LGPL-3.0.txt', 'GPL-3.0.txt', 'GPL-2.0.txt', 'Apache-2.0.txt'): self.assertIn(f, text, t); self.assertTrue((REPO / 'dm/android/licenses' / f).is_file())
 
 
 if __name__ == '__main__':

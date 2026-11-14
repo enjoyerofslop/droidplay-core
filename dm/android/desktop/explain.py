@@ -1,4 +1,4 @@
-"""Plain words for what went wrong in DroidPlay for Windows (scripts/nxnative_android.py): explain() turns the packing script's and adb's own messages into a
+"""Plain words for what went wrong in DroidPlay for Windows and Linux (scripts/nxnative_android.py): explain() turns the packing script's and adb's own messages into a
 title, what to do, and the one button that does it, for the Builds page's failure banner, the Library's statuses and the toasts. The raw message stays on screen
 beside it. And the report a player copies for the Discord's #help (Markdown under its 2,000-character limit) or saves in full, with the home folder written as ~
 and anything that looks like key material dropped, as scripts/bug_report.py does. Qt-free, so dm/tools/tests/test_android_desktop.py tests the rules against the
@@ -15,6 +15,9 @@ import bug_report   # noqa: E402  # pyright: ignore[reportMissingImports]  (scri
 DISCORD = 'https://discord.gg/3r92f8wmh7'
 DISCORD_LIMIT = 2000   # characters in one message
 ISSUE_441 = 'https://github.com/enjoyerofslop/droidplay-core/issues/441'   # games only a Mac build can capture run-time shaders for
+WINDOWS = sys.platform == 'win32'
+KEYSTORE = r'.android\nxnative-debug.jks' if WINDOWS else '.android/nxnative-debug.jks'   # the signing key, in the user's folder (build_android_from_nsp.py KEYSTORE)
+TERMINAL = 'a Command Prompt' if WINDOWS else 'a terminal'
 
 
 @dataclass
@@ -78,18 +81,18 @@ def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=Fals
     folder (--info), not a build. → Help"""
     t = text or ''; low = t.lower(); wifi = wifi or 'wireless debugging is still on' in low   # the script's own words for a Wi-Fi phone that didn't come back
     ph, the_phone, g = esc(phone) if phone else 'Your phone', esc(phone) if phone else 'your phone', esc(game) if game else 'The game'
-    adb_said = re.search(r'\badb\b', low) is not None   # an adb command's failure: "No space left on device" is then the phone's, not this PC's
+    adb_said = re.search(r'\badb\b', low) is not None   # an adb command's failure: "No space left on device" is then the phone's, not this computer's
     if 'INSTALL_FAILED_USER_RESTRICTED' in t:
         return Help('Your Xiaomi phone blocked the install', 'In Developer options, turn on <b>Install via USB</b> (it may ask you to sign in to your Xiaomi account), '
                     'then Install again.', 'retry', 'Install again')
     m = re.search(r"compiles (\d+) of its shaders while it runs, with its own shader compiler \(GLSLC\), and game profile \w+'s shader tables need them", t)
-    if m:   # build_android_from_nsp.py run_time_stop: not a bug to report, and nothing the player can fix on this PC
+    if m:   # build_android_from_nsp.py run_time_stop: not a bug to report, and nothing the player can fix on this computer
         mac = 'Only a build for the Mac captures them' in t
         return Help('Build it for the Mac first' if mac else 'This game builds on a Mac only for now', f'{g} compiles {m[1]} of its shaders while it runs, and only a build on '
                     'a Mac can capture them so far. ' + ('Build it for the Mac with DroidPlay for Mac, then build it for Android again: this build takes them from there.' if mac else
                     'Its fix is followed in droidplay-core issue #441 on GitHub.'), '' if mac else 'issue', '' if mac else 'Follow the fix on GitHub')
     if 'INSTALL_FAILED_UPDATE_INCOMPATIBLE' in t or 'signed with another key' in t:
-        return Help('DroidPlay on this phone came from another computer', 'To update it from this PC, copy the signing key (<b>.android\\nxnative-debug.jks</b> in '
+        return Help('DroidPlay on this phone came from another computer', f'To update it from this computer, copy the signing key (<b>{KEYSTORE}</b> in '
                     'your user folder) from that computer to this one. Uninstalling DroidPlay from the phone instead deletes its saves.', 'backup', 'Back up saves')
     m = re.search(r'the phone has ([\d.]+ [KMG]?B) free: .+? needs ([\d.]+ [KMG]?B).*?Free up ([\d.]+ [KMG]?B)', t, re.S)
     if m: return Help(f'Not enough space on {the_phone}', f'{g} needs {m[2]} and {the_phone} has {m[1]} free. Free up {m[3]} (videos, other games), then Install again.',
@@ -98,10 +101,15 @@ def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=Fals
     if m or 'INSTALL_FAILED_INSUFFICIENT_STORAGE' in t or (adb_said and 'no space left on device' in low):
         return Help(f'Not enough space on {the_phone}', (f'{ph} has only {m[1]} free. ' if m else '') + 'Free up a few GB (videos, other games), then Install again: '
                     'a copy cut short carries on from where it stopped.', 'retry', 'Install again')
+    if 'no permissions' in low and ('udev' in low or 'plugdev' in low or 'device' in low):
+        # Linux: adb found the phone on USB but may not open it: no udev rule gives it to this user (phone_id.NO_PERMISSIONS). An AppImage can't install one
+        return Help(f"Linux doesn't let DroidPlay use {the_phone} over USB yet", 'A program may use a phone over USB only where a udev rule allows it. '
+                    "Install your distribution's Android rules (<b>android-sdk-platform-tools-common</b> on Ubuntu, Debian and Mint, <b>android-udev</b> on "
+                    'Arch), then unplug the phone and plug it back in. <b>Set up my phone…</b> has the details, and a rule to add by hand.', 'phone', 'Set up my phone…')
     if ('unauthorized' in low or 'authorizing' in low) and 'http error' not in low:   # adb's state, not a web server's 401
-        if wifi: return Help(f"{ph} doesn't know this PC over Wi-Fi", 'Pair it again: on the phone, Wireless debugging › Pair device with pairing code, then '
+        if wifi: return Help(f"{ph} doesn't know this computer over Wi-Fi", 'Pair it again: on the phone, Wireless debugging › Pair device with pairing code, then '
                              '<b>Pair over Wi-Fi…</b> on the Phones page.', 'phone', 'Set up my phone…')
-        return Help(f"{ph} hasn't allowed this PC yet", 'Unlock it and tap <b>Allow</b> on "Allow USB debugging?" (tick "Always allow from this computer"). '
+        return Help(f"{ph} hasn't allowed this computer yet", 'Unlock it and tap <b>Allow</b> on "Allow USB debugging?" (tick "Always allow from this computer"). '
                     'No prompt? Unplug it and plug it back in.', 'phone', 'Set up my phone…')
     m = re.search(r'lost the phone (\d+) times', low)   # the script gave up on a connection that kept dropping (survives_drops)
     if m:
@@ -111,7 +119,7 @@ def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=Fals
                      'Try another cable or USB port (one on the computer itself, not a hub), then Install again: the copy carries on from where it stopped.'), 'retry', 'Install again')
     if ('device offline' in low or '(offline)' in low or 'no devices/emulators found' in low or re.search(r"device '?\S*'? not found", low)
             or 'exit status 255' in low or 'error: closed' in low or 'did not come back within' in low):
-        if wifi: return Help(f'{ph} dropped off Wi-Fi', 'Wake it, and check that it is on the same network as this PC and that Wireless debugging is still on '
+        if wifi: return Help(f'{ph} dropped off Wi-Fi', 'Wake it, and check that it is on the same network as this computer and that Wireless debugging is still on '
                              '(its address changes when Wireless debugging restarts: DroidPlay finds it again). Then Install again: the copy carries on from where '
                              'it stopped.', 'retry', 'Install again')
         return Help(f'{ph} stopped answering', 'Unplug it and plug it back in, then Install again: the copy carries on from where it stopped. A different cable or USB '
@@ -124,7 +132,7 @@ def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=Fals
         where = m[2].strip() if m else folder or ''
         d = re.match(r'[A-Za-z]:', where); drive = f' on drive {d[0].upper()}' if d else ''   # a Windows path's, read on any system
         more = f'about {m[1]} GB free' if m else 'more room'
-        return Help('Not enough space on this PC', f'Building {g.lower() if not game else g} needs {more}{drive}' + (f' (in {esc(where)})' if where else '') +
+        return Help('Not enough space on this computer', f'Building {g.lower() if not game else g} needs {more}{drive}' + (f' (in {esc(where)})' if where else '') +
                     ". Free some up, or move the game's folder to a drive with more room.", 'folder' if where else '', 'Open the folder' if where else '')
     m = re.search(r'prod\.keys has no \S+ \(master key \w+, which came with ((?:firmware|a firmware after) [\w.]+)\)', t)
     if m: return Help('Your keys are older than this game', f'It needs keys from a Switch on {esc(m[1])}{"" if "after" in m[1] else " or later"}. Update your Switch, '
@@ -137,13 +145,13 @@ def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=Fals
     if m:
         name = g if game else (esc(m[1]) or 'This game')
         return Help("This game isn't supported on Android yet", f"{name} draws with {m[2]}, and DroidPlay on Android runs only games that draw with NVN, the Switch's own "
-                    'graphics API, so far: on the phone it would stop at its first graphics call, so it isn\'t built. Nothing on this PC or in the game files needs fixing.')
+                    'graphics API, so far: on the phone it would stop at its first graphics call, so it isn\'t built. Nothing on this computer or in the game files needs fixing.')
     # the game reader (nx_extract, built with .NET the first time a game is read) couldn't get its NuGet packages: NU1100 "Unable to resolve 'LibHac'" with
     # nuget.org missing or turned off in .NET's sources, NU1301 when the source can't be reached. It showed as "The build stopped" on a Windows PC (2026-11-13)
     if re.search(r'\bNU1(100|101|301)\b', t) or "unable to resolve 'libhac" in low or 'unable to load the service index' in low:
         return Help("DroidPlay couldn't download its game reader", "The first time it reads a game, DroidPlay builds a small game reader with .NET, which "
-                    "downloads its parts from nuget.org, and .NET couldn't get them. Check this PC is online. If it is, nuget.org may be missing or turned off in "
-                    ".NET's settings: in a Command Prompt, <b>dotnet nuget list source</b> shows them; <b>dotnet nuget enable source nuget.org</b> turns it back "
+                    "downloads its parts from nuget.org, and .NET couldn't get them. Check this computer is online. If it is, nuget.org may be missing or turned off in "
+                    f".NET's settings: in {TERMINAL}, <b>dotnet nuget list source</b> shows them; <b>dotnet nuget enable source nuget.org</b> turns it back "
                     "on, or <b>dotnet nuget add source https://api.nuget.org/v3/index.json -n nuget.org</b> adds it. Then open DroidPlay again.")
     # what reading the folder found (build_ipa_from_nsp.py scan_nsps), before anything is built: said as what to change in the folder, which the button opens
     show = ('folder', 'Open the folder') if folder else ('', '')
@@ -160,7 +168,7 @@ def explain(text, phone='', game='', stage='', setup=False, folder='', wifi=Fals
                     "that update's NSP in the game's folder, beside the base game.", *show)
     if 'no game package with a readable content meta' in low:
         return Help('No game DroidPlay can open in this folder', "DroidPlay needs the game's own .nsp or .xci files: not a .zip or .rar, not a dump split into "
-                    'parts (join them into one file first), and fully on this PC (OneDrive\'s online-only files can\'t be read). If the files are right, pick '
+                    'parts (join them into one file first), and fully on this computer (OneDrive\'s online-only files can\'t be read). If the files are right, pick '
                     'your prod.keys again: keys from another Switch can\'t open them.' + skipped_files(t), *show)
     if 'give -k' in low or ('prod.keys' in low and 'needs' in low and 'keys' in low and 'master key' not in low):
         return Help('DroidPlay needs your keys', 'NSP and XCI games are encrypted: pick your prod.keys first.', 'keys', 'Choose prod.keys…')
@@ -198,10 +206,16 @@ def run_time_note(game='', game_app=False):   # → (title, body) of the Builds 
 
 
 # ---- the report ----
-def system_name():
-    if sys.platform == 'win32':
+def system_name(os_release=None):   # os_release: /etc/os-release's fields, for the tests (any system)
+    if sys.platform == 'win32' and os_release is None:
         b = sys.getwindowsversion().build   # pyright: ignore[reportAttributeAccessIssue]  (Windows only)
         return f'Windows {11 if b >= 22000 else 10} (build {b})'
+    if sys.platform.startswith('linux') or os_release is not None:   # "Linux 7.2.9" says little: the distribution decides fonts, udev rules, FUSE and libraries
+        try: rel = os_release if os_release is not None else platform.freedesktop_os_release()
+        except OSError: rel = {}
+        name, v = rel.get('PRETTY_NAME') or rel.get('NAME') or '', rel.get('VERSION_ID') or ''
+        if v and v not in name: name = f'{name} {v}'.strip()   # Bazzite's PRETTY_NAME is "Bazzite" alone; Ubuntu's and Fedora's carry the version
+        if name: return f'{name} (Linux {platform.release()})'
     return f'{platform.system()} {platform.release()}'
 
 

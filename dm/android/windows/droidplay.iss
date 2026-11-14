@@ -1,6 +1,6 @@
 ; DroidPlay for Windows' installer (Inno Setup 7): DroidPlay-Setup-<version>.exe, for the user who runs it, with no administrator prompt.
 ;   ISCC /DVersion=<x.y.z> /DStage=<folder stage.ps1 made> [/DNumVersion=<x.y.z.0>] [/O<output folder>] dm\android\windows\droidplay.iss
-; It installs the staged folder (runtime\: Python with the app's modules, core\: DroidPlay Core's tree, DroidPlay.ico) into %LOCALAPPDATA%\Programs\DroidPlay,
+; It installs the staged folder (runtime\: Python with the app's modules, core\: DroidPlay Core's tree, licenses\: their licences, DroidPlay.ico) into %LOCALAPPDATA%\Programs\DroidPlay,
 ; with Start menu and desktop shortcuts and an entry in Settings > Apps. Per user, never Program Files: the app writes into core\ (the .NET build of
 ; nx_extract, Python's caches). Games, builds, the Android SDK, the tools Install what's missing brought, the signing key and the settings live outside it,
 ; so an update replaces the folder whole and uninstalling leaves them.
@@ -66,10 +66,12 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 ; the folder as the release has it, with nothing left from the version before (a file removed upstream, an old module)
 Type: filesandordirs; Name: "{app}\core"
 Type: filesandordirs; Name: "{app}\runtime"
+Type: filesandordirs; Name: "{app}\licenses"
 
 [Files]
 Source: "{#Stage}\runtime\*"; DestDir: "{app}\runtime"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#Stage}\core\*"; DestDir: "{app}\core"; Flags: ignoreversion recursesubdirs createallsubdirs
+Source: "{#Stage}\licenses\*"; DestDir: "{app}\licenses"; Flags: ignoreversion recursesubdirs createallsubdirs
 Source: "{#Stage}\DroidPlay.ico"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]

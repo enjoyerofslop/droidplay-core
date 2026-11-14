@@ -8,7 +8,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / 'tools'))
 import phone_id   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/tools, put on the path above: mDNS names and services)
 
-SAME_NETWORK = 'the phone and this PC are on the same Wi-Fi network (a guest network keeps devices apart)'
+SAME_NETWORK = 'the phone and this computer are on the same Wi-Fi network (a guest network keeps devices apart)'
 STEPS = ('On the phone: <b>Settings › Developer options › Wireless debugging</b>, turned on (Android 11 and later).',
          'Tap <b>Pair device with pairing code</b> and keep that screen open.',
          'Pick the phone below and type the six-digit code it shows.')
@@ -40,7 +40,7 @@ def connect_result(ok, out):   # adb connect's exit and output → (connected, w
     t = out or ''; low = t.lower()
     if re.search(r'\b(already )?connected to ', low) and 'failed' not in low and 'cannot' not in low: return True, 'Connected'
     if 'failed to authenticate' in low or 'unauthorized' in low:
-        return False, "The phone didn't accept this PC: pair it first (<b>Pair over Wi-Fi…</b>)."
+        return False, "The phone didn't accept this computer: pair it first (<b>Pair over Wi-Fi…</b>)."
     if 'cannot resolve' in low or 'unknown host' in low or 'bad address' in low:
         return False, 'That address is not one adb can use: type it as the phone shows it, e.g. 192.168.1.20:37123.'
     if any(x in low for x in ('failed to connect', 'connection refused', 'no route to host', 'unreachable', 'timed out', 'cannot connect')):
