@@ -7,7 +7,7 @@ name: linux-package
 
 on:
   push:
-    branches: [linux/appimage]   # the work branch, until this file is on main: Run workflow needs it on the default branch
+    branches: [linux/appimage-p2]   # Phase 2's work branch, for its CI runs before a pull request: comes out before merging
   pull_request:
     paths:
       - dm/android/linux/**

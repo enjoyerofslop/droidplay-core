@@ -123,7 +123,7 @@ typedef struct { int binding, slot, cb_slot, cb_off, flags; } rb_sbuf;
 // The elements of a stage's texture or image array that stage_set writes at most; spv_harr.h shortens a module's longer arrays to it (spv_fit_harr), so that its
 // layout holds no more descriptors than are written
 enum { TEX_ARR_MAX = 1024 };
-typedef struct { int binding, type, cbuf_slot, handle, array, separate, flags; VkFormat fmt; int samp_slot; } rb_tex;   // fmt: an image's declared format (0: Unknown); cbuf_slot / samp_slot: the banks of the texture and sampler handles (rb_tex_read)
+typedef struct { int binding, type, cbuf_slot, handle, array, separate, flags; VkFormat fmt; int samp_slot; uint8_t f1d; } rb_tex;   // fmt: an image's declared format (0: Unknown); cbuf_slot / samp_slot: the banks of the texture and sampler handles (rb_tex_read); f1d: res.json's fetch1d names its slot (tex_rows_slot)
 enum { SH_VS, SH_PS, SH_GS, SH_TS, SH_CS, SH_MS, SH_TK };   // SH_TS tessellation; SH_MS / SH_TK NVN2's mesh and task shaders (gfx_vk_mesh.inc)
 // constant buffers a shader may bind: up to 18 of banks 0 to 17, plus NVN2's push constants (c24, DMSH_PUSH_BANK) and the uniform slots' size table (c25,
 // DMSH_CBSIZE_BANK), which the translator adds to every shader that reads a uniform slot: a binding past the cap would be dropped without a word
@@ -156,6 +156,7 @@ typedef struct {
     uint8_t upsq;   // a compute shader DM_VK_UPSCALER_SQUARE_CS lists: its dispatches are replaced (gfx_vk_upsq.inc)
     const spv_bmap *bmap;   // its set's binding numbers compacted (spv_bind.h): NULL when none is at SPV_BIND_FROM or past it; its modules and its layout take it
     struct memu_t *memu;   // a task or mesh shader's compute form, on a GPU without VK_EXT_mesh_shader (gfx_vk_meshemu.inc: its facts, pipeline and pass-through vertex shader)
+    uint8_t tbrows;   // a texture slot of it read a buffer texture as rows (tex_rows_slot, stage_textures): draw_view lands pending writes to those first
 } vshader;
 static int memu_on(void); static int memu_facts(vshader *s, const jv *e); static int memu_ready(vshader *s); static vshader *memu_pvs_get(const char *key);   // gfx_vk_meshemu.inc
 // Descriptor sets bound again instead of written again (stage_set, sr_find). Every draw copies its constant buffers to new arena offsets, so a set holding those offsets
@@ -671,6 +672,15 @@ static void rb_tex_read(const jv *a, rb_tex *out, int *n, int cap) {
         out[(*n)++] = (rb_tex){js_int(o, "binding", 0), js_int(o, "type", 3), ts, js_int(o, "handle", 0), js_int(o, "array", 1), js_int(o, "separate", 0), js_int(o, "flags", 0), f, ss};
     }
 }
+// A texture slot that may hold a buffer texture read as rows of 16384 texels (tbuf_rows.h, gfx_vk.c vt_get_s): a single 2D slot (no array, multisample or shadow) that
+// the translator read by wrapped 1D fetches (res.json fetch1d) or whose handle sits in a uniform buffer, where the Mac binds such rows (nvn_mtl.m tbuf_as_2d: f1d or TEXU,
+// declared 2D). Elsewhere a buffer texture in a texture slot reads 0, on the Mac as here. Assassin's Creed II (the Ezio Collection) reads its 48-float buffer texture so in its
+// lit passes, and every one of them was black while the slot read the dummy
+static int tex_rows_slot(const rb_tex *t) { return (t->type & 0x7ff) == 3 && t->array <= 1 && (t->f1d || t->cbuf_slot >= 3) && tbuf_rows_on(); }
+static void rb_tex_f1d(const jv *f1, rb_tex *tx, int n) {   // res.json's fetch1d (translator slots, tbr_slot) onto the texture bindings
+    for (int i = 0; f1 && f1->t == 3 && i < n; i++) { int sl = tbr_slot((uint32_t)tx[i].handle, tx[i].cbuf_slot);
+        for (int q = 0; sl >= 0 && q < f1->n; q++) if ((int)f1->kid[q].num == sl) tx[i].f1d = 1; }
+}
 static VkDescriptorType tex_dtype(const rb_tex *t, int image) {
     int buf = (t->type & 0xff) == 2;
     return image ? (buf ? VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_STORAGE_IMAGE) : (buf ? VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER : VK_DESCRIPTOR_TYPE_COMBINED_IMAGE_SAMPLER);
@@ -745,7 +755,7 @@ static vshader *sh_get(const char *key) {
     a = js_get(&r, "sbufs");
     for (int i = 0; a && i < a->n && s->nsb < 16; i++) { const jv *o = &a->kid[i]; s->sb[s->nsb++] = (rb_sbuf){js_int(o, "binding", 0), js_int(o, "slot", 0), js_int(o, "cb_slot", 0), js_int(o, "cb_offset", 0), js_int(o, "flags", 0)}; }
     for (int i = 0; i < s->nsb; i++) if (s->sb[i].cb_slot == DMSH_GMEM_MAP_CB_SLOT) s->gm = s->gm > 1 || s->sb[i].cb_off == DMSH_GMEM_LOG_CB_OFFSET ? 2 : 1;
-    rb_tex_read(js_get(&r, "textures"), s->tx, &s->ntx, 64); rb_tex_read(js_get(&r, "images"), s->im, &s->nim, 16);
+    rb_tex_read(js_get(&r, "textures"), s->tx, &s->ntx, 64); rb_tex_read(js_get(&r, "images"), s->im, &s->nim, 16); rb_tex_f1d(js_get(&r, "fetch1d"), s->tx, s->ntx);
     s->upsq = (uint8_t)upsq_match(s);   // an upscaler network to replace: listed (1), or by its interface (2; gfx_vk_upsq.inc)
     // the texture and sampler pools read by ID (handle 0x40000000, the arrays as long as the ID ranges) are the pool set's, not the stage's (spv_pool.h); the first such shader
     // starts the pool set, so a game without one never makes it
@@ -2712,7 +2722,7 @@ static VkImageView dummy_ms(int depth) {
 // registration (g_scache, emptied by reg_samp under g_reg_mu; VkSamplers are never destroyed). The kept entries go with the draw or dispatch (tc_clear).
 // DM_VK_TEX_ONCE=0 (env.txt): every lookup again in stage_set, the lock per element, samp_get and vkb() for every texture, as before
 static int tex_once(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TEX_ONCE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_TEX_ONCE=0: stage_set resolves every texture again"); } return v; }
-typedef struct { int tid; treg_t r; vtex *v; } tc_ent;   // r: the registry entry when stage_textures read it (r.ok 0: none), v its image (vt_get)
+typedef struct { int tid; treg_t r; vtex *v; uint8_t rows; } tc_ent;   // r: the registry entry when stage_textures read it (r.ok 0: none), v its image (vt_get); rows: a texture slot that reads a buffer texture as rows (tex_rows_slot)
 typedef struct { const vshader *s; uint64_t gen, tok; int n, cap; tc_ent *e; } tc_stage;   // gen, tok: g_vt_gen and nvn_dirty_now() when stage_textures began
 static tc_stage g_tc[5];   // by stage slot (tc_slot); s NULL: nothing kept
 static uint64_t g_tc_hit, g_tc_again, g_sc_hit, g_sc_made;   // elements stage_set took from stage_textures / resolved again; samplers found per ID / made or looked up
@@ -2738,10 +2748,11 @@ static void stage_textures(vshader *s) {
             const rb_tex *t = pass ? &s->im[i] : &s->tx[i]; if ((t->type & 0xff) == 2) continue;
             int cnt = t->array > 1 ? (t->array > TEX_ARR_MAX ? TEX_ARR_MAX : t->array) : 1; uint32_t w0 = (uint32_t)t->handle & 0x3fff;
             for (int e = 0; e < cnt; e++, n++) { int tid = (int)(bank_word(nst, c2p, t->cbuf_slot, (w0 + 2u * e) * 4) & 0xfffff); if (tid && t->cbuf_slot >= 3) tid += D.tex_base;
-                tc_ent *x = &c->e[n]; x->tid = tid; if (tid > 0 && tid < g_ntreg && g_treg[tid].ok) x->r = g_treg[tid]; else x->r.ok = 0; }
+                tc_ent *x = &c->e[n]; x->tid = tid; x->rows = !pass && tex_rows_slot(t); if (tid > 0 && tid < g_ntreg && g_treg[tid].ok) x->r = g_treg[tid]; else x->r.ok = 0;
+                if (x->rows && x->r.ok && x->r.t.d.target == NVN_TEXTURE_TARGET_BUFFER) s->tbrows = 1; }
         }
         pthread_mutex_unlock(&g_reg_mu);
-        for (int j = 0; j < n; j++) { vtex *v = c->e[j].r.ok ? vt_get(&c->e[j].r.t) : NULL;
+        for (int j = 0; j < n; j++) { vtex *v = c->e[j].r.ok ? vt_get_s(&c->e[j].r.t, c->e[j].rows) : NULL;
             // an image adopted from its own write-back (gfx_vk.c ab_take) comes back with seen at the note's stamp, not the clock: an edge page a neighbour unprotected
             // after the note can still be written with no stamp, so the clock is no landing token for it (vt_get looks at its pages again, and so does stage_set then)
             c->e[j].v = v && v->pkg && v->seen != nvn_dirty_now() ? NULL : v; }
@@ -2756,7 +2767,8 @@ static void stage_textures(vshader *s) {
             int cnt = t->array > 1 ? (t->array > TEX_ARR_MAX ? TEX_ARR_MAX : t->array) : 1; uint32_t w0 = (uint32_t)t->handle & 0x3fff;
             for (int e = 0; e < cnt; e++) { int tid = (int)(bank_word(nst, c2p, t->cbuf_slot, (w0 + 2u * e) * 4) & 0xfffff); if (tid && t->cbuf_slot >= 3) tid += D.tex_base;
                 pthread_mutex_lock(&g_reg_mu); tex_t tt; int ok = tid > 0 && tid < g_ntreg && g_treg[tid].ok; if (ok) tt = g_treg[tid].t; pthread_mutex_unlock(&g_reg_mu);
-                if (ok) vt_get(&tt); }
+                int rows = !pass && tex_rows_slot(t); if (ok && rows && tt.d.target == NVN_TEXTURE_TARGET_BUFFER) s->tbrows = 1;
+                if (ok) vt_get_s(&tt, rows); }
         }
     }
 }
@@ -3002,7 +3014,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             const tc_ent *ce = tex_once() ? tc_el(tc, ci++, tid) : NULL;   // as stage_textures resolved it, or from the registry again
             const treg_t *rg = ce ? (ce->r.ok ? &ce->r : NULL) : tid > 0 && tid < g_ntreg && g_treg[tid].ok ? &g_treg[tid] : NULL;
             if (rg) {
-                vtex *v = ce ? ce->v : vt_get(&rg->t);
+                vtex *v = ce ? ce->v : vt_get_s(&rg->t, tex_rows_slot(t));
                 if (v && (v->samples > 1) != ms) { RED_ONCE(112, "a %s texture in a %s slot (shader %s): reads 0", v->samples > 1 ? "multisample" : "single-sample", ms ? "multisample" : "single-sample", s->key); v = NULL; }
                 if (v) { const view_t *vv = rg->has_v ? &rg->v : NULL;
                     uint8_t swz[4]; int has_swz = rg->t.set_swz || (vv && vv->set_swizzle);
@@ -3419,10 +3431,15 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
     // buffer textures (t) and images (m): their handles may sit in the game's uniform buffers too (landed above), and their memory is the registry entry each names
     if (tbuf_range_on()) { pthread_mutex_lock(&g_reg_mu);
         for (int k = 0; k < 4; k++) { const vshader *s = sh[k]; if (!s) continue; int nst = nvn_stage_of(s->stage); KS = (signed char)k;
-            for (int pass = 0; pass < 2; pass++) for (int i = 0; i < (pass ? s->nim : s->ntx); i++) { const rb_tex *t = pass ? &s->im[i] : &s->tx[i]; if ((t->type & 0xff) != 2) continue;
+            for (int pass = 0; pass < 2; pass++) for (int i = 0; i < (pass ? s->nim : s->ntx); i++) { const rb_tex *t = pass ? &s->im[i] : &s->tx[i];
+                // a buffer texture read as rows (tex_rows_slot) is uploaded from guest memory when its pages change (gfx_vk.c vt_get_): a write to it still pending lands
+                // first, so stage_textures sees its pages written. Only for a shader that has met one (tbrows): the other texture slots cost no lookup here
+                int rows = !pass && s->tbrows && tex_rows_slot(t); if ((t->type & 0xff) != 2 && !rows) continue;
                 int cnt = t->array > 1 ? (t->array > TEX_ARR_MAX ? TEX_ARR_MAX : t->array) : 1; uint32_t w0 = (uint32_t)t->handle & 0x3fff; K = pass ? 'm' : 't';
                 for (int e = 0; e < cnt; e++) { int tid = (int)(bank_word(nst, NULL, t->cbuf_slot, (w0 + 2u * e) * 4) & 0xfffff); if (tid && t->cbuf_slot >= 3) tid += D.tex_base;
-                    if (tid > 0 && tid < g_ntreg && g_treg[tid].ok) FWD(tb_fwd, (uint64_t)(uintptr_t)g_treg[tid].t.mem, tbuf_bytes(&g_treg[tid].t), pass); } } }
+                    if (tid <= 0 || tid >= g_ntreg || !g_treg[tid].ok) continue;
+                    if (rows) { if (g_treg[tid].t.d.target == NVN_TEXTURE_TARGET_BUFFER) RNG(g_treg[tid].t.mem, g_treg[tid].t.L.size); continue; }
+                    FWD(tb_fwd, (uint64_t)(uintptr_t)g_treg[tid].t.mem, tbuf_bytes(&g_treg[tid].t), pass); } } }
         pthread_mutex_unlock(&g_reg_mu); }
     #undef RNG
     #undef FWD
