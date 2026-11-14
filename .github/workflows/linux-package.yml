@@ -38,8 +38,8 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: linux-package-${{ github.event.pull_request.number || github.ref }}
+concurrency:   # a build run by hand with a version of its own (an updater test's older and newer AppImage) neither waits for nor replaces another
+  group: linux-package-${{ github.event.pull_request.number || github.ref }}-${{ inputs.version }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:
