@@ -1651,7 +1651,8 @@ class Window(QMainWindow):
             if asked and not newer: self.toast(f'DroidPlay {self.version} is the newest' if mine else f'The newest release is {tag}; this copy is {self.version or "of no release"}')
         bg(upd.latest_release, got)
 
-    def update_now(self):   # Update: the release's Setup downloaded and checked, then run silently; DroidPlay closes, and Setup's /RELAUNCH opens the new one
+    def update_now(self):   # Update: the release's Setup downloaded and checked, then run silently; DroidPlay closes, and Setup's /RELAUNCH opens the new one.
+        # From DroidPlay for Linux's AppImage, its AppImage instead (update_appimage)
         rel = self.release
         if self.updating or not rel: return
         kind, _ = upd.how(rel, REPO)

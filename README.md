@@ -119,10 +119,10 @@ menu** gives it a menu entry. Where FUSE is missing, `--appimage-extract-and-run
 - **DroidPlay for Windows** says when a new release is out: press **Update**, or **Update to &lt;version&gt;** under Updates in **Settings**. It downloads
   the new Setup, checks it against the release, installs it and opens again; your games, builds and settings stay. Or close DroidPlay and run the new Setup
   yourself.
-- **DroidPlay for Linux** (preview) says so too, and **Update** downloads the release's AppImage into the old one's folder, checks it against the release,
-  puts it in the old one's place and opens it. Its first start prepares the new version and keeps the previous one; your games, builds and settings stay.
-  An AppImage with the name it was downloaded with takes the new version's (the menu entry DroidPlay added follows it); one you renamed keeps your name.
-  Where DroidPlay can't write to the AppImage's folder, **Download** opens the release page instead.
+- **DroidPlay for Linux** (preview) says so too, and once releases carry the AppImage, **Update** downloads it into the old one's folder, checks it against
+  the release, puts it in the old one's place and opens it. Its first start prepares the new version and keeps the previous one; your games, builds and
+  settings stay. An AppImage with the name it was downloaded with takes the new version's (the menu entry DroidPlay added follows it); one you renamed keeps
+  your name. Where DroidPlay can't write to the AppImage's folder, **Download** opens the release page instead.
 - **Games you've already built** keep what they were built with. Build them again (**Build and install**) to get a release's fixes; what didn't change isn't
   redone, so it's usually quick. Saves stay on the phone.
 - **What changed** in each release is in the [release notes](https://github.com/enjoyerofslop/droidplay-core/releases).
