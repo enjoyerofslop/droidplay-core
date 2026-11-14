@@ -50,6 +50,7 @@
 #   · AnvilNext forge (Ubisoft, Assassin's Creed: The Rebel Collection and The Ezio Collection): the blocks of the .forge entries (anvil_forge.py), LZO1X holding BNSH in version 27, Oodle (decoded by
 #     the game's own decoder in the Mac host) holding bare control sections and code areas in versions 25 and 31, which main embeds too, see anvil_jobs, anvil_shaders, anvil_raw and anvil_main
 #   · Bethesda BSA (Creation Engine, The Elder Scrolls V: Skyrim): NVN records {control offset, length, code offset, length} in the .fxp member of Skyrim - Shaders.bsa (bsa.py) and in main, see fxp_shaders
+#   · IGA (Alchemy, Vicarious Visions' engine, Crash Bandicoot N. Sane Trilogy): whole GLSLC outputs in the .igz members under shaders/ of its LZMA archives (archives/shaders_nx.pak), see iga.py
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -3244,6 +3245,11 @@ def scan_file_in(args):
         return rel, uniq_keys(found), var_pairs(found), trees
     if len(args) > 2:   # a range of LINKDATA entries (linkdata_jobs)
         linkdata_shaders(path, rel, args[2], found)
+        return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == b'IGA\x1a':   # an Alchemy archive (Crash Bandicoot N. Sane Trilogy): only its members under shaders/ are inflated, not its gigabytes of models and textures (iga.py)
+        import iga
+        for name, data in iga.shader_files(path, opener=open):
+            if b'\x91\x68\x86\x19' in data: found += glslc_shaders(data, f'/{rel}/{name}', need=False)
         return rel, uniq_keys(found), var_pairs(found), trees
     if path.lower().endswith('.pak') and lspk_tail(path):   # a Larian package of version 13 (Divinity: Original Sin 2): GLSLC outputs in its .bshd files (lspk_shaders)
         lspk_shaders(path, rel, found)

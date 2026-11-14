@@ -1,0 +1,45 @@
+# Game profile of Crash Bandicoot N. Sane Trilogy (Switch, base game 1.0.0). On Android it plays at 30 fps (as on the Switch) from a new game through Crash 1's opening
+# cinematic into N. Sanity Beach (a Galaxy Z Fold 8's cover screen, see README.md); the Mac has run it to the title screen
+# Format: see dm/games/README.md
+# Vicarious Visions' Alchemy engine (Havok, FMOD), NVN, SDK 3.5.3; modules main + subsdk0 (GLSLC, NVN's runtime shader compiler) + sdk. The provisional profile
+# the survey made (dm/games/profile_guess.py), unchanged but for these comments and the shader groups. Every RomFS file is in archives/*.pak, Alchemy IGA archives of LZMA pieces;
+# the shaders are whole GLSLC outputs in the .igz files of archives/shaders_nx.pak (shader_split.py through iga.py), and the two Bink movie shaders the game compiles at boot
+
+# ---- Identity ----
+title_id	0100D1B006744000
+program_id	0100D1B006744000
+
+# ---- App ----
+name	Crash Bandicoot™ N. Sane Trilogy
+ipa	CrashBandicootNSaneTrilogy.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v0	1.0.0	main=29e1a37d84227147a50a18d055fbb032	subsdk0=a82aa14c5d5a359ad04dc4eab9f5d590	sdk=c871c614793a419581104bec9379efa3
+package	v0
+shader_versions	v0
+
+# ---- Files ----
+# every module main imports from
+modules	main subsdk0 sdk
+romfs_marker	archives/l300_hub.pak
+zip_store	.bk2:.pak:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Shader split (shader_split.py) ----
+shader_groups	/archives/=archives /glslc_capture/=runtime
+shader_note	Crash Bandicoot™ N. Sane Trilogy shaders
+# The engine's Bink layer compiles its movie shaders at boot with the game's own GLSLC (subsdk0; 5 GLSL sources in main, 2 compiled before the Activision bumper): the NSP script
+# captures them once on the Mac with DM_GLSLC_CAPTURE=<version dir>/glslc_capture (hle_glslc.c), as for any game whose main holds GLSL sources and imports glslcCompile
+
+# ---- After the rewrite ----
+# used memory for the rewritten modules (92 MB, over the default 64 MB), which main's heap request counts
+mem_used	0x5c00000
