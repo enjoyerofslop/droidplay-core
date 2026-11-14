@@ -2,7 +2,8 @@
 desktop's menu or launcher until something writes one. This writes the desktop entry and the icon where the freedesktop.org specs look for a user's own,
 $XDG_DATA_HOME/applications/io.github.enjoyerofslop.droidplay.desktop and $XDG_DATA_HOME/icons/hicolor/256x256/apps/ (~/.local/share when XDG_DATA_HOME
 isn't set), with Exec naming the AppImage file (its $APPIMAGE), not the unpacked version under ~/.local/share/DroidPlay, which a newer version replaces.
-TryExec names it too, so the menu drops the entry by itself once the AppImage is deleted. KDE and GNOME watch that folder: nothing else needs to run.
+TryExec names it too, so the menu drops the entry by itself once the AppImage is deleted; an update that gives the AppImage the new release's name points
+the entry at it (retarget). KDE and GNOME watch that folder: nothing else needs to run.
 AppImageLauncher and Gear Lever users get their own entry from those tools instead. Qt-free (the icon is drawn by the caller), so
 dm/tools/tests/test_android_linux.py tests it."""
 import os
@@ -86,6 +87,18 @@ def add(target, write_icon, env=None):
     tmp = entry.with_name('.' + entry.name + '.part')
     tmp.write_text(entry_text(target), encoding='utf-8'); os.chmod(tmp, 0o644); os.replace(tmp, entry)
     return entry
+
+
+def retarget(old, new, env=None):
+    """DroidPlay's entry, when it starts old, made to start new: an update gave the AppImage the new release's name (update.py replace_appimage). The rest of
+    the entry stays as it was written, and so does the icon. Written beside the entry and renamed into place, as add does. → whether it changed"""
+    cur = current(env)
+    if not cur or not cur[1] or os.path.realpath(cur[1]) != os.path.realpath(old): return False
+    lines = [f'Exec={exec_arg(new)}' if ln.startswith('Exec=') else f'TryExec={string_value(new)}' if ln.startswith('TryExec=') else ln
+             for ln in cur[0].read_text(encoding='utf-8').splitlines()]
+    tmp = cur[0].with_name('.' + cur[0].name + '.part')
+    tmp.write_text('\n'.join(lines) + '\n', encoding='utf-8'); os.chmod(tmp, 0o644); os.replace(tmp, cur[0])
+    return True
 
 
 def remove(env=None):   # the entry and the icon DroidPlay wrote; → whether there was an entry. Someone else's entry of that name stays

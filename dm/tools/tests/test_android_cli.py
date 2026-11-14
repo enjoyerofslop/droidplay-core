@@ -1175,10 +1175,12 @@ class Update(unittest.TestCase):   # dm/android/desktop/update.py, the desktop a
         threading.Thread(target=server.serve_forever, daemon=True).start(); self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
         self.base = f'http://127.0.0.1:{server.server_address[1]}'
 
-    def release(self, digest=None, name='DroidPlay-Setup-0.5.1.exe'):
+    def release(self, digest=None, name='DroidPlay-Setup-0.5.1.exe', appimage='sha256:' + '1' * 64):
         digest = f'sha256:{hashlib.sha256(self.setup).hexdigest()}' if digest is None else digest
         self.files['/api'] = json.dumps({'tag_name': 'v0.5.1', 'html_url': 'https://example.invalid/v0.5.1', 'assets': [
             {'name': 'droidplay-core-0.5.1.zip', 'size': 1, 'browser_download_url': self.base + '/x', 'digest': 'sha256:' + '0' * 64},
+            {'name': 'DroidPlay-0.5.1-x86_64.AppImage', 'size': 3, 'browser_download_url': self.base + '/a', 'digest': appimage},
+            {'name': 'DroidPlay-0.5.1-x86_64.AppImage.sha256', 'size': 99, 'browser_download_url': self.base + '/s', 'digest': 'sha256:' + '2' * 64},
             {'name': name, 'size': len(self.setup), 'browser_download_url': self.base + '/setup.exe', 'digest': digest}]}).encode()
         return upd.latest_release(self.base + '/api')
 
@@ -1191,6 +1193,10 @@ class Update(unittest.TestCase):   # dm/android/desktop/update.py, the desktop a
         r = self.release(); self.assertEqual((r['tag'], r['setup']['name'], r['setup']['sha256']), ('v0.5.1', 'DroidPlay-Setup-0.5.1.exe', hashlib.sha256(self.setup).hexdigest()))
         self.assertIsNone(self.release(digest='')['setup'])   # nothing to check the download against: the release's page instead
         self.assertIsNone(self.release(name='Install.DroidPlay.cmd')['setup'])
+
+    def test_the_appimage_beside_it(self):   # DroidPlay for Linux's file in the same release, by the same rule; its .sha256 file isn't taken for it
+        r = self.release(); self.assertEqual((r['appimage']['name'], r['appimage']['url'], r['appimage']['sha256']), ('DroidPlay-0.5.1-x86_64.AppImage', self.base + '/a', '1' * 64))
+        self.assertIsNone(self.release(appimage='')['appimage']); self.assertIsNotNone(self.release(appimage='')['setup'])
 
     def test_setup_downloaded_and_checked(self):
         folder = self.tmp / 'updates'; folder.mkdir(); (folder / 'DroidPlay-Setup-0.5.0.exe').write_bytes(b'old')
@@ -1213,6 +1219,8 @@ class Update(unittest.TestCase):   # dm/android/desktop/update.py, the desktop a
         self.assertFalse(upd.setup_install(app / 'core'))
         (app / 'unins000.exe').write_bytes(b''); (app / 'runtime' / 'pythonw.exe').write_bytes(b'')
         self.assertTrue(upd.setup_install(app / 'core'))
+        r = self.release(); self.assertEqual(upd.how(r, app / 'core', {}), ('setup', None)); self.assertEqual(upd.how(r, self.tmp / 'checkout', {}), (None, None))
+        self.assertEqual(upd.how(dict(r, setup=None), app / 'core', {}), (None, None))   # a release without its Setup: the release's page
 
 
 if __name__ == '__main__':
