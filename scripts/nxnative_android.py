@@ -45,7 +45,7 @@ import game_data as gd   # noqa: E402  # pyright: ignore[reportMissingImports]  
 import wifi   # noqa: E402  # pyright: ignore[reportMissingImports]  (what adb pair, connect and mdns say over Wi-Fi, in plain words)
 import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]  (plain words for what went wrong, and the report for #help)
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]  (how to connect a phone, by brand; its battery and free space)
-import update as upd   # noqa: E402  # pyright: ignore[reportMissingImports]  (the newest release, and its Setup downloaded and checked)
+import update as upd   # noqa: E402  # pyright: ignore[reportMissingImports]  (the newest release, and its Setup or AppImage downloaded and checked)
 import procs   # noqa: E402  # pyright: ignore[reportMissingImports]  (Stop: a build and every tool it started)
 import menu_entry   # noqa: E402  # pyright: ignore[reportMissingImports]  (Linux: the AppImage's entry in the applications menu)
 
@@ -1357,10 +1357,14 @@ class SettingsPage(QWidget):
     def show_update(self, newer):   # the version, when DroidPlay last looked, and a newer release if there is one
         st, v = self.win.st, self.win.version; checked = st.value('update/checked', '')
         when = f' Last checked {checked}.' if checked else ''
-        rel = self.win.release; can = bool(newer and rel and rel.get('setup') and upd.setup_install(REPO))
-        if newer: self.update_line.setText(f'DroidPlay {v} · {newer.lstrip("v")} is out.{when}'); self.update_btn.setText(f'{"Update to" if can else "Download"} {newer.lstrip("v")}')
+        rel = self.win.release; can, why = upd.how(rel, REPO) if newer and rel else (None, None)
+        if newer:   # with why Update can't, where there's a reason to give (the AppImage's folder can't be written, a test build)
+            self.update_line.setText(f'DroidPlay {v} · {newer.lstrip("v")} is out.{when}' + (f' {why[0].upper() + why[1:]}: Download opens the release page.' if why else ''))
+            self.update_btn.setText(f'{"Update to" if can else "Download"} {newer.lstrip("v")}')
         elif upd.release_number(v): self.update_line.setText(f'DroidPlay {v}.{when}'); self.update_btn.setText('Check for updates')
-        else: self.update_line.setText(f'DroidPlay {v or "(its version unknown)"}: a copy from source, so it doesn\'t look for releases by itself.'); self.update_btn.setText('Check for updates')
+        else:   # a checkout's git describe, or an AppImage built by CI from one (linux-package.yml), which a release doesn't replace
+            what = 'a test build' if menu_entry.appimage() else 'a copy from source'
+            self.update_line.setText(f'DroidPlay {v or "(its version unknown)"}: {what}, so it doesn\'t look for releases by itself.'); self.update_btn.setText('Check for updates')
         self.newer = newer
     def show_menu(self):
         st, cur = menu_entry.state(), menu_entry.current()
@@ -1526,7 +1530,8 @@ class SetupPage(QWidget):   # Get started: keys, tools, phone, first game. Not i
 
 
 # ---------------- Updates ----------------
-# The app says a newer release is out, as DroidPlay for Mac does; a copy DroidPlay-Setup installed also offers Update (dm/android/desktop/update.py has why and how).
+# The app says a newer release is out, as DroidPlay for Mac does; a copy DroidPlay-Setup installed and DroidPlay for Linux's AppImage also offer Update
+# (dm/android/desktop/update.py has why and how).
 class Progress(QObject): moved = Signal(object, object)   # a download's bytes so far and in all, from the thread pool to the window
 
 
@@ -1550,16 +1555,16 @@ class UpdateBar(QWidget):   # under the top bar, on every page, while a newer re
     def go(self):
         if self.can_update: self.win.update_now()
         elif self.url: QDesktopServices.openUrl(QUrl(self.url))
-    def show_release(self, rel):   # Update where DroidPlay-Setup installed this copy and the release has its Setup; the release's page otherwise
+    def show_release(self, rel):   # Update where Setup installed this copy or it's the AppImage, and the release has that file; the release's page otherwise
         self.tag, self.url = rel['tag'], rel['url']; v = self.tag.lstrip('v')
-        self.can_update = bool(rel.get('setup')) and upd.setup_install(REPO)
+        kind, why = upd.how(rel, REPO); self.can_update = bool(kind)
         self.get.setEnabled(True); self.later_btn.setText('Not now'); self.notes.setVisible(self.can_update)
         if self.can_update:
             self.get.setText('Update')
             self.text.setText(f'DroidPlay {v} is out. Update downloads it, then DroidPlay closes and opens again, updated; your games, builds and settings stay.')
         else:
-            self.get.setText('Download')
-            self.text.setText(f'DroidPlay {v} is out. Download its installer from the release page; your games, builds and settings stay.')
+            self.get.setText('Download'); what = 'its installer' if os.name == 'nt' else 'its AppImage' if menu_entry.appimage() else 'it'
+            self.text.setText(f'DroidPlay {v} is out. Download {what} from the release page' + (f' ({why})' if why else '') + '; your games, builds and settings stay.')
         self.show()
     def show_progress(self, done, total):
         self.get.setEnabled(False); self.notes.hide(); self.later_btn.setText('Cancel')
@@ -1649,8 +1654,10 @@ class Window(QMainWindow):
     def update_now(self):   # Update: the release's Setup downloaded and checked, then run silently; DroidPlay closes, and Setup's /RELAUNCH opens the new one
         rel = self.release
         if self.updating or not rel: return
-        if not (rel.get('setup') and upd.setup_install(REPO)): QDesktopServices.openUrl(QUrl(rel['url'])); return
+        kind, _ = upd.how(rel, REPO)
+        if not kind: QDesktopServices.openUrl(QUrl(rel['url'])); return
         if self.builds.busy() or self.builds.ext: self.toast('A build is running: wait for it to finish, or stop it, then update'); return
+        if kind == 'appimage': self.update_appimage(rel); return
         v, mb = rel['tag'].lstrip('v'), rel['setup']['size'] / 2**20
         if QMessageBox.question(self, 'Update DroidPlay', f'Update to DroidPlay {v}?\n\nDroidPlay downloads its installer ({mb:.0f} MB) and checks it against the release, '
                                 'then closes, updates, and opens again. Your games, builds and settings stay.') != QMessageBox.Yes: return
@@ -1666,6 +1673,31 @@ class Window(QMainWindow):
             if not (started[0] if isinstance(started, tuple) else started):
                 self.updatebar.show_release(rel); QMessageBox.warning(self, 'Update DroidPlay', f'Windows did not start {r}. Run it yourself, or download it from the release page.'); return
             QApplication.quit()   # Setup would close it anyway (the Restart Manager); it opens the new DroidPlay when it is done
+        bg(fetch, got)
+
+    def update_appimage(self, rel):   # Linux: the release's AppImage downloaded beside this one and checked, put in its place and started; this DroidPlay closes
+        img, a, v = upd.appimage_install(REPO)[0], rel['appimage'], rel['tag'].lstrip('v')
+        name = a['name'] if upd.APPIMAGE_NAME.fullmatch(img.name) else img.name   # replace_appimage: a release's name follows the version, the player's stays
+        if QMessageBox.question(self, 'Update DroidPlay', f'Update to DroidPlay {v}?\n\nDroidPlay downloads its AppImage ({a["size"] / 2**20:.0f} MB) into {img.parent}, '
+                                f'checks it against the release and puts it in place of this one as {name}, then closes and opens again; the first start of {v} '
+                                'prepares it, once. Your games, builds and settings stay.') != QMessageBox.Yes: return
+        self.updating = flag = {'cancel': False}; sig = Progress(); sig.moved.connect(self.updatebar.show_progress); self.updatebar.show_progress(0, a['size'])
+        def fetch(): return upd.download_appimage(a, img, REPO, sig.moved.emit, lambda: flag['cancel'])
+        def got(r):
+            self.updating = None; sig.deleteLater()
+            if isinstance(r, upd.Cancelled): self.updatebar.show_release(rel); return
+            if isinstance(r, Exception):
+                self.updatebar.show_release(rel)
+                QMessageBox.warning(self, 'Update DroidPlay', f'The update could not be downloaded: {getattr(r, "strerror", None) or r}\n\n{img.name} is as it was.'); return
+            if self.builds.busy() or self.builds.ext:   # one started while it downloaded: nothing replaced, and closing would end it
+                Path(r).unlink(missing_ok=True); self.updatebar.show_release(rel); self.toast('A build started: Update again once it has finished'); return
+            try: new = upd.replace_appimage(r, img, menu_entry.retarget)
+            except OSError as e:
+                Path(r).unlink(missing_ok=True); self.updatebar.show_release(rel)
+                QMessageBox.warning(self, 'Update DroidPlay', f'The new AppImage could not be put in place of {img}: {e.strerror or e}. {img.name} is as it was.'); return
+            if upd.relaunch(new) is None:
+                self.updatebar.hide(); QMessageBox.warning(self, 'Update DroidPlay', f'DroidPlay {v} is in place, {new}, but did not start: close DroidPlay and open it.'); return
+            QApplication.quit()   # the new AppImage, started on its own, prepares its version (the window it shows) and opens
         bg(fetch, got)
 
     def dark_title(self):   # Windows' own title bar in its dark mode, to match the room

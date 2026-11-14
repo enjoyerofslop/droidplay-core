@@ -2,14 +2,19 @@
 ~/.local/share/DroidPlay/<version>/ and later starts reusing it, older versions removed but the previous one and any a running DroidPlay holds
 (dm/android/linux/unpack.py); Stop ending a build's whole process group (dm/android/desktop/procs.py); the data folder under XDG_DATA_HOME
 (dm/android/tools/data_home.py); the DejaVu fonts the AppImage carries, where the build looks last; Add to the applications menu (dm/android/desktop/menu_entry.py);
-the licences both packages gather (dm/android/licenses/collect.py). Linux and macOS (flock, process groups); not Windows."""
+the licences both packages gather (dm/android/licenses/collect.py); Update from the AppImage, the new one put in place of the old and started, from a stand-in
+release (dm/android/desktop/update.py). Linux and macOS (flock, process groups); not Windows."""
+import errno
+import hashlib
 import importlib.util
 import io
+import json
 import os
 from pathlib import Path
 import shutil
 import signal
 import subprocess
+import sys
 import tempfile
 import time
 import unittest
@@ -26,11 +31,13 @@ def load(name, path):
 
 POSIX = os.name != 'nt'
 if POSIX:
+    import fcntl
     unpack = load('unpack', 'dm/android/linux/unpack.py')
 procs = load('procs', 'dm/android/desktop/procs.py')
 data_home = load('data_home', 'dm/android/tools/data_home.py')
 menu_entry = load('menu_entry', 'dm/android/desktop/menu_entry.py')
 collect = load('collect', 'dm/android/licenses/collect.py')
+upd = load('update', 'dm/android/desktop/update.py')
 
 
 def payload(root, version):   # a stand-in for the AppImage's payload: core with its VERSION, a runtime with the python3 link PBS has
@@ -202,6 +209,120 @@ class MenuEntry(unittest.TestCase):   # Settings' Add to the applications menu, 
 
     def test_no_appimage_no_entry(self):   # from source, or APPIMAGE naming a file that's gone
         self.assertIsNone(menu_entry.appimage({})); self.assertIsNone(menu_entry.appimage({'APPIMAGE': str(self.tmp / 'gone.AppImage')}))
+
+
+@unittest.skipUnless(POSIX, 'the AppImage is Linux only')
+class AppImageUpdate(unittest.TestCase):   # Update from the AppImage: a stand-in release (DM_UPDATE_FEED) whose AppImage replaces this one and is started
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.addCleanup(lambda: [p.chmod(0o755) for p in self.tmp.rglob('*') if p.is_dir()])   # a test's read-only folder, writable again to be removed
+        self.core = self.tmp / 'share/DroidPlay/0.9.0/core'   # the version unpack.py prepared, which DroidPlay runs from
+        self.core.mkdir(parents=True); (self.core / 'VERSION').write_text('0.9.0\n'); (self.core.parent / '.complete').write_text('0.9.0\n')
+        self.apps = self.tmp / 'Apps'; self.apps.mkdir()
+        self.new = b'\x7fELF new AppImage ' + os.urandom(200_000)
+        (self.tmp / 'release').mkdir(); (self.tmp / 'release/DroidPlay-0.9.1-x86_64.AppImage').write_bytes(self.new)
+        self.platform = mock.patch.object(upd.sys, 'platform', 'linux'); self.platform.start(); self.addCleanup(self.platform.stop)
+
+    def appimage(self, name='DroidPlay-0.9.0-x86_64.AppImage'):   # the AppImage DroidPlay was started from, and the environment its runtime gave it
+        img = self.apps / name; img.write_bytes(b'\x7fELF old AppImage'); img.chmod(0o755)
+        self.env = {'APPIMAGE': str(img), 'XDG_DATA_HOME': str(self.tmp / 'share'), 'HOME': str(self.tmp / 'home'), 'DM_UPDATE_FEED': str(self.tmp / 'feed.json')}
+        return img
+
+    def release(self, digest=None):   # GitHub's releases/latest as a file, its AppImage's URL a file:// one
+        digest = digest or hashlib.sha256(self.new).hexdigest(); f = self.tmp / 'release/DroidPlay-0.9.1-x86_64.AppImage'
+        (self.tmp / 'feed.json').write_text(json.dumps({'tag_name': 'v0.9.1', 'html_url': 'https://example.invalid/v0.9.1', 'assets': [
+            {'name': f.name, 'size': len(self.new), 'browser_download_url': f.as_uri(), 'digest': f'sha256:{digest}'},
+            {'name': f.name + '.sha256', 'size': 99, 'browser_download_url': f.as_uri() + '.sha256', 'digest': 'sha256:' + '0' * 64}]}))
+        return upd.latest_release(upd.feed(self.env))
+
+    def update(self, img, rel):   # what the app's Update does once the player says yes, but starting it
+        part = upd.download_appimage(rel['appimage'], img, self.core)
+        return upd.replace_appimage(part, img, lambda old, new: menu_entry.retarget(old, new, self.env))
+
+    def test_the_feed_can_be_a_stand_in(self):
+        self.assertEqual(upd.feed({}), upd.RELEASES_API)
+        self.assertEqual(upd.feed({'DM_UPDATE_FEED': '/tmp/feed.json'}), 'file:///tmp/feed.json')
+        self.assertEqual(upd.feed({'DM_UPDATE_FEED': 'http://127.0.0.1:8000/latest'}), 'http://127.0.0.1:8000/latest')
+
+    def test_a_release_name_follows_the_version_and_the_menu_entry_follows_it(self):
+        img = self.appimage(); menu_entry.add(img, lambda p: Path(p).write_bytes(b'PNG') > 0, self.env)
+        rel = self.release()
+        self.assertEqual(rel['appimage']['name'], 'DroidPlay-0.9.1-x86_64.AppImage'); self.assertEqual(upd.how(rel, self.core, self.env), ('appimage', None))
+        part = upd.download_appimage(rel['appimage'], img, self.core)
+        self.assertEqual(part, self.apps / '.DroidPlay-0.9.1-x86_64.AppImage.part'); self.assertTrue(os.access(part, os.X_OK))
+        self.assertEqual(img.read_bytes(), b'\x7fELF old AppImage')   # untouched until it is replaced
+        new = upd.replace_appimage(part, img, lambda old, new: menu_entry.retarget(old, new, self.env))
+        self.assertEqual(new, self.apps / 'DroidPlay-0.9.1-x86_64.AppImage'); self.assertEqual(new.read_bytes(), self.new)
+        self.assertEqual(os.stat(new).st_mode & 0o777, 0o755); self.assertEqual(sorted(p.name for p in self.apps.iterdir()), [new.name])   # the old one gone, no .part
+        self.assertEqual(menu_entry.current(self.env)[1], new)
+        text = menu_entry.entry_path(self.env).read_text(); self.assertIn(f'Exec="{new}"\n', text); self.assertIn('X-DroidPlay-AddedBy=', text)
+        self.assertEqual(menu_entry.state(dict(self.env, APPIMAGE=str(new))), 'this')
+
+    def test_a_name_of_the_players_own_is_kept(self):   # replaced in place: a link, a script or an AppImage manager's entry still starts it
+        img = self.appimage('DroidPlay.AppImage'); new = self.update(img, self.release())
+        self.assertEqual(new, img); self.assertEqual(img.read_bytes(), self.new); self.assertEqual(sorted(p.name for p in self.apps.iterdir()), ['DroidPlay.AppImage'])
+
+    def test_an_entry_for_another_copy_is_not_moved(self):
+        other = self.apps / 'Other.AppImage'; other.write_bytes(b'x'); img = self.appimage()
+        menu_entry.add(other, lambda p: Path(p).write_bytes(b'PNG') > 0, self.env)
+        self.update(img, self.release()); self.assertEqual(menu_entry.current(self.env)[1], other)
+
+    def test_a_download_that_does_not_match_leaves_the_old_appimage(self):
+        img = self.appimage()
+        with self.assertRaisesRegex(ValueError, "doesn't match the release's checksum"): self.update(img, self.release('a' * 64))
+        self.assertEqual(sorted(p.name for p in self.apps.iterdir()), [img.name]); self.assertEqual(img.read_bytes(), b'\x7fELF old AppImage')
+
+    def test_no_room_is_said_before_anything_is_written(self):   # the new AppImage, and its first start's copy of the version (unpack.py)
+        img = self.appimage()
+        with mock.patch.object(upd.shutil, 'disk_usage', return_value=mock.Mock(free=1 << 20)), self.assertRaisesRegex(OSError, 'GB free in .* for the new version'):
+            self.update(img, self.release())
+        self.assertEqual(sorted(p.name for p in self.apps.iterdir()), [img.name])
+
+    def test_a_disk_that_fills_up_meanwhile(self):
+        img = self.appimage(); rel = self.release()
+        with mock.patch.object(upd, 'fetch', side_effect=OSError(errno.ENOSPC, 'No space left on device')), self.assertRaisesRegex(OSError, 'filled up'):
+            upd.download_appimage(rel['appimage'], img, self.core)
+
+    @unittest.skipIf(hasattr(os, 'geteuid') and os.geteuid() == 0, 'root writes anywhere')
+    def test_a_folder_it_cannot_write_to(self):   # the release's page instead, and why; and a folder that became read-only meanwhile, said so
+        img = self.appimage(); rel = self.release(); self.apps.chmod(0o555)
+        self.assertEqual(upd.how(rel, self.core, self.env), (None, f"DroidPlay can't write to the AppImage's folder, {self.apps}"))
+        with self.assertRaisesRegex(OSError, "can't write to the AppImage's folder"): upd.download_appimage(rel['appimage'], img, self.core)
+        self.assertEqual(img.read_bytes(), b'\x7fELF old AppImage')
+
+    def test_copies_that_are_not_the_appimage_get_the_release_page(self):
+        img = self.appimage(); rel = self.release()
+        self.assertEqual(upd.how(rel, self.core, {}), (None, None))   # from source: no APPIMAGE
+        self.assertEqual(upd.how(rel, self.tmp / 'checkout', self.env), (None, None))   # a checkout started from a program DroidPlay started, which has APPIMAGE
+        (self.core / 'VERSION').write_text('0.9.0-4-g1a2b3c4d\n')
+        self.assertIn('test build', upd.how(rel, self.core, self.env)[1]); (self.core / 'VERSION').write_text('0.9.0\n')
+        self.assertEqual(upd.how(dict(rel, appimage=None), self.core, self.env), (None, 'the release has no AppImage with a checksum'))
+        img.unlink(); self.assertIn('is gone', upd.how(rel, self.core, self.env)[1])
+        with mock.patch.object(upd.sys, 'platform', 'win32'): self.assertEqual(upd.appimage_install(self.core, self.env), (None, None))
+
+    def test_the_new_appimage_starts_on_its_own_without_this_versions_lock(self):
+        """relaunch: in a session of its own, without the old mount's variables, and without the lock this DroidPlay holds on its version's folder (unpack.py
+        makes it inheritable for the programs DroidPlay starts): inherited, the new DroidPlay would hold it for as long as it ran, and the old version
+        would never be removed"""
+        lock = self.core.parent / '.complete'; held = os.open(lock, os.O_RDWR); os.set_inheritable(held, True); fcntl.flock(held, fcntl.LOCK_SH)
+        out, stop = self.tmp / 'started.json', self.tmp / 'stop'
+        app = self.tmp / 'DroidPlay-0.9.1-x86_64.AppImage'
+        app.write_text(f'#!{sys.executable}\nimport json, os, sys, time\n'
+                       f'json.dump({{"sid": os.getsid(0), "env": sorted(os.environ)}}, open({str(out)!r}, "w"))\n'
+                       f'while not os.path.exists({str(stop)!r}) and time.monotonic() < {time.monotonic() + 30}: time.sleep(0.05)\n')
+        app.chmod(0o755)
+        started = upd.relaunch(app, dict(os.environ, APPIMAGE='/old.AppImage', APPDIR='/tmp/.mount_DroidPold', OWD='/x')); self.assertIsNotNone(started)
+        self.addCleanup(lambda: (stop.write_text(''), started.wait(10)))
+        for _ in range(200):
+            if out.is_file() and out.stat().st_size: break
+            time.sleep(0.05)
+        got = json.loads(out.read_text())
+        self.assertNotEqual(got['sid'], os.getsid(0)); self.assertNotIn('APPIMAGE', got['env']); self.assertNotIn('APPDIR', got['env'])
+        os.close(held)   # this DroidPlay closes: no one else may hold the version's lock now, the started copy included
+        fd = os.open(lock, os.O_RDWR)
+        try: fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        finally: os.close(fd)
+        self.assertIsNone(upd.relaunch(self.tmp / 'gone.AppImage', {}))
 
 
 class Licences(unittest.TestCase):   # what both stage scripts gather (collect.py): each module's licence files and its line in NOTICES.md
