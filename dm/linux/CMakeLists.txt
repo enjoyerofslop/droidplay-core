@@ -130,7 +130,6 @@ target_include_directories(dmhost_cli PRIVATE $<TARGET_PROPERTY:dmcore,INTERFACE
 target_compile_options(dmhost_cli PRIVATE $<$<COMPILE_LANGUAGE:C>:${DM_C_FLAGS}> -march=armv8.2-a+lse)
 target_compile_definitions(dmhost_cli PRIVATE DM_ANDROID=1 DM_LINUX=1)
 target_link_libraries(dmhost_cli ${DM_LIBS})
-target_link_options(dmhost_cli PRIVATE -Wl,--error-limit=0)
 
 # Host unit tests (-DDM_TESTS=ON): Android's list (dm/android/CMakeLists.txt) less its Android-only ones, run by ctest
 option(DM_TESTS "build the host unit tests" OFF)
