@@ -106,6 +106,7 @@ class Ofw(unittest.TestCase):
         return [(o[i].binding, o[i].cls, o[i].k) for i in range(k)]
 
     def asm(self, body, name):
+        assert self.spv_as is not None   # (only NEEDS_AS tests call this; pyright doesn't follow skipIf)
         p = self.tmp / f'{name}.spvasm'; p.write_text(FS.replace('BODY', body))
         subprocess.run([self.spv_as, '--target-env', 'vulkan1.1', p, '-o', self.tmp / f'{name}.spv'], check=True)
         return (self.tmp / f'{name}.spv').read_bytes()
