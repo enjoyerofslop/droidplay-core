@@ -117,8 +117,14 @@ static int vk_try(char *why, size_t nwhy) {
     g_sg_stages = VK_SHADER_STAGE_ALL; g_sg_size = 32; g_div_first0 = 0; g_mr_feat = (VkPhysicalDeviceDeviceMemoryReportFeaturesEXT){.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_MEMORY_REPORT_FEATURES_EXT};
     uint32_t ni = 0; vkEnumerateInstanceExtensionProperties(NULL, &ni, NULL);
     VkExtensionProperties *ie = calloc(ni ? ni : 1, sizeof *ie); vkEnumerateInstanceExtensionProperties(NULL, &ni, ie);
-    const char *iext[2]; uint32_t nie = 0;
+    const char *iext[8]; uint32_t nie = 0;
+#ifdef __ANDROID__
     if (has_ext(ie, ni, "VK_KHR_surface") && has_ext(ie, ni, "VK_KHR_android_surface")) { iext[nie++] = "VK_KHR_surface"; iext[nie++] = "VK_KHR_android_surface"; g_vk.has_surface = 1; }
+#else
+    { const char *const *w = NULL; uint32_t nw = front_vk_instance_extensions(&w), ok = nw > 0 && nw <= 8;
+      for (uint32_t i = 0; ok && i < nw; i++) ok = has_ext(ie, ni, w[i]);
+      if (ok) { for (uint32_t i = 0; i < nw; i++) iext[nie++] = w[i]; g_vk.has_surface = 1; } }
+#endif
     free(ie);
     VkApplicationInfo ai = {.sType = VK_STRUCTURE_TYPE_APPLICATION_INFO, .pApplicationName = "nxnative", .apiVersion = VK_API_VERSION_1_1};
     VkInstanceCreateInfo ic = {.sType = VK_STRUCTURE_TYPE_INSTANCE_CREATE_INFO, .pApplicationInfo = &ai, .enabledExtensionCount = nie, .ppEnabledExtensionNames = iext};

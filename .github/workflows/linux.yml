@@ -1,0 +1,55 @@
+# The Linux host (dm/linux) on an arm64 runner: it builds with clang, its unit tests pass, and the self test module (dm/android/tests/selftest_nso.py, rewritten
+# with DM_TARGET=linux) runs natively on the command-line host: the guest's x18, tpidr_el0 and tpidrro_el0 through the TLS thread slots, the gates, an import and
+# a second guest thread. Ubuntu 25.10 in a container, for SDL3. Device tests (a window, a game) stay manual: say what you ran in the pull request.
+name: linux
+
+on:
+  pull_request:
+  push:
+    branches: [main, linux-arm64]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: linux-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  GAME: 0100000011D90000   # Pokémon Brilliant Diamond: the profile the host is built for (any profile does; the job checks code, not a game)
+
+defaults:
+  run:
+    shell: bash
+
+jobs:
+  host:
+    name: Linux arm64 host build, unit tests and self test
+    runs-on: ubuntu-24.04-arm
+    container: ubuntu:25.10
+    timeout-minutes: 40
+    steps:
+      - name: Build tools and libraries
+        run: |
+          apt-get update -qq
+          DEBIAN_FRONTEND=noninteractive apt-get install -y -qq --no-install-recommends clang lld llvm cmake ninja-build pkg-config glslc python3 python3-pip \
+            python3-numpy git ca-certificates libsdl3-dev libavcodec-dev libavutil-dev > /dev/null
+          python3 -m pip install --break-system-packages -q capstone lz4
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Build the Linux host (the windowed host, the command-line host and the unit tests)
+        run: |
+          git config --global --add safe.directory "$PWD"
+          cmake -G Ninja -S dm/linux -B build -DCMAKE_C_COMPILER=clang -DGAME="$GAME" -DDM_TESTS=ON
+          ninja -C build
+      - name: Host unit tests
+        run: ctest --test-dir build --output-on-failure
+      - name: Self test on the command-line host
+        run: |
+          st=$(mktemp -d)
+          python3 dm/android/tests/selftest_nso.py "$(command -v clang)" "$(command -v llvm-objcopy)" "$st/main.nso"
+          DM_TARGET=linux python3 dm/tools/patch_nso.py "$st/main.nso" "$st/patched" main
+          DM_DBG=1 timeout 120 build/dmhost_cli "$st/patched" main 2>&1 | tee "$st/log.txt"
+          grep -q 'selftest: PASS' "$st/log.txt"

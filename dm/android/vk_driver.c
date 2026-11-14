@@ -20,7 +20,9 @@
 #include <drm/drm.h>
 #include "dm.h"
 #include "gfx_vk.h"
+#ifdef __ANDROID__
 #include "../third_party/libadrenotools/include/adrenotools/driver.h"   // the type of adrenotools_open_libvulkan, opened with dlsym: the host does not link it
+#endif
 
 #define VKB_DEF(f) PFN_##f f;
 VKB_FNS_GLOBAL(VKB_DEF) VKB_FNS(VKB_DEF)
@@ -96,6 +98,9 @@ static int first_gpu(PFN_vkGetInstanceProcAddr g, VkPhysicalDeviceProperties *pr
 
 // DM_VK_DRIVER's driver → its vkGetInstanceProcAddr, NULL (and one [RED] line) when it cannot run
 static PFN_vkGetInstanceProcAddr open_custom(const char *drv) {
+#ifdef DM_LINUX   // the Vulkan loader of a Linux system picks the driver itself: VK_DRIVER_FILES names another one's manifest
+    DRV_RED(drv, "DM_VK_DRIVER is for Android; on Linux set VK_DRIVER_FILES to the driver's ICD manifest. The system's driver instead"); return NULL;
+#else
     char src[700], dir[600]; const char *name;
     if (drv[0] == '/' || !g_ext[0]) snprintf(src, sizeof src, "%s", drv); else snprintf(src, sizeof src, "%s/%s", g_ext, drv);
     name = strrchr(src, '/') ? strrchr(src, '/') + 1 : src;
@@ -126,12 +131,18 @@ static PFN_vkGetInstanceProcAddr open_custom(const char *drv) {
     LOG("[vk] driver: %s (DM_VK_DRIVER, through libadrenotools), not the system's: %s, Vulkan %u.%u.%u, driver version %#x", path, pr.deviceName,
         VK_API_VERSION_MAJOR(pr.apiVersion), VK_API_VERSION_MINOR(pr.apiVersion), VK_API_VERSION_PATCH(pr.apiVersion), pr.driverVersion);
     return g;
+#endif
 }
 
 #define VKB_LOAD_GLOBAL(f) f = (PFN_##f)g_gipa(NULL, #f);
 static int open_system(void) {
-    void *lib = dlopen("libvulkan.so", RTLD_NOW | RTLD_LOCAL);
-    if (!lib || !(g_gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr"))) { LOG("[RED] [vk] no Vulkan: libvulkan.so: %s", dlerror()); return 0; }
+#ifdef DM_LINUX
+    const char *so = "libvulkan.so.1";   // the Khronos loader's soname (libvulkan.so is only in development packages)
+#else
+    const char *so = "libvulkan.so";
+#endif
+    void *lib = dlopen(so, RTLD_NOW | RTLD_LOCAL);
+    if (!lib || !(g_gipa = (PFN_vkGetInstanceProcAddr)dlsym(lib, "vkGetInstanceProcAddr"))) { LOG("[RED] [vk] no Vulkan: %s: %s", so, dlerror()); return 0; }
     VKB_FNS_GLOBAL(VKB_LOAD_GLOBAL)
     if (!vkCreateInstance || !vkEnumerateInstanceExtensionProperties) { LOG("[RED] [vk] no Vulkan: the driver has no vkCreateInstance"); return 0; }
     return 1;

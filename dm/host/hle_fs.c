@@ -213,7 +213,7 @@ static Result mount_ex(const char *name, const char *dir, int ro, int txn) {
         g_mnt[g_nmnt].txn_root = g_mnt[k].txn_root;
     } else if (txn) {
         char work[1100], neu[1100]; snprintf(work, sizeof work, "%s.work", dir); snprintf(neu, sizeof neu, "%s.new", dir);
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(DM_LINUX)
         dm_android_swap_recover(dir); dm_android_swap_recover(work);   // a swap of plain renames (plat_android.c: sdcardfs has no RENAME_EXCHANGE) that a kill cut short
 #endif
         mkdir(dir, 0755);

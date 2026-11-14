@@ -12,7 +12,7 @@ static pthread_once_t g_keyown_once = PTHREAD_ONCE_INIT;
 static void own_free(void *p) { void **own = p; free(own[0]); free(own[1]); free(own); }
 static void own_key_init(void) { if (pthread_key_create(&g_keyown, own_free)) die("cannot create the free key for thread-local blocks"); }
 void guest_thread_init(void) {
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(DM_LINUX)
     dm_slots_thread_init();   // the slots live in the block x18 points into (dm.h)
     // In an app process the runtime (ART) blocks signals on the threads it makes, and threads inherit their creator's mask: the GC pause (SIGUSR2, hle_thread.c),
     // the crash and dirty-page handlers and the watchdog (crash.c), the suspension of hang reports (plat_android.c thread_suspend) must reach guest threads

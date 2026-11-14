@@ -1959,7 +1959,7 @@ with open(P('fixups.tsv'), 'w') as f:
     if RENDER_SCALE:   # a render-scale stub reads state +0x10, up to this scale (the loader holds DM_RENDER_SCALE to it; dm/games/settings.py offers the setting up to it)
         assert isinstance(RENDER_SCALE, int) and 1 <= RENDER_SCALE <= 9, f'render scale stub: ctx.render_scale is a whole largest scale, 1 to 9: {RENDER_SCALE!r}'
         f.write(f'# RENDER_SCALE\t{RENDER_SCALE}\n')
-    if nso_asm.TARGET != 'apple': f.write(f'# TARGET\t{nso_asm.TARGET}\n')   # thread slots through x18 (nso_asm.MRS_TPIDRRO): only a host built for that target may load it
+    if nso_asm.TARGET != 'apple': f.write(f'# TARGET\t{nso_asm.TARGET}\n')   # thread slots through x18 or tpidr_el0 (nso_asm.MRS_TPIDRRO): only a host built for that target may load it
     if NAME == 'main':
         for capability in sorted(set(PATCHES['CAPABILITIES'].get(BUILD_ID, ())) | FS_CAPABILITIES):
             assert re.fullmatch(r'[A-Z][A-Z0-9_]*', capability), f'invalid capability {capability}'

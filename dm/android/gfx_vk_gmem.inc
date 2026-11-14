@@ -38,7 +38,9 @@ typedef struct { VkStructureType sType; void *pNext; VkBool32 memoryMapPlaced, m
 typedef struct { VkStructureType sType; void *pNext; VkDeviceSize minPlacedMemoryMapAlignment; } VkPhysicalDeviceMapMemoryPlacedPropertiesEXT;
 typedef struct { VkStructureType sType; const void *pNext; void *pPlacedAddress; } VkMemoryMapPlacedInfoEXT;
 #endif
+#ifdef __ANDROID__
 #include <android/hardware_buffer.h>
+#endif
 #include <sys/socket.h>
 #ifndef MADV_POPULATE_READ
 #define MADV_POPULATE_READ 22
@@ -50,6 +52,11 @@ enum { GM_TAB_BYTES = GMEM_TAB_BYTES, GM_LOG_BYTES = DMSH_GMEM_MAP_ENTRIES / 8, 
 #define GM_USAGE (VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_KHR | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | \
                   VK_BUFFER_USAGE_INDEX_BUFFER_BIT | VK_BUFFER_USAGE_INDIRECT_BUFFER_BIT | VK_BUFFER_USAGE_UNIFORM_TEXEL_BUFFER_BIT | VK_BUFFER_USAGE_STORAGE_TEXEL_BUFFER_BIT | \
                   VK_BUFFER_USAGE_TRANSFER_SRC_BIT | VK_BUFFER_USAGE_TRANSFER_DST_BIT)
+#ifndef __ANDROID__   // Linux (dm/linux): no AHardwareBuffers, so no device lists their extension and the route is placed maps only (g_gm_has_ahb stays 0)
+typedef struct AHardwareBuffer AHardwareBuffer;
+typedef PFN_vkVoidFunction PFN_vkGetAndroidHardwareBufferPropertiesANDROID;
+static void AHardwareBuffer_release(AHardwareBuffer *b) { (void)b; }
+#endif
 typedef struct { uintptr_t lo, hi; const void *pool; VkDeviceMemory m; VkBuffer b; uint64_t gpu; AHardwareBuffer *ahb; uint64_t *rd; uint32_t slot; } gm_seg;   // one placed allocation over [lo, hi) of the pool at pool;
                                                                                                                                   // ahb: the AHardwareBuffer route's buffer; rd: each page's last in-place read (gfx_vk_gmem_inplace.inc);
                                                                                                                                   // slot: its place in the pools' descriptor array (gfx_vk_gmem_noptr.inc)
@@ -222,6 +229,7 @@ static int gm_place1(uintptr_t lo, size_t n, gm_seg *s) {   // [lo, lo + n) as o
         t_gn.what = 9; t_gn.mbs = 16.0 / ((gm_now() - r0) / 1e9) + (double)(sum & 0); t_gn.ms = dt / 1e6; }
     return 1;
 }
+#ifdef __ANDROID__
 // The AHardwareBuffer route: the dma-buf of a BLOB buffer, which AHardwareBuffer_sendHandleToUnixSocket passes as the first descriptor of its native handle (the public way to it)
 static int gm_ahb_fd(AHardwareBuffer *b) {
     int sv[2], fd = -1; if (socketpair(AF_UNIX, SOCK_STREAM | SOCK_CLOEXEC, 0, sv)) return -1;
@@ -280,6 +288,9 @@ static int gm_place1_ahb(uintptr_t lo, size_t n, gm_seg *s) {   // as gm_place1,
         t_gn.what = 9; t_gn.mbs = 16.0 / ((gm_now() - r0) / 1e9) + (double)(sum & 0); t_gn.ms = dt / 1e6; }
     return 1;
 }
+#else
+static int gm_place1_ahb(uintptr_t lo, size_t n, gm_seg *s) { (void)lo; (void)n; (void)s; t_gn.what = 6; return 0; }   // never chosen on Linux (g_gm_has_ahb is 0)
+#endif
 static void gm_note_log(const gm_note *g) {   // t_gn, outside the swap
     switch (g->what) {
     case 1: LOG("[RED] [vk] raw global memory: vkCreateBuffer of %zu bytes failed: the pool at %#lx stays anonymous", g->n, (unsigned long)g->lo); break;

@@ -1,4 +1,5 @@
-// Android implementations of the Darwin stand-ins declared in compat/dm_android.h, and the x18 thread-slot block (dm.h dm_slot_get).
+// Android implementations of the Darwin stand-ins declared in compat/dm_android.h, and the x18 thread-slot block (dm.h dm_slot_get). The Linux host (dm/linux) builds
+// it too, with its own thread slots.
 #include "dm.h"
 #include <dirent.h>
 #include <ftw.h>
@@ -15,6 +16,7 @@
 #undef setxattr
 #undef removexattr
 
+#ifndef DM_LINUX   // Linux with glibc: the slots are TLS of the host (dm/linux/plat_linux.c)
 // ---- Thread slots ----
 // One block per guest thread: a 4 KB page whose last 32 bytes are the slots (K18, KTLS, KTLR, KGATE in that order), then SCS_SIZE bytes of shadow
 // call stack. x18 points at the start of the shadow call stack, so slot k is at x18 - 32 + 8k, and system code built with ShadowCallStack (which
@@ -54,6 +56,7 @@ void dm_slot_set(pthread_key_t k, const void *v) {
     if (!t_blk.map) dm_slots_thread_init();
     slots()[k] = (uint64_t)(uintptr_t)v;
 }
+#endif
 
 // ---- Quality of service: a nice value on the calling thread ----
 static __thread qos_class_t t_qos;
@@ -83,7 +86,11 @@ qos_class_t dm_android_qos_get(void) { return t_qos ? t_qos : QOS_CLASS_DEFAULT;
 // raised); DM_VK_ADPF_THERMAL=0: the session stays through thermal mitigation; DM_VK_ADPF_DONE=0: the completion thread is left out; DM_VK_ADPF_LOG=1: the reported work every
 // 300 presents and each change of the target
 #include <dlfcn.h>
+#ifdef __ANDROID__
 #include <android/api-level.h>
+#else
+static int android_get_device_api_level(void) { return 0; }   // Linux: no libandroid.so, so neither a hint session nor the thermal manager is found
+#endif
 typedef struct APerformanceHintManager APerformanceHintManager;
 typedef struct APerformanceHintSession APerformanceHintSession;
 static struct {

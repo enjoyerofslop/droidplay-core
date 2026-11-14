@@ -31,7 +31,7 @@ ssize_t pwrite(int, const void *, size_t, off_t);
 static int g_clone_enotsup;                   // 1: clonefile fails as on HFS+ and exFAT (ENOTSUP), checked on disk images of both
 static int fake_clonefile(const char *src, const char *dst, uint32_t flags) {
     if (g_clone_enotsup) { errno = ENOTSUP; return -1; }
-#ifdef __ANDROID__
+#if defined(__ANDROID__) || defined(DM_LINUX)
     return dm_android_clonefile(src, dst, (int)flags);   // the Android stand-in (dm_android.h's clonefile macro, undefined above)
 #else
     return clonefile(src, dst, flags);

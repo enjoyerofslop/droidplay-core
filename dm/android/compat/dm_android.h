@@ -3,11 +3,12 @@
 // header names (mach/mach.h, dispatch/dispatch.h, ...) are small files beside this one that include it.
 // Only the subset the host calls is provided, with the semantics the host relies on (see each comment).
 #pragma once
-#ifndef __ANDROID__
-#error "dm_android.h is for Android builds only"
+#if !defined(__ANDROID__) && !defined(DM_LINUX)
+#error "dm_android.h is for Android and Linux (dm/linux, DM_LINUX) builds only"
 #endif
 #define _GNU_SOURCE 1
 #include <errno.h>
+#include <stdbool.h>   // bionic's headers bring it in; glibc's do not (dm/linux)
 #include <fcntl.h>
 #include <malloc.h>
 #include <pthread.h>
@@ -116,7 +117,9 @@ static inline int sysctlbyname(const char *n, void *o, size_t *on, const void *i
 // anonymous range cannot be aliased and the call fails (NVN's virtual pools over such memory then keep the mapping in their page table only)
 kern_return_t vm_remap(mach_port_t t, vm_address_t *to, vm_size_t size, vm_address_t mask, int flags, mach_port_t st, vm_address_t from, boolean_t copy,
                        vm_prot_t *cur, vm_prot_t *max, vm_inherit_t inh);   // plat_android.c
+#ifdef __ANDROID__
 static inline int getdtablesize(void) { return (int)sysconf(_SC_OPEN_MAX); }
+#endif
 // Suspending another thread (a thread's "port" is its tid): a real-time signal whose handler saves the thread's registers and waits on a futex until
 // thread_resume (plat_android.c). Nesting counts as Mach's does; a thread cannot suspend itself
 kern_return_t thread_suspend(mach_port_t t);

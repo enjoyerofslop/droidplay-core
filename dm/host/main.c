@@ -117,7 +117,7 @@ static void host_preload(int argc, char **argv) {
 #ifdef __APPLE__
         CFBundleRef b = CFBundleGetMainBundle(); CFTypeRef c = b ? CFBundleGetValueForInfoDictionaryKey(b, CFSTR("DMCommit")) : NULL;
         if (c && CFGetTypeID(c) == CFStringGetTypeID()) CFStringGetCString((CFStringRef)c, cs, sizeof cs, kCFStringEncodingUTF8);
-#elif defined(__ANDROID__)   // no Info.plist: the commit and version the host library was built from (dm/android/build_stamp.c)
+#elif defined(__ANDROID__) || defined(DM_LINUX)   // no Info.plist: the commit and version the host library was built from (dm/android/build_stamp.c)
         { const char *dm_build_commit(void); snprintf(cs, sizeof cs, "%s", dm_build_commit()); }
 #endif
         LOG("build: commit %s, shader chain %s, profile %s", cs, DMSH_CHAIN, DM_GAME_ID);

@@ -2,7 +2,12 @@
 #pragma once
 #include <pthread.h>
 #include <stdint.h>
+#ifdef __ANDROID__
 #define VK_USE_PLATFORM_ANDROID_KHR 1
+#define VKB_FNS_SURFACE(X) X(vkCreateAndroidSurfaceKHR)
+#else
+#define VKB_FNS_SURFACE(X)   // Linux (dm/linux): the front end's window library makes the surface (front_linux.c)
+#endif
 #define VK_NO_PROTOTYPES 1   // every vk* below is a pointer, filled from the driver vk_driver.c opens: the system's, or DM_VK_DRIVER's
 #include <vulkan/vulkan.h>
 
@@ -15,7 +20,7 @@
     X(vkCmdCopyImage) X(vkCmdCopyImageToBuffer) X(vkCmdDispatch) X(vkCmdDispatchIndirect) X(vkCmdDraw) X(vkCmdDrawIndexed) X(vkCmdDrawIndexedIndirect) X(vkCmdEndQuery) X(vkCmdEndRenderPass) \
     X(vkCmdPipelineBarrier) X(vkCmdPushConstants) X(vkCmdResetQueryPool) X(vkCmdResolveImage) X(vkCmdSetBlendConstants) X(vkCmdSetDepthBias) \
     X(vkCmdSetScissor) X(vkCmdSetStencilCompareMask) X(vkCmdSetStencilReference) X(vkCmdSetStencilWriteMask) X(vkCmdSetViewport) X(vkCmdWriteTimestamp) \
-    X(vkCreateAndroidSurfaceKHR) X(vkCreateBuffer) X(vkCreateBufferView) X(vkCreateCommandPool) X(vkCreateComputePipelines) X(vkCreateDescriptorPool) \
+    VKB_FNS_SURFACE(X) X(vkCreateBuffer) X(vkCreateBufferView) X(vkCreateCommandPool) X(vkCreateComputePipelines) X(vkCreateDescriptorPool) \
     X(vkCreateDescriptorSetLayout) X(vkCreateDevice) X(vkCreateFence) X(vkCreateFramebuffer) X(vkCreateGraphicsPipelines) X(vkCreateImage) \
     X(vkCreateImageView) X(vkCreatePipelineCache) X(vkCreatePipelineLayout) X(vkCreateQueryPool) X(vkCreateRenderPass) X(vkCreateSampler) \
     X(vkCreateSemaphore) X(vkCreateShaderModule) X(vkCreateSwapchainKHR) X(vkDestroyBuffer) X(vkDestroyBufferView) X(vkDestroyCommandPool) X(vkDestroyDescriptorPool) \
@@ -59,6 +64,10 @@ void vk_start_device(const char *gpu, int driver_id);
 void vk_start_pipe_failed(const char *a, const char *b);
 void vk_start_lost(VkResult r);
 void vk_start_tick(void);
+#ifndef __ANDROID__
+// Linux: the instance extensions the window's surface needs, as the front end's window library names them (front_linux.c); the command-line host has none (front_cli.c)
+uint32_t front_vk_instance_extensions(const char *const **names);
+#endif
 int vk_fp_host(void);   // vk_driver.c: the driver's compiles run with FPCR 0 (DM_VK_FP_HOST); the pipeline cache's file is named for it
 
 typedef struct {

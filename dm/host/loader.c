@@ -33,7 +33,24 @@ static pthread_key_t key_value(unsigned i) {
     default: return g_keygate;
     }
 }
-#ifdef __ANDROID__
+#if defined(DM_LINUX)
+// The slots are fixed places in the host's initial-exec TLS (dm.h, plat_linux.c): the "keys" are the slot numbers, and the key page holds each slot's offset from
+// tpidr_el0, the same in every thread
+static void create_keys(void) {
+    g_key18 = KEY_K18; g_keytls = KEY_KTLS; g_keytlr = KEY_KTLR; g_keygate = KEY_KGATE;
+    LOG("thread slots in TLS: K18 %+lld KTLS %+lld KTLR %+lld KGATE %+lld", (long long)dm_slot_keypage_value(g_key18), (long long)dm_slot_keypage_value(g_keytls),
+        (long long)dm_slot_keypage_value(g_keytlr), (long long)dm_slot_keypage_value(g_keygate));
+}
+static uint64_t key_page_entry(unsigned i) { return (uint64_t)dm_slot_keypage_value(key_value(i)); }
+// K slot check: slot = tpidr_el0 + its key page value, as the rewritten code reads it
+static void tsd_check(void) {
+    dm_slot_set(g_key18, (void *)0x1234);
+    uint64_t base; __asm__ volatile("mrs %0, tpidr_el0" : "=r"(base));
+    uint64_t off = *(uint64_t *)(g_mod[0].base + g_mod[0].key_page_off + g_mod[0].key_idx[KEY_K18] * 8);
+    if (*(uint64_t *)(base + off) != 0x1234) die("TLS slot layout mismatch");
+    dm_slot_set(g_key18, 0);
+}
+#elif defined(__ANDROID__)
 // The slots are fixed places in the x18 block (dm.h): the "keys" are the slot numbers, and the key page holds each slot's offset from x18
 static void create_keys(void) {
     g_key18 = KEY_K18; g_keytls = KEY_KTLS; g_keytlr = KEY_KTLR; g_keygate = KEY_KGATE;
@@ -272,7 +289,9 @@ static void read_layout(module_t *m, const char *dir) {
     if (!f) die("open %s", path);
     static const char *kn[KEY_N] = {"K18", "KTLS", "KTLR", "KGATE"};
     char line[256], key[48]; unsigned long v; unsigned seen = 0;
-#ifdef __ANDROID__
+#if defined(DM_LINUX)
+    const char *want = "linux";
+#elif defined(__ANDROID__)
     const char *want = "android";
 #else
     const char *want = "apple";

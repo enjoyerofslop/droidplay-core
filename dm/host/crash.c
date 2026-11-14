@@ -205,7 +205,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
     fprintf(stderr, " sp=%#llx", DM_SS(uc).__sp);
     {   // the crashing thread by name: a crash in a host thread (the replay, its completion thread, a pipeline build) or a driver's own was told apart only by the stack
         char tn[32] = ""; pthread_getname_np(pthread_self(), tn, sizeof tn);
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(DM_LINUX)
         fprintf(stderr, " thread %d \"%s\"\n", (int)gettid(), tn);
 #else
         fprintf(stderr, " thread \"%s\"\n", tn);
@@ -244,7 +244,7 @@ static void on_crash(int sig, siginfo_t *si, void *uc_) {
         }
         fputc('\n', stderr); }
     if (g_dump_hook) g_dump_hook();
-#if defined(__ANDROID__)
+#if defined(__ANDROID__) || defined(DM_LINUX)
     usleep(500000);   // stderr reaches logcat and log.txt through a pipe a reader thread empties (front_android.c log_reader): exiting at once lost all but the first lines
 #endif
     _exit(128 + sig);
