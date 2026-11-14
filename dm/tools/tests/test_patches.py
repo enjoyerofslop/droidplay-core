@@ -138,6 +138,32 @@ class Registry(unittest.TestCase):
                 self.assertIn(old, old_words, why); self.assertIn(new, new_words, why)
                 self.assertEqual(int(old[:2], 16) & 31, int(new[:2], 16) & 31, why)
 
+    def test_arceus_join_count_cuts_are_one_atomic_add(self):
+        # Pokémon Legends: Arceus's fork/join count (its note's "Title screen freeze"): each cut turns a plain ldr / add or sub #1 / str of the join's word +0x138 into one stadd of +1
+        # or -1 to the same word through x8 and x9, and leaves the instructions between them as they were. A plain load and store left on either side would lose an update again
+        from capstone import Cs, CS_ARCH_ARM64, CS_MODE_ARM
+        md = Cs(CS_ARCH_ARM64, CS_MODE_ARM)
+        def ins(h): return [(i.mnemonic, i.op_str) for i in md.disasm(bytes.fromhex(h), 0)]
+        m = MODS[REPO / 'dm/games/01001F5010DFA000/patches.py']
+        rule = next(r for r in m.MATCH_CUTS['main'] if r['name'] == m.join)
+        cuts = [c for f in rule['functions'] for c in f['cuts']]
+        self.assertEqual(len(cuts), 7)
+        for delta, old, new, why in cuts:
+            o, n = ins(old), ins(new)
+            self.assertEqual(len(o), len(old) // 8, why); self.assertEqual(len(n), len(o), why)
+            base = re.fullmatch(r'w8, \[(x\d+), #0x138\]', o[0][1])
+            assert base, why
+            self.assertTrue(o[0][0] == 'ldr' and o[-1] == ('str', o[0][1]), why)
+            step = [k for k, i in enumerate(o) if i in (('add', 'w8, w8, #1'), ('sub', 'w8, w8, #1'))]
+            self.assertEqual(len(step), 1, why)
+            self.assertEqual(n[0], ('add', f'x8, {base[1]}, #0x138'), why)
+            self.assertEqual(n[step[0]], ('mov', 'w9, #1' if o[step[0]][0] == 'add' else 'w9, #-1'), why)
+            self.assertEqual(n[-1], ('stadd', 'w9, [x8]'), why)
+            for k in range(1, len(o) - 1):
+                if k == step[0]: continue
+                self.assertEqual(n[k], o[k], why)
+                self.assertFalse(re.search(r'\b[wx][89]\b', o[k][1]), why)   # nothing between them reads or writes x8 or x9
+
     def test_game_files_name_their_own_builds(self):
         for p, m in MODS.items():
             if p.name != 'patches.py' or not (p.parent / 'game.tsv').is_file(): continue

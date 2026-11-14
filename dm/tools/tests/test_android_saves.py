@@ -323,9 +323,12 @@ class SendSave(unittest.TestCase):
     def test_an_archive_zipfile_cant_read_goes_to_tar(self):
         bad = self.tmp / 'save.rar'; bad.write_bytes(b'Rar!\x1a\x07\x01\x00junk')
         r = mock.Mock(returncode=1, stdout='', stderr='tar: Error opening archive: Unrecognized archive format')
-        with mock.patch.object(ba.subprocess, 'run', return_value=r) as run, self.assertRaisesRegex(ba.BuildError, "save.rar can't be unpacked here .*Unrecognized archive format"):
-            ba.import_save('S', TID, bad, self.work, self.logs)
-        self.assertEqual(run.call_args[0][0][:3], ['tar', '-xf', str(bad)])
+        which = shutil.which
+        for bsdtar, tar in (('/usr/bin/bsdtar', '/usr/bin/bsdtar'), (None, 'tar')):   # bsdtar first where there is one: Linux's tar, GNU's, reads neither RAR nor 7z
+            with mock.patch.object(ba.shutil, 'which', lambda n, b=bsdtar: b if n == 'bsdtar' else which(n)), mock.patch.object(ba.subprocess, 'run', return_value=r) as run, \
+                 self.assertRaisesRegex(ba.BuildError, "save.rar can't be unpacked here .*Unrecognized archive format"):
+                ba.import_save('S', TID, bad, self.work, self.logs)
+            self.assertEqual(run.call_args[0][0][:3], [tar, '-xf', str(bad)])
         self.assertEqual(self.pushed, {})
 
     def test_a_deflate64_zip_is_named(self):   # neither zipfile nor bsdtar reads it: the player is told to unpack it with Explorer, which wrote it

@@ -1,0 +1,23 @@
+# The X11 libraries Qt's xcb platform plugin (libQt6XcbQpa, and libxcb-glx for its GLX integration) needs and a fresh desktop install may lack: the usual
+# "could not load the Qt platform plugin xcb" error. stage.sh puts them beside the Qt libraries, where the plugin's RUNPATH ($ORIGIN) finds them. They come from
+# Ubuntu 22.04's archive, so their glibc needs stay under DroidPlay's floor (2.34); libxcb.so.1 itself, which every X11 system has, comes from the system.
+# libxkbcommon comes with libxkbcommon-x11, of the same version: -x11 uses libxkbcommon's internals (Debian pins the pair to one version), and Ubuntu's
+# 1.4.0 -x11 beside Fedora 44's libxkbcommon 1.13 crashed in xkb_x11_state_new_from_device as Qt's xcb plugin connected. Every Qt library then takes the
+# bundled libxkbcommon, which reads the system's keyboard layouts (/usr/share/X11/xkb) as any version does.
+# Each row: the package, its file under https://archive.ubuntu.com/ubuntu/, its SHA-256 (from jammy's Packages index).
+libxcb-cursor0	pool/universe/x/xcb-util-cursor/libxcb-cursor0_0.1.1-4ubuntu1_amd64.deb	c9b5d1ad4af57397b1bd77e0a92750e34419def134c0282a0836ae9efc07cf64
+libxcb-icccm4	pool/main/x/xcb-util-wm/libxcb-icccm4_0.4.1-1.1build2_amd64.deb	4dfe14a0ce681b823b740dabb3de84b3ce0958c9a404af61823b11f64047b0ef
+libxcb-util1	pool/main/x/xcb-util/libxcb-util1_0.4.0-1build2_amd64.deb	237d51a378b93c1669ff193084ebeb6422fe1e2ea96c2e9a0099eac40992a345
+libxcb-image0	pool/main/x/xcb-util-image/libxcb-image0_0.4.0-2_amd64.deb	b52babc3b4f2aa5241cac3a7888ce3b37d25a7f18867cae180e8cd11ec945cb9
+libxcb-keysyms1	pool/main/x/xcb-util-keysyms/libxcb-keysyms1_0.4.0-1build3_amd64.deb	1d62f96a793cc1aa0df860de3f7d83edea2fa461d97e2b3d4d7f7e7a10e55f42
+libxcb-render-util0	pool/main/x/xcb-util-renderutil/libxcb-render-util0_0.3.9-1build3_amd64.deb	f87659a2369430ed2acb1cdae54a06fa9d60727a6545594e213173ddb4377727
+libxkbcommon0	pool/main/libx/libxkbcommon/libxkbcommon0_1.4.0-1_amd64.deb	a0470edb237d52b71ad41f755c043164abed01423585ed5ea19525b3baaf84f7
+libxkbcommon-x11-0	pool/main/libx/libxkbcommon/libxkbcommon-x11-0_1.4.0-1_amd64.deb	e29c40fab6e0f055218aee4c7e60cd61ea82283229d7ac7ac02e226e92a5b0d5
+libxcb-randr0	pool/main/libx/libxcb/libxcb-randr0_1.14-3ubuntu3_amd64.deb	39dc0f73fa3bd43f3f7755cb7d12bfd1cd59dd8966f747d66fba47dfc8652f62
+libxcb-render0	pool/main/libx/libxcb/libxcb-render0_1.14-3ubuntu3_amd64.deb	26d331ed6e1219485dbd6a35b7c9cf552e1470f41bf2158b44a1331405f05250
+libxcb-shape0	pool/main/libx/libxcb/libxcb-shape0_1.14-3ubuntu3_amd64.deb	71666977d7aa11877d7af663231cabf4bde60b033947b83358522c6f43873b3d
+libxcb-shm0	pool/main/libx/libxcb/libxcb-shm0_1.14-3ubuntu3_amd64.deb	6d86c9ea2666276c862e64e8a1daa6cb1dd3e4da5ad9165eeb2507311c8a09bd
+libxcb-sync1	pool/main/libx/libxcb/libxcb-sync1_1.14-3ubuntu3_amd64.deb	81281149575a3e2cfee5629150bd5a7e52b2c16ed0d6c86b96108b520ab154b8
+libxcb-xfixes0	pool/main/libx/libxcb/libxcb-xfixes0_1.14-3ubuntu3_amd64.deb	c5fdfad628e4ccdc663fcb391d72a2510a8788dc680c070c76cea3e501791756
+libxcb-xkb1	pool/main/libx/libxcb/libxcb-xkb1_1.14-3ubuntu3_amd64.deb	4cf69af3ff6a60b63f9f6ea6e7d27471114c6bcbcf3f981f7b88f361029e5eb8
+libxcb-glx0	pool/main/libx/libxcb/libxcb-glx0_1.14-3ubuntu3_amd64.deb	395855609f1ff02208b12aea1ef82f5018c6a262825bda8c9a49ec8cab9deacb

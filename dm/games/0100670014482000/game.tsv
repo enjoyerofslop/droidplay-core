@@ -1,0 +1,52 @@
+# Game profile of Assassin's Creed: The Ezio Collection (Switch, update 1.3, v196608): Assassin's Creed II in program 0, Brotherhood in program 1 with its data as DLC
+# (0100670014483001), Ubisoft's AnvilNext, NVN, SDK 11.4.3, Havok and Wwise. On the Mac this program boots through the collection's launcher parameter into II's
+# menus and its opening at Abstergo, under control, at 30 fps. Its shaders are bare control sections and code areas, 160 in main and 46,540 in the Oodle blocks
+# of the .forge archives of versions 31 (II) and 25 (Brotherhood) (dm/gfx/tools/anvil_forge.py; see README.md)
+# Format: see dm/games/README.md
+# The provisional profile the survey made (dm/games/profile_guess.py), with the launcher's parameter (launch_param), shader_separate and Brotherhood's shader group added
+
+# ---- Identity ----
+title_id	0100670014482000
+program_id	0100670014482000
+
+# ---- App ----
+name	Assassin's Creed: The Ezio Collection
+ipa	AssassinsCreedTheEzioCollection.ipa
+app_category	public.app-category.games
+
+# ---- Versions ----
+build	v196608	1.3	main=824b38a25986b2abf5b3a356430ee6b3	sdk=4fd34bc96c00201c47cd7ba4c71b41e3
+package	v196608
+shader_versions	v196608
+
+# ---- Files ----
+# every module main imports from
+modules	main sdk
+romfs_marker	AC2/DataNX_Firenze.forge
+zip_store	.bk2:.forge:.pck:.metallib
+
+# ---- Memory ----
+# main sets a heap of at most the pool − 64 MB: a 3328 MB heap region
+mem_reserve	0x100000000
+mem_alias	0x10000000
+mem_stack	0x10000000
+app_pool	0xCD500000
+# the NPDM declares 0 MB of system resource: IsVirtualAddressMemoryEnabled is false, as on Horizon (Big Brain Academy: Brain vs. Brain sets a heap only then)
+sys_resource	0x0
+
+# ---- Launch ----
+# The collection's launcher (this program, started from HOME) restarts it with oe::ExecuteProgram(0, "/launcher:off /gamesoundlanguage:en /gamemenulanguage:en
+# /gamerewardsPurchased:0  /world:TitleScreen") to start Assassin's Creed II (100 bytes, no terminating zero); the host runs one program, so it hands that parameter
+# over at the start instead (hle_oe.c), and the game starts II without the launcher. Brotherhood, the launcher's other choice, is program 1 (80 bytes of parameters)
+launch_param	hex:2f6c61756e636865723a6f6666202f67616d65736f756e646c616e67756167653a656e202f67616d656d656e756c616e67756167653a656e202f67616d65726577617264735075726368617365643a3020202f776f726c643a5469746c6553637265656e
+
+# ---- Shader split ----
+# Every shader is one stage, a control section directly followed by its code area in the .forge entries and in main, and the game draws with a vertex shader and a
+# pixel shader of separate objects: every vertex shader is paired with the pixel shader cover (shader_split.py separable_pairs), so it is padded for any of them
+shader_separate	on
+shader_groups	/AC2/=ac2 /AC2_PATCH/=ac2patch /ACB/=acb
+shader_note	Assassin's Creed: The Ezio Collection shaders
+
+# ---- After the rewrite ----
+# used memory for the current rewritten modules, at least the default 64 MB
+mem_used	0x5000000

@@ -47,8 +47,10 @@
 #   · PDAT (the engine with the namespace phx, Kirby Air Riders): flatbuffer records tagged PMAP, zstd frames in the .dat archives, each holding a program's control sections and code areas, see pdat_jobs and pdat_shaders
 #   · Unreal Engine 3 (Batman: Arkham Knight): shader records in its global shader cache (BMSG) and in the packages (the combined shader cache), whose compressed chunks are Oodle blocks decoded by the game's own decoder in the Mac host, see ue3_body and ue3_shaders
 #   · Liquid Engine archives (11 bit studios, Frostpunk): one shader per entry of the .dat archive its .idx / .str index and name (zstd entries), see liquid_index and liquid_shaders
-#   · AnvilNext forge (Ubisoft, Assassin's Creed: The Rebel Collection): BNSH in the LZO1X blocks of the .forge entries (version 27, anvil_forge.py), see anvil_jobs and anvil_shaders
+#   · AnvilNext forge (Ubisoft, Assassin's Creed: The Rebel Collection and The Ezio Collection): the blocks of the .forge entries (anvil_forge.py), LZO1X holding BNSH in version 27, Oodle (decoded by
+#     the game's own decoder in the Mac host) holding bare control sections and code areas in versions 25 and 31, which main embeds too, see anvil_jobs, anvil_shaders, anvil_raw and anvil_main
 #   · Bethesda BSA (Creation Engine, The Elder Scrolls V: Skyrim): NVN records {control offset, length, code offset, length} in the .fxp member of Skyrim - Shaders.bsa (bsa.py) and in main, see fxp_shaders
+#   · IGA (Alchemy, Vicarious Visions' engine, Crash Bandicoot N. Sane Trilogy): whole GLSLC outputs in the .igz members under shaders/ of its LZMA archives (archives/shaders_nx.pak), see iga.py
 # Code area: 0x30 header + (graphics) 0x50 SPH + instructions; header magic 0x12345678 for graphics, 0x12345679 for compute. The control section starts with 0x98761234, +0x704 = code area length,
 #   +0x700 = start of the c1 constant segment within the code area; for compute +0x748 thread group xyz (u32 ×3), +0x754 shared memory bytes (checked one by one against PC reflection on D2R's 22 compute shaders).
 # Stage: BNSH uses the stage slot; BAHS uses bits 10..13 of SPH word 0 (1 vertex 2 hull 3 domain 4 geometry 5 pixel), and a compute header means compute.
@@ -2136,16 +2138,16 @@ def frostbite_shaders(path, rel, ents, out):
 
 ANVIL = 'AnvilNext forge'
 def anvil_jobs(files, parts=64):
-    """Ubisoft's AnvilNext archives (Assassin's Creed: The Rebel Collection, anvil_forge.py): every entry of every .forge file of version 27, in ranges of about equal size. → ([(path, rel,
-    (ANVIL, ((offset, size, name), …))), …], the paths taken). Their entries are LZO1X blocks, so a loose scan of the file finds no shader, only the BNSH magic by chance in compressed bytes (five
-    of the Rebel Collection's 28 files, which then counted as unreadable). A file whose tables can't be read is left to the loose scan, which reports it"""
+    """Ubisoft's AnvilNext archives (anvil_forge.py): every entry of every .forge file of a version the reader knows (27: Assassin's Creed: The Rebel Collection; 25 and 31: The Ezio Collection),
+    in ranges of about equal size. → ([(path, rel, (ANVIL, ((offset, size, name), …))), …], the paths taken). Their entries are LZO1X or Oodle blocks, so a loose scan of the file finds no shader,
+    only the BNSH magic by chance in compressed bytes (five of the Rebel Collection's 28 files, which then counted as unreadable). A file whose tables can't be read is left to the loose scan, which reports it"""
     import anvil_forge
     from romfs import mmap
     fs = []
     for p, r in files:
         if not p.endswith('.forge'): continue
         with open(p, 'rb') as f:
-            if anvil_forge.version(f.read(13)) != anvil_forge.VERSION: continue
+            if anvil_forge.version(f.read(13)) not in anvil_forge.VERSIONS: continue
             with mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
                 try: fs.append((p, r, anvil_forge.entries(d, '/' + r)))
                 except ValueError as e: print(f'[RED] {e}', flush=True)
@@ -2159,15 +2161,44 @@ def anvil_jobs(files, parts=64):
     return jobs, {p for p, _, _ in fs}
 
 def anvil_shaders(path, rel, ents, out):
-    """A range of a .forge file's entries (anvil_jobs), each block decoded and scanned as a loose file is (scan_blob) when it holds the BNSH magic: the shaders are BNSH files (every control
-    section in DataNX_Intro.forge is inside one), and the other blocks (textures, meshes, sound) are left to no reader's chance match. Labels: /<forge>#<entry name>#BNSH@<offset in its block>…"""
+    """A range of a .forge file's entries (anvil_jobs), each block decoded (Oodle chunks with the game's own decoder, oodle) and scanned as a loose file is (scan_blob) when it holds the BNSH magic:
+    the Rebel Collection's shaders are BNSH files (every control section in DataNX_Intro.forge is inside one). A block with a control magic and no BNSH goes to anvil_raw (the Ezio Collection's), and
+    the other blocks (textures, meshes, sound) are left to no reader's chance match. Labels: /<forge>#<entry name>#BNSH@<offset in its block>…, or #RAW@<offset>"""
     import anvil_forge
     from romfs import mmap
     with open(path, 'rb') as f, mmap.mmap(f.fileno(), 0, access=mmap.ACCESS_READ) as d:
         for off, size, name in ents:
             label = f'/{rel}#{name}'
-            for b in anvil_forge.read(d, off, size, label):
+            for b in anvil_forge.read(d, off, size, label, oodle):
                 if b'BNSH\0\0\0\0' in b: scan_blob(b, label, out)
+                elif CTL_MAGIC in b: out.extend(anvil_raw(b, label))
+
+def anvil_main(img, label, paths):
+    """The shader objects main embeds when the RomFS holds AnvilNext .forge files of the Oodle generation (versions 25 and 31: The Ezio Collection), laid out as in their entries (anvil_raw):
+    AC2's main holds 224, 153 different, none of them in a forge, which raw_shaders left out (it takes only a 4-aligned control section with a code area some record or adrp points at)
+    with a red line each for the aligned ones. Other mains are not read this way"""
+    import anvil_forge
+    for p in paths:
+        if p.endswith('.forge'):
+            with open(p, 'rb') as f:
+                if anvil_forge.version(f.read(13)) in anvil_forge.OODLE_VERSIONS: return anvil_raw(img, label)
+    return []
+
+def anvil_raw(d, label):
+    """The shaders of an AnvilNext entry block without BNSH (The Ezio Collection's material and shader entries, e.g. AC2_Tex2_PixelLit: 570 in its data), and of its main (anvil_main): each
+    a control section directly followed by its code area (control +0x704 bytes), packed at any byte offset among the object's other fields. A compute code area may have no header (main's 8,
+    SDK 11), which glslc_stage takes by the control's thread group. A control magic that is not so followed, or whose shader fails check, is a chance match in other data and not a shader.
+    Labels: <label>#RAW@<offset of the control section in its block>"""
+    out = []
+    for m in re.finditer(re.escape(CTL_MAGIC), d):
+        c = m.start()
+        if c + 0x760 > len(d): continue
+        n = struct.unpack_from('<I', d, c + 0x20)[0]; nc = struct.unpack_from('<I', d, c + 0x704)[0]
+        if not 0x760 <= n <= 0x880 or c + n + nc > len(d): continue
+        ctl, code = d[c:c + n], d[c + n:c + n + nc]
+        st = glslc_stage(ctl, code)
+        if st and not check(label, st, ctl, code): out.append((f'{label}#RAW@{c:#x}', st, ctl, code))
+    return out
 
 def smash_arc_jobs(files, parts=128):
     """Super Smash Bros. Ultimate's data.arc (17.6 GB, smash_arc.py): the game's current files, in ranges of about equal stored size. → ([(path, rel, entries), …], the paths taken)"""
@@ -3215,6 +3246,11 @@ def scan_file_in(args):
     if len(args) > 2:   # a range of LINKDATA entries (linkdata_jobs)
         linkdata_shaders(path, rel, args[2], found)
         return rel, uniq_keys(found), var_pairs(found), trees
+    if head[:4] == b'IGA\x1a':   # an Alchemy archive (Crash Bandicoot N. Sane Trilogy): only its members under shaders/ are inflated, not its gigabytes of models and textures (iga.py)
+        import iga
+        for name, data in iga.shader_files(path, opener=open):
+            if b'\x91\x68\x86\x19' in data: found += glslc_shaders(data, f'/{rel}/{name}', need=False)
+        return rel, uniq_keys(found), var_pairs(found), trees
     if path.lower().endswith('.pak') and lspk_tail(path):   # a Larian package of version 13 (Divinity: Original Sin 2): GLSLC outputs in its .bshd files (lspk_shaders)
         lspk_shaders(path, rel, found)
         return rel, uniq_keys(found), var_pairs(found), trees
@@ -3384,6 +3420,7 @@ def main():
         found += glslc_shaders(img, 'main' + ('@' + tag if tag else ''), need=False)
         found += tfxo_streams(img, 'main' + ('@' + tag if tag else ''))   # YEBIS's effect file, a zlib stream in main (Pokémon Sword)
         found += retro_main_forms(img, 'main' + ('@' + tag if tag else ''))   # Retro's startup material archive, LZSS in main (Donkey Kong Country: Tropical Freeze)
+        found += anvil_main(img, 'main' + ('@' + tag if tag else ''), [p for p, r in files if not tag or r.startswith(tag + '/')])   # before raw_shaders, as known
         found += raw_shaders(img, 'main' + ('@' + tag if tag else ''), {c for _, _, c, _ in found})
         # NROs the game decodes at run time (Mario Tennis Fever: main is a boot stub, and the real code's data holds 11 shaders the game draws its UI and sky with): scanned like main, as no RomFS file holds them
         if not i:
@@ -3424,7 +3461,7 @@ def main():
     ah_jobs, arhs = arh_jobs(files)   # Monolith's ARH1/ARD archives and embedded XBC1/HCPS programs
     fb_jobs, fbs = frostbite_jobs(files)   # EA SPORTS FC 27's Frostbite bundles, Oodle Leviathan decoded by the game's own decoder in the Mac host
     pd_jobs, pdats = pdat_jobs(files)   # Kirby Air Riders' PDAT archives: the PMAP records in byte ranges
-    av_jobs, anvils = anvil_jobs(files)   # The Rebel Collection's AnvilNext .forge files: LZO1X blocks
+    av_jobs, anvils = anvil_jobs(files)   # AnvilNext .forge files: the Rebel Collection's LZO1X blocks, the Ezio Collection's Oodle ones (the game's own decoder in the Mac host)
     liqs = {p[:-4] + e for p, _ in files if liquid_index(p) is not None for e in ('.str', '.dat')}   # Frostpunk's Liquid archives: read through their .idx (liquid_shaders)
     big += pak_jobs + tr_jobs + ue_jobs + bd_jobs + arc_jobs + pz_jobs + ck_jobs + cr_jobs + zp_jobs + ah_jobs + fb_jobs + pd_jobs + av_jobs
     files = [(p, r) for p, r in files if not linkdata_jobs(p, r) and p not in paks and p not in trp and p not in uep and p not in bdts and p not in arcs and p not in pkzs and p not in cpks and p not in cras and p not in zips and p not in arhs and p not in fbs and p not in pdats and p not in liqs and p not in anvils]

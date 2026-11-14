@@ -63,6 +63,31 @@ FRAME_STEP = {'aee8f150dda1b5a838806e1a5ea6827a': frame_step}
 #   main+0x16e33ec, 2672 bytes, in 1.1.1. The room is two of the function's five identical blocks (mov w23, wzr; b main+0x16e3a14) at main+0x16e3da4, whose two branches move to the
 #   block at main+0x16e3d88. Taking the function's abort stub instead, as the issue's first form did, moves its callers to a stub in the next function, which a function match cannot hold.
 capture = 'capture demo: the empty result when the weak reference at +0x88 is unset or dead'
+
+# A data race in the game's own code (the note's "Title screen freeze"). The render job system's fork/join (1.1.1 main+0x2ac2460) hands two helper jobs to the other cores' render
+# workers and counts each in a shared word (+0x138 of the join) with a plain ldr / add / str, outside the join's mutex (+0x118). Each helper subtracts one under that mutex when
+# its share is done (main+0x2ac2f64, main+0x2ac3038), and the leader waits under it until the count is back to 1. A helper that subtracts between the leader's load and store
+# of its second count loses one of the two updates: the count ends at 0 or 2, and the leader, the dispatcher waiting for it and the main thread wait for good. The picture stops,
+# sound goes on (the idle title on a OnePlus Pad 3 at 60 fps). Each of the seven updates becomes one atomic add of +1 or -1 to the same word (stadd w9, [x8]; LSE,
+# which every host CPU has: Android hosts are built for armv8.2-a+lse, Apple's from M1 and A13). x8 and x9 are free there: each update is followed by a call through a PLT stub.
+#   main+0x2ac2460 (2576 bytes: both forks' counts and the leader's last subtraction), main+0x2ac2f64 (184) and main+0x2ac3038 (208, the helpers), in 1.1.1
+join = 'fork/join count: each update one atomic add'
+join_count = {'name': join, 'functions': [
+    {'size': 2576, 'fingerprints': ['4bfde3d8cc52150dfb1f1213d6f68fa71afa200aba4463a8d0dea1f66e22f1ce'],
+     'cuts': [
+         # ldr w8, [x27, #0x138]; …; add w8, w8, #1; mov x0, xN; str w8, [x27, #0x138]  →  add x8, x27, #0x138; …; mov w9, #1; mov x0, xN; stadd w9, [x8]
+         (124, '683b41b95423119108050011e00314aa683b01b9', '68e304915423119129008052e00314aa1f0129b8', join + ': the first fork, first helper (as 1.1.1 main+0x2ac24dc)'),
+         (256, '683b41b908050011e00314aa683b01b9', '68e3049129008052e00314aa1f0129b8', join + ': the first fork, second helper (as 1.1.1 main+0x2ac2560)'),
+         (1724, '683b41b99523119108050011e00315aa683b01b9', '68e304919523119129008052e00315aa1f0129b8', join + ': the second fork, first helper (as 1.1.1 main+0x2ac2b1c)'),
+         (1856, '683b41b908050011e00315aa683b01b9', '68e3049129008052e00315aa1f0129b8', join + ': the second fork, second helper (as 1.1.1 main+0x2ac2ba0)'),
+         # the leader's own last subtraction, under the mutex: sub w8, w8, #1  →  mov w9, #-1
+         (2360, '683b41b908050051e00314aa683b01b9', '68e3049109008012e00314aa1f0129b8', join + ': the leader done (as 1.1.1 main+0x2ac2d98)'),
+     ]},
+    {'size': 184, 'fingerprints': ['c1ece3129d93d80ee325a36a72516d6ea32fa40503b15463f23cfa5f25503365'],
+     'cuts': [(140, '883a41b90805005180220491883a01b9', '88e2049109008012802204911f0129b8', join + ': a helper done (as 1.1.1 main+0x2ac2ff0)')]},
+    {'size': 208, 'fingerprints': ['14b35b021f36ae8a552c0d5008379f31be489592d82f5ad6de7393cdc001976b'],
+     'cuts': [(164, '883a41b90805005180220491883a01b9', '88e2049109008012802204911f0129b8', join + ': a helper done (as 1.1.1 main+0x2ac30dc)')]},
+]}
 MATCH_CUTS = {'main': [
     {'name': capture, 'size': 2672, 'fingerprints': ['123f93c4fa74d68f6100dab6ec8310a5047b2b3535b72361b6e658e3e48d792e'],
      'cuts': [
@@ -76,6 +101,7 @@ MATCH_CUTS = {'main': [
          # the null check: ldur x8, [x29, #-0x60]; cbnz x8, main+0x16e3420. The empty result: stp xzr, xzr, [x20]; b the epilogue at main+0x16e3cd0
          (2488, 'f7031f2a1bffff17f7031f2a19ffff17', 'a8035af8c8b3ffb59f7e00a9c8ffff17', capture + ': the null check and the empty result (as 1.1.1 main+0x16e3da4)'),
      ]},
+    join_count,
 ]}
 
 # How general each patch is and could be (dm/tools/docs_patches.py "Binding", listed in docs/agents/game-patches.md): what, its binding now, the loosest it could have (goal),
@@ -84,6 +110,9 @@ BINDING = [
     {'what': 'capture demo: the empty result when the weak reference at +0x88 is unset or dead', 'now': 'game', 'goal': 'game', 'purpose': 'runtime',
      'why': "the game's own function dereferences its own weak reference; no host service is on the path, so no host or engine rule can hold it. Whether another Game Freak game shares the function is unchecked",
      'checked': "function-matched on 1.1.1, the only build on hand: exactly one match, a boot to the field setup, and the patched function run on the module's own bytes in a small interpreter for both null paths. Issue #712's reporters ran the earlier cuts for about 7 hours with no crash; the path itself has not been reached with these cuts"},
+    {'what': 'fork/join count: each update one atomic add', 'now': 'game', 'goal': 'game', 'purpose': 'runtime',
+     'why': "a data race in the game's own render job system (a count updated outside its mutex on one side); no host service is on the path, and no host rule can make a plain load and store atomic. Whether Game Freak's other games share the functions is unchecked",
+     'checked': "function-matched on 1.1.1, the only build on hand: each of the three functions matches once and the rewriter writes the seven cuts. On a OnePlus Pad 3 at the 60 fps default, idle at the title (the note's \"Title screen freeze\"): 0 of 20 starts froze, against 1 of 20 without the cuts; with a ~1 ms spin inside the leader's second count, 0 of 6 against 4 of 4"},
     {'what': 'present interval 2 → 1 with a target fps, and the frame period from the host\'s frame step', 'now': 'build', 'goal': 'game', 'purpose': 'frame rate',
      'why': "the game's own display settings word and frame-time object; MATCH_FRAME_STEP could carry the three stubs (the start-up function, the period getter and the scene update), not tried: 1.1.1 is the only build on hand"},
 ]

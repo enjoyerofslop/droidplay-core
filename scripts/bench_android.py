@@ -46,8 +46,8 @@ def device_folder(d):   # a device's runs under <out>: <model>_<serial>, safe on
 
 
 def data_dir():   # build_android_from_nsp.py's: the library of game hosts, its builds journal, and these results
-    base = Path(os.environ['LOCALAPPDATA']) if os.name == 'nt' and os.environ.get('LOCALAPPDATA') else Path.home() / '.local/share'
-    return base / 'nxnative' / 'android'
+    import data_home   # pyright: ignore[reportMissingImports]  (dm/android/tools, put on the path above)
+    return data_home.data_dir()
 
 
 def adb_bytes(serial, *args, timeout=120) -> bytes:

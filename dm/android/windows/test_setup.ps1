@@ -31,7 +31,8 @@ $s = Shortcut (Join-Path $Desk 'DroidPlay.lnk'); $s.TargetPath = Join-Path $env:
 Say '2. Setup, silent'
 Run-Setup 'install' @('/TASKS=desktopicon')
 Check (-not (Select-String -Path "$Logs\install.log" -SimpleMatch 'Showing the update window' -Quiet)) 'no update window for an install'
-foreach ($f in 'runtime\python.exe', 'runtime\pythonw.exe', 'core\scripts\nxnative_android.py', 'core\VERSION', 'DroidPlay.ico', 'unins000.exe') { Check (Test-Path (Join-Path $App $f)) "$f installed" }
+foreach ($f in 'runtime\python.exe', 'runtime\pythonw.exe', 'core\scripts\nxnative_android.py', 'core\VERSION', 'DroidPlay.ico', 'licenses\NOTICES.md', 'licenses\LGPL-3.0.txt',
+             'unins000.exe') { Check (Test-Path (Join-Path $App $f)) "$f installed" }
 Check (-not (Test-Path (Join-Path $Old 'droidnative'))) 'the uv install''s folder removed'
 Check (-not (Test-Path (Join-Path $Old 'version.txt'))) 'the uv install''s files removed'
 foreach ($lnk in (Join-Path $Desk 'DroidPlay.lnk'), (Join-Path $Menu 'DroidPlay.lnk')) {

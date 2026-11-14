@@ -9,6 +9,7 @@ ask a running game for diagnostics.
 > Switch, and the app you build is for you only. Do not share APKs packed with a game, keys or firmware.
 
 - [DroidPlay for Windows](#droidplay-for-windows): [installing](#installing), [Get started](#get-started), [the pages](#the-pages), [from source](#from-source)
+- [DroidPlay for Linux (preview)](#droidplay-for-linux-preview)
 - [DroidPlay on a Mac](#droidplay-on-a-mac)
 - [The Android app](#the-android-app)
 - [Game apps](#game-apps)
@@ -20,7 +21,8 @@ ask a running game for diagnostics.
 ## DroidPlay for Windows
 
 DroidPlay for Windows is the desktop app in this repository, `scripts/nxnative_android.py`: it drives the packing script and adb for you. The same app runs on
-Linux and a Mac [from source](#from-source). It has DroidPlay's name and icon, but it is a separate app from [DroidPlay on a Mac](#droidplay-on-a-mac).
+Linux as an AppImage ([DroidPlay for Linux](#droidplay-for-linux-preview), in preview), and on Linux and a Mac [from source](#from-source). It has
+DroidPlay's name and icon, but it is a separate app from [DroidPlay on a Mac](#droidplay-on-a-mac).
 
 ### Installing
 
@@ -45,7 +47,8 @@ DroidPlay opens on **Get started**: four steps, each saying what it needs and wh
   and Google's Android SDK with the NDK, CMake, build-tools, platform and platform-tools into Android Studio's place, `%LOCALAPPDATA%\Android\Sdk` (about 1.5 GB
   to download, 5 GB installed), with one bar and the time left. Installing the Android SDK means accepting its
   [license](https://developer.android.com/studio/terms), which the app asks first; its usage metrics stay off. What the computer already has is kept.
-  From a console: `build_android_from_nsp.py --setup --accept-android-licenses`.
+  From a console: `build_android_from_nsp.py --setup --accept-android-licenses` (Windows, and x86_64 Linux, where it installs into
+  `~/.local/share/nxnative/android/tools`: [DroidPlay for Linux](#droidplay-for-linux-preview)).
 - **Your phone:** plug it in with USB debugging on; the step says when the phone is waiting for you to tap **Allow**.
 - **Your first game:** add the folder with its NSP or XCI files, or the folder that holds a Switch 2 game's `.nup` or dump (no keys needed), then **Build and install**. The build works beside the game's files, so their drive needs room:
   a lot of it for a game with many shaders ([Free space](#free-space)).
@@ -77,7 +80,7 @@ Until all four are done, a launch opens on the checklist and the top bar's **Set
   the cable. What DroidPlay keeps for a phone (the one you picked, its backups) follows the phone itself, not its Wi-Fi address, which changes each time wireless
   debugging restarts.
 - **Performance:** the game's log from `adb logcat`, with the frame time, GPU and CPU figures the host prints, and a frame's GPU time per pass.
-- **Settings:** your `prod.keys`, and the [requirements](#what-the-command-line-needs) with how to install what is missing (on Windows, **Install what's missing** does it).
+- **Settings:** your `prod.keys`, and the [requirements](#what-the-command-line-needs) with how to install what is missing (on Windows and Linux, **Install what's missing** does it).
 
 A rebuild only does what changed: the extraction, the rewritten code and the translated shaders are reused when their inputs are the same, and the RomFS image is not
 copied to the phone again when the phone already holds the same one.
@@ -117,13 +120,81 @@ accepts only computers it has allowed) and lasts until the phone restarts; on An
 
 ### From source
 
-On Linux or a Mac, or on Windows without Setup, `uv run scripts/nxnative_android.py` opens a window that drives the packing script and adb for you ([uv](https://docs.astral.sh/uv/) brings Python and the
+On Linux without the AppImage, on a Mac, or on Windows without Setup, `uv run scripts/nxnative_android.py` opens a window that drives the packing script and adb for you ([uv](https://docs.astral.sh/uv/) brings Python and the
 modules the script names at its top; `python scripts/nxnative_android.py` works too, with them installed).
 
 To get it on Windows, install [uv](https://docs.astral.sh/uv/) (`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`), get
 DroidPlay Core (`git clone https://github.com/enjoyerofslop/droidplay-core`) and, in its folder, `uv run scripts\nxnative_android.py`.
 
 The command line's requirements are in [What the command line needs](#what-the-command-line-needs); the app's **Settings** page checks them.
+
+## DroidPlay for Linux (preview)
+
+DroidPlay for Linux is the app of [DroidPlay for Windows](#droidplay-for-windows) packed as one AppImage, `DroidPlay-<version>-x86_64.AppImage` (about
+130 MB), built the same way: its own Python with the app's modules and Qt, and DroidPlay Core. It's a preview for testers: it isn't on the release page yet.
+
+- **Getting it:** the **DroidPlay-AppImage** artifact of the `linux-package` workflow's latest run (the AppImage and its `.sha256`, kept for 7 days), or
+  build it from a checkout with `dm/android/linux/stage.sh --out <folder>` (x86_64 Linux with uv, git, curl and binutils' readelf).
+- **What it runs on:** x86_64 Linux with glibc 2.34 or later: Ubuntu 22.04, Debian 12, Fedora 35, RHEL 9, Linux Mint 21, SteamOS 3 or newer, and current
+  Arch, openSUSE Tumbleweed and their relatives. There is no arm64 build, since Google publishes the Android SDK for Linux on x86_64 alone. It draws its
+  window with X11 or Wayland, whichever the desktop runs (`QT_QPA_PLATFORM=xcb` forces X11), and needs the libraries every desktop has: OpenGL/EGL,
+  X11 and Wayland's client libraries, fontconfig, FreeType, GLib (on openSUSE also `libgthread-2_0-0`) and D-Bus. Qt's X11 helpers that a fresh install may lack (`libxcb-cursor` and the rest)
+  come with it.
+- **Starting it:** `chmod +x DroidPlay-<version>-x86_64.AppImage`, then open it. It mounts itself with the kernel's FUSE and `fusermount3`, and needs no
+  libfuse2. Where FUSE isn't available (some containers, minimal systems), `./DroidPlay-<version>-x86_64.AppImage --appimage-extract-and-run` opens it, or
+  set `APPIMAGE_EXTRACT_AND_RUN=1`.
+- **The first start of a version** copies it into `~/.local/share/DroidPlay/<version>/` (`$XDG_DATA_HOME/DroidPlay` if set), about 720 MB, behind a
+  "Preparing DroidPlay" window, and DroidPlay runs from there. That's what Windows' Setup does with its install folder: builds need a tree they can write
+  to, at a path that stays the same from one start to the next. Later starts of that version are quick. A new version keeps the one before it and removes
+  older ones, but never one that's still open.
+- **The tools for building:** **Install tools** in Get started and **Install what's missing** in Settings work as on Windows: after you accept the
+  Android SDK License, DroidPlay downloads Microsoft's JDK 21 and .NET SDK 10 and Google's Android SDK (command-line tools, platform-tools, platform 35,
+  build-tools 36.0.0, the NDK 28.2 and CMake 3.22.1), about 1.5 GB, into `~/.local/share/nxnative/android/tools` (`jdk`, `dotnet`, `android-sdk`; about
+  4 GB on disk). Everything goes into your own folders: no `sudo`, no package manager, nothing in the system. The Android SDK isn't inside the AppImage:
+  Google's licence doesn't allow passing it on, so it always comes from Google. An SDK you have already is used and completed instead (`ANDROID_HOME`,
+  `ANDROID_SDK_ROOT`, or Android Studio's `~/Android/Sdk`), and so are your distribution's adb, JDK or .NET SDK 10 when they're on your PATH (Bazzite and
+  Fedora ship adb: DroidPlay uses it). Where Linux has no ICU library (minimal installs), .NET runs without it. The build's fonts need nothing: DejaVu Sans
+  comes with the AppImage. On Linux on arm64 there's nothing to install: Google publishes the Android SDK for x86_64 Linux alone.
+- **Your phone over USB** ([Phones on Linux](#phones-on-linux)): Fedora, Arch, Bazzite and other distributions with systemd 258 or later let the person
+  at the screen use a phone's USB debugging with nothing to install. Elsewhere adb lists the phone as `no permissions`: DroidPlay keeps it in the phone
+  list as **USB access needed** and **How to connect a phone** › **If it doesn't work** says what to do. Over Wi-Fi it works as on Windows
+  ([Over Wi-Fi](#over-wi-fi)); if **Pair over Wi-Fi** doesn't list the phone, a firewall may be blocking mDNS: type the address shown with the code.
+- **In the applications menu:** an AppImage has no menu entry of its own. **Settings** › **Add to the applications menu** writes one,
+  `~/.local/share/applications/io.github.enjoyerofslop.droidplay.desktop`, and its icon in `~/.local/share/icons/hicolor/256x256/apps`, starting the AppImage
+  file you opened (not the prepared copy, which a new version replaces). **Remove** takes both away. Moved or renamed the AppImage? Settings says the entry
+  starts another copy, and **Start this copy** points it at this one. AppImageLauncher and Gear Lever make their own entries instead.
+- **Where things go:** your games' builds beside their NSP files (`<title ID>_build`), as on Windows; the game hosts, the APK and the build journals in
+  `~/.local/share/nxnative/android` (`$XDG_DATA_HOME/nxnative/android`), shared with the command line; settings in `~/.config/nxnative/android.conf`;
+  the signing key in `~/.android/nxnative-debug.jks`.
+- **Updating:** it doesn't update itself yet: open the new AppImage instead. **Uninstalling:** **Remove** the menu entry in Settings if you added one,
+  then delete the AppImage and `~/.local/share/DroidPlay`; the tools Install tools brought are in `~/.local/share/nxnative/android/tools`, and the folders
+  above keep your builds, settings and signing key until you delete them too.
+- **Licences:** each part's licence and a list of what's inside are in `~/.local/share/DroidPlay/<version>/licenses` (`NOTICES.md`). Qt and Qt for
+  Python are LGPL: their libraries are in `runtime/lib/python3.14/site-packages/PySide6/Qt/lib` there, and can be replaced. DroidPlay for Windows carries the same notices in
+  `%LOCALAPPDATA%\Programs\DroidPlay\licenses`.
+
+### Phones on Linux
+
+Linux lets a program open a phone's USB debugging interface only where a udev rule gives it to the user, and an AppImage can't install one (or run
+`sudo`): this is the one step you do yourself, once, and only where your distribution doesn't do it.
+
+1. **Recent distributions need nothing.** systemd 258 and later mark Android's debugging interfaces (ADB and fastboot) for the person at the screen
+   (`70-uaccess.rules`): Fedora, Arch, Bazzite and others with it. A phone that shows **Tap Allow on your phone** in DroidPlay's phone list is past this step.
+2. **Elsewhere,** DroidPlay's phone list shows **Phone found: USB access needed** and Get started's phone step says so; adb itself says `no permissions`.
+   Install your distribution's Android rules, then unplug the phone and plug it back in:
+   - Ubuntu, Debian, Linux Mint: `sudo apt install android-sdk-platform-tools-common`
+   - Arch, Manjaro: `sudo pacman -S android-udev`
+3. **No package, or it still says `no permissions`:** add the rule yourself, in `/etc/udev/rules.d/70-android-adb.rules`:
+   ```
+   SUBSYSTEM=="usb", ENV{ID_USB_INTERFACES}=="*:ff4201:*", TAG+="uaccess"
+   ```
+   then `sudo udevadm control --reload` and `sudo udevadm trigger`, and plug the phone in again. It gives the logged-in user every phone's ADB interface
+   (class ff, subclass 42, protocol 01), whatever its maker. If adb still says it, `adb kill-server` (DroidPlay starts adb again).
+4. **Older guides** give phones to the `plugdev` group (`GROUP="plugdev"`): that works only once you're in it (`sudo usermod -aG plugdev $USER`, then log
+   out and back in), and systemd 258 and later ignore such a rule when the group isn't a system group. The `uaccess` rule above needs no group.
+
+Other things to check, as on any computer: a cable that carries data, the phone unlocked, **File transfer** picked in its USB notification on phones that
+offer debugging only then, and **Allow** tapped on "Allow USB debugging?".
 
 ## DroidPlay on a Mac
 
@@ -248,7 +319,8 @@ Turnip (15 on its own driver), and at 60 fps on an Odin 2, as on its own driver.
 
 Python 3.12 or newer with `lz4`, `capstone`, `fonttools` and `backports.zstd` (not needed on Python 3.14), plus `PySide6` for the desktop app:
 `pip install lz4 capstone fonttools backports.zstd PySide6`. The .NET SDK 10, the Android SDK with an NDK, CMake 3.22 and build-tools (set `ANDROID_HOME` or pass
-`--sdk`), `adb`, and a JDK (for `keytool` and `javac`). The desktop app's **Settings** page checks all of this and says how to get what is missing; DroidPlay for Windows installs it for you.
+`--sdk`), `adb`, and a JDK (for `keytool` and `javac`). The desktop app's **Settings** page checks all of this and says how to get what is missing; on Windows and x86_64 Linux, **Install what's missing** (or
+`--setup --accept-android-licenses`) installs it for you, into your user folders.
 On Windows, use Python 3.14 and set `PYTHONUTF8=1` for the command line (the desktop app sets it for what it runs): the scripts read and write text as UTF-8,
 which Python on Windows does by default only from 3.15, and lz4 has no Windows build for 3.15 yet. On Linux, an Unreal game whose pak index is encrypted also
 needs OpenSSL's libcrypto (`libcrypto.so.3`, which distributions install with OpenSSL); the Mac and Windows have their own AES.
