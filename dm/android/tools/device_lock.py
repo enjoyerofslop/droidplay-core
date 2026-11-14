@@ -23,8 +23,8 @@ class DeviceBusy(Exception): pass
 
 def lock_dir():
     if os.environ.get('NXNATIVE_LOCK_DIR'): return Path(os.environ['NXNATIVE_LOCK_DIR'])   # the tests'
-    base = Path(os.environ['LOCALAPPDATA']) if os.name == 'nt' and os.environ.get('LOCALAPPDATA') else Path.home() / '.local/share'
-    return base / 'nxnative' / 'android' / 'locks'
+    import data_home   # the packing script's data folder (sys.path has this folder: phone_id came from it)
+    return data_home.data_dir() / 'locks'
 
 
 def _path(serial):   # a Wi-Fi device's serial is host:port, or adb's mDNS name

@@ -28,8 +28,8 @@ try:
                                    QHeaderView, QInputDialog, QLabel, QLineEdit, QListWidget, QListWidgetItem, QMainWindow, QMenu, QMessageBox, QPlainTextEdit,
                                    QProgressBar, QPushButton, QRadioButton, QScrollArea, QSplitter, QStackedWidget, QStyledItemDelegate, QTableWidget, QTableWidgetItem, QToolButton,
                                    QTreeWidget, QTreeWidgetItem, QVBoxLayout, QWidget)
-except ImportError:
-    sys.exit(f'DroidPlay (nxnative_android.py) needs PySide6: uv run {__file__}, or {sys.executable} -m pip install PySide6')
+except ImportError as e:   # on Linux also a system library Qt needs and the system lacks (libEGL.so.1...): the error names it
+    sys.exit(f'DroidPlay (nxnative_android.py) needs PySide6 ({e}): uv run {__file__}, or {sys.executable} -m pip install PySide6')
 
 REPO = Path(__file__).resolve().parents[1]
 SCRIPT = REPO / 'scripts' / 'build_android_from_nsp.py'
@@ -45,11 +45,15 @@ import wifi   # noqa: E402  # pyright: ignore[reportMissingImports]  (what adb p
 import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]  (plain words for what went wrong, and the report for #help)
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]  (how to connect a phone, by brand; its battery and free space)
 import update as upd   # noqa: E402  # pyright: ignore[reportMissingImports]  (the newest release, and its Setup downloaded and checked)
+import procs   # noqa: E402  # pyright: ignore[reportMissingImports]  (Stop: a build and every tool it started)
 
 LANGUAGES = [('en-US', 'American English'), ('en-GB', 'British English'), ('ja', 'Japanese'), ('fr', 'French'), ('de', 'German'), ('es-419', 'Latin American Spanish'),
              ('es', 'Spanish'), ('it', 'Italian'), ('nl', 'Dutch'), ('fr-CA', 'Canadian French'), ('pt', 'Portuguese'), ('ru', 'Russian'), ('ko', 'Korean'),
              ('zh-Hant', 'Traditional Chinese'), ('zh-Hans', 'Simplified Chinese'), ('pt-BR', 'Brazilian Portuguese')]
 NOWINDOW = 0x08000000 if os.name == 'nt' else 0   # CREATE_NO_WINDOW: no console flashing up for each adb call
+# Off Windows, a build starts in a session of its own (setsid), so it leads a process group with the tools it starts and Stop ends them all (procs.py). Qt 6.7
+# and later; an older PySide6 from pip leaves it out, and Stop then ends the script alone, as before
+NEW_SESSION = getattr(getattr(QProcess, 'UnixProcessFlag', None), 'CreateNewSession', None) if os.name != 'nt' else None
 # The Python that builds and the script's --check and --info run on. On Windows the Start menu shortcut opens this app on pythonw.exe, which has no console, so
 # each console tool a build runs on it (java, dotnet, cmake, ninja, adb…) would open a window of its own, dozens in a build. The python.exe beside it, started from
 # this windowless app (QProcess, NOWINDOW), gets one hidden console that every tool shares, and their output still reaches the Builds page.
@@ -737,6 +741,7 @@ class BuildsPage(QWidget):
         self.proc = QProcess(self); self.proc.setProgram(PYTHON); self.proc.setArguments([str(SCRIPT), *args, '--progress', 'json'])
         env = QProcessEnvironment.systemEnvironment(); env.insert('PYTHONUTF8', '1'); env.insert('PYTHONUNBUFFERED', '1'); env.insert('NXNATIVE_BUILD_ID', bid); self.proc.setProcessEnvironment(env)
         self.proc.setProcessChannelMode(QProcess.MergedChannels); self.proc.readyRead.connect(self.read); self.proc.finished.connect(self.finished)
+        if NEW_SESSION is not None: self.proc.setUnixProcessParameters(NEW_SESSION)   # a process group its tools join, which Stop ends (procs.py)
         self.proc.start(); self.t0 = time.time(); self.say(f'$ python {SCRIPT.name} ' + ' '.join(args), TEXT3)
         self.progress.emit(title, 'starting…', -1, True)
     def fresh(self, args, bid):   # a build starts: what the last one said and where it stopped are forgotten
@@ -864,13 +869,11 @@ class BuildsPage(QWidget):
     def stop(self):
         if self.ext:   # a console build: its process tree
             if QMessageBox.question(self, 'Stop', f'Stop {self.title}, started from the console?') != QMessageBox.Yes: return
-            if os.name == 'nt': subprocess.run(['taskkill', '/T', '/F', '/PID', str(self.ext['pid'])], capture_output=True, creationflags=NOWINDOW)
-            else: os.kill(self.ext['pid'], 15)
+            procs.stop_tree(self.ext['pid'], force=False)
             return
         if not self.busy() or not self.proc: return
         self.stopping = True
-        if os.name == 'nt': subprocess.run(['taskkill', '/T', '/F', '/PID', str(self.proc.processId())], capture_output=True, creationflags=NOWINDOW)   # its tools too
-        else: self.proc.kill()
+        procs.stop_tree(self.proc.processId())   # its tools too
 
 
 class BuildBar(QWidget):   # the running build at the bottom of every page
@@ -1827,16 +1830,23 @@ class Window(QMainWindow):
         bg(look, got)
 
 
-def main():
-    if '--write-icon' in sys.argv[:-1]:   # the Windows installer's shortcuts take DroidPlay's icon as an .ico file (dm/android/windows/install_droidplay.cmd)
-        app = QApplication(sys.argv[:1]); path = sys.argv[sys.argv.index('--write-icon') + 1]
-        if not app_icon().pixmap(256, 256).save(path, 'ICO'): sys.exit(f'could not write {path}')
-        return
+def open_window(argv):   # the app and its window, shown: main's, and the AppImage's window check (dm/android/linux/window_check.py)
     if os.name == 'nt':   # a taskbar button of its own, with DroidPlay's name and icon, not grouped with every other Python window
         try: import ctypes; ctypes.windll.shell32.SetCurrentProcessExplicitAppUserModelID('io.github.enjoyerofslop.droidplay.desktop')
         except Exception: pass
-    app = QApplication(sys.argv); app.setApplicationName('DroidPlay'); app.setWindowIcon(app_icon()); app.setStyle('Fusion'); app.setStyleSheet(STYLE)
-    w = Window(); w.show(); sys.exit(app.exec())
+    app = QApplication(argv); app.setApplicationName('DroidPlay'); app.setWindowIcon(app_icon()); app.setStyle('Fusion'); app.setStyleSheet(STYLE)
+    # Wayland takes a window's icon and its dock entry from the .desktop file named by the app ID (the AppImage's, dm/android/linux), not from setWindowIcon
+    app.setDesktopFileName('io.github.enjoyerofslop.droidplay')
+    w = Window(); w.show()
+    return app, w
+
+
+def main():
+    if '--write-icon' in sys.argv[:-1]:   # DroidPlay's icon as a file: an .ico for the Windows installer's shortcuts, a .png for the AppImage (dm/android/linux/stage.sh)
+        app = QApplication(sys.argv[:1]); path = sys.argv[sys.argv.index('--write-icon') + 1]
+        if not app_icon().pixmap(256, 256).save(path, 'PNG' if path.lower().endswith('.png') else 'ICO'): sys.exit(f'could not write {path}')
+        return
+    app, _ = open_window(sys.argv); sys.exit(app.exec())
 
 
 if __name__ == '__main__':

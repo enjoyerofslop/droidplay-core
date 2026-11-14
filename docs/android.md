@@ -9,6 +9,7 @@ ask a running game for diagnostics.
 > Switch, and the app you build is for you only. Do not share APKs packed with a game, keys or firmware.
 
 - [DroidPlay for Windows](#droidplay-for-windows): [installing](#installing), [Get started](#get-started), [the pages](#the-pages), [from source](#from-source)
+- [DroidPlay for Linux (preview)](#droidplay-for-linux-preview)
 - [DroidPlay on a Mac](#droidplay-on-a-mac)
 - [The Android app](#the-android-app)
 - [Game apps](#game-apps)
@@ -20,7 +21,8 @@ ask a running game for diagnostics.
 ## DroidPlay for Windows
 
 DroidPlay for Windows is the desktop app in this repository, `scripts/nxnative_android.py`: it drives the packing script and adb for you. The same app runs on
-Linux and a Mac [from source](#from-source). It has DroidPlay's name and icon, but it is a separate app from [DroidPlay on a Mac](#droidplay-on-a-mac).
+Linux as an AppImage ([DroidPlay for Linux](#droidplay-for-linux-preview), in preview), and on Linux and a Mac [from source](#from-source). It has
+DroidPlay's name and icon, but it is a separate app from [DroidPlay on a Mac](#droidplay-on-a-mac).
 
 ### Installing
 
@@ -117,13 +119,49 @@ accepts only computers it has allowed) and lasts until the phone restarts; on An
 
 ### From source
 
-On Linux or a Mac, or on Windows without Setup, `uv run scripts/nxnative_android.py` opens a window that drives the packing script and adb for you ([uv](https://docs.astral.sh/uv/) brings Python and the
+On Linux without the AppImage, on a Mac, or on Windows without Setup, `uv run scripts/nxnative_android.py` opens a window that drives the packing script and adb for you ([uv](https://docs.astral.sh/uv/) brings Python and the
 modules the script names at its top; `python scripts/nxnative_android.py` works too, with them installed).
 
 To get it on Windows, install [uv](https://docs.astral.sh/uv/) (`powershell -ExecutionPolicy ByPass -c "irm https://astral.sh/uv/install.ps1 | iex"`), get
 DroidPlay Core (`git clone https://github.com/enjoyerofslop/droidplay-core`) and, in its folder, `uv run scripts\nxnative_android.py`.
 
 The command line's requirements are in [What the command line needs](#what-the-command-line-needs); the app's **Settings** page checks them.
+
+## DroidPlay for Linux (preview)
+
+DroidPlay for Linux is the app of [DroidPlay for Windows](#droidplay-for-windows) packed as one AppImage, `DroidPlay-<version>-x86_64.AppImage` (about
+130 MB), built the same way: its own Python with the app's modules and Qt, and DroidPlay Core. It's a preview for testers: it isn't on the release page yet.
+
+- **Getting it:** the **DroidPlay-AppImage** artifact of the `linux-package` workflow's latest run (the AppImage and its `.sha256`, kept for 7 days), or
+  build it from a checkout with `dm/android/linux/stage.sh --out <folder>` (x86_64 Linux with uv, git, curl and binutils' readelf).
+- **What it runs on:** x86_64 Linux with glibc 2.34 or later: Ubuntu 22.04, Debian 12, Fedora 35, RHEL 9, Linux Mint 21, SteamOS 3 or newer, and current
+  Arch, openSUSE Tumbleweed and their relatives. There is no arm64 build, since Google publishes the Android SDK for Linux on x86_64 alone. It draws its
+  window with X11 or Wayland, whichever the desktop runs (`QT_QPA_PLATFORM=xcb` forces X11), and needs the libraries every desktop has: OpenGL/EGL,
+  X11 and Wayland's client libraries, fontconfig, FreeType, GLib (on openSUSE also `libgthread-2_0-0`) and D-Bus. Qt's X11 helpers that a fresh install may lack (`libxcb-cursor` and the rest)
+  come with it.
+- **Starting it:** `chmod +x DroidPlay-<version>-x86_64.AppImage`, then open it. It mounts itself with the kernel's FUSE and `fusermount3`, and needs no
+  libfuse2. Where FUSE isn't available (some containers, minimal systems), `./DroidPlay-<version>-x86_64.AppImage --appimage-extract-and-run` opens it, or
+  set `APPIMAGE_EXTRACT_AND_RUN=1`.
+- **The first start of a version** copies it into `~/.local/share/DroidPlay/<version>/` (`$XDG_DATA_HOME/DroidPlay` if set), about 720 MB, behind a
+  "Preparing DroidPlay" window, and DroidPlay runs from there. That's what Windows' Setup does with its install folder: builds need a tree they can write
+  to, at a path that stays the same from one start to the next. Later starts of that version are quick. A new version keeps the one before it and removes
+  older ones, but never one that's still open.
+- **The tools for building:** **Install tools** in Get started and **Install what's missing** in Settings are Windows-only for now. On Linux, install a JDK
+  (17 or newer: your distribution's OpenJDK), the .NET SDK 10 (your distribution's `dotnet-sdk-10.0`, or Microsoft's), and the Android SDK with the
+  command-line tools, platform-tools, platform 35, build-tools 36.0.0, the NDK 28.2 and CMake 3.22.1 (Android Studio's SDK Manager, or `sdkmanager`):
+  DroidPlay looks for it in `ANDROID_HOME`, `ANDROID_SDK_ROOT` and `~/Android/Sdk`. **Settings** lists what's missing and how to get it. The build's
+  fonts need nothing: DejaVu Sans comes with the AppImage.
+- **Your phone over USB:** most current distributions let the logged-in user reach a phone's USB debugging out of the box. If adb lists the phone as
+  `no permissions`, install your distribution's Android udev rules (`android-sdk-platform-tools-common` or `android-udev-rules` on Debian and Ubuntu,
+  `android-udev` on Arch, `android-tools` on Fedora), unplug and plug the phone in again, and run `adb kill-server`. Over Wi-Fi it works as on Windows
+  ([Over Wi-Fi](#over-wi-fi)); if the phone isn't listed, type its address.
+- **Where things go:** your games' builds beside their NSP files (`<title ID>_build`), as on Windows; the game hosts, the APK and the build journals in
+  `~/.local/share/nxnative/android` (`$XDG_DATA_HOME/nxnative/android`), shared with the command line; settings in `~/.config/nxnative/android.conf`;
+  the signing key in `~/.android/nxnative-debug.jks`.
+- **Updating:** it doesn't update itself yet: open the new AppImage instead. **Uninstalling:** delete the AppImage and `~/.local/share/DroidPlay`; the
+  folders above keep your builds, settings and signing key until you delete them too.
+- **Licences:** each part's licence and a list of what's inside are in `~/.local/share/DroidPlay/<version>/licenses` (`NOTICES.md`). Qt and Qt for
+  Python are LGPL: their libraries are in `runtime/lib/python3.14/site-packages/PySide6/Qt/lib` there, and can be replaced.
 
 ## DroidPlay on a Mac
 

@@ -15,7 +15,7 @@
 #   shows a build started from a console too
 # One app carries every game: its launcher (dm/android/java Launcher.java) lists the games on the phone, Android/data/org.nxnative.android/files/games/<title ID>/,
 # and the app holds a host per game, lib/arm64-v8a/libdmhost_<title ID>.so, started by its loader (dm/android/loader.c). The hosts built on this computer are kept in a
-# library (<data>/hosts/<title ID>/: %LOCALAPPDATA%\nxnative\android on Windows, ~/.local/share/nxnative/android elsewhere), and every APK is packed from all of them,
+# library (<data>/hosts/<title ID>/: %LOCALAPPDATA%\nxnative\android on Windows, ~/.local/share/nxnative/android elsewhere, or under XDG_DATA_HOME on Linux), and every APK is packed from all of them,
 # so building a second game keeps the first in the app.
 # Steps (the extraction and the rewrite are build_ipa_from_nsp.py's own, reused):
 #   1. find the game profile from the title ID (dm/games/<id>); a game without one is surveyed and packed from a provisional profile (<NSP folder>/<id>_build/profile),
@@ -45,15 +45,22 @@ from build_ipa_from_nsp import BuildError, say   # noqa: E402
 PKG = 'org.nxnative.android'
 # One signing key for every build on this computer: an update must be signed like the installed app, and uninstalling it would delete the saves and the game files on the phone
 KEYSTORE = Path.home() / '.android' / 'nxnative-debug.jks'
+# DejaVu Sans, which DroidPlay for Linux carries (dm/android/linux/stage.sh puts it here; a checkout has none): the last of both lists below, so a Linux without
+# DejaVu or Liberation at the paths listed, such as Fedora's Atomic desktops, still builds. Its hinting makes it a standard font too
+BUNDLED_FONTS = REPO / 'dm/android/fonts'
 # The letters of the button-icon font (make_ext_font.py): macOS's Arial Rounded Bold is its default; elsewhere a bold sans-serif of the system
 LETTER_FONTS = ['/System/Library/Fonts/Supplemental/Arial Rounded Bold.ttf', r'C:\Windows\Fonts\arialbd.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf',
-                '/usr/share/fonts/TTF/DejaVuSans-Bold.ttf', '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf']
+                '/usr/share/fonts/TTF/DejaVuSans-Bold.ttf', '/usr/share/fonts/dejavu/DejaVuSans-Bold.ttf', '/usr/share/fonts/dejavu-sans-fonts/DejaVuSans-Bold.ttf',
+                '/usr/share/fonts/truetype/liberation/LiberationSans-Bold.ttf', '/usr/share/fonts/liberation-sans-fonts/LiberationSans-Bold.ttf',
+                '/usr/share/fonts/liberation-sans/LiberationSans-Bold.ttf', str(BUNDLED_FONTS / 'DejaVuSans-Bold.ttf')]
 # The standard shared font (hle_sdk16.c: every font type but the Nintendo extension), copied into <id>_build/font/standard.ttf: STD_FONT names one, else the first of these.
 # It must be a hinted TrueType font. Android's own Roboto has no TrueType hinting, and Super Smash Bros. Ultimate crashed at boot on it (main+0x7caa0); Roboto with empty
 # cvt / fpgm / prep tables crashed too, while Arial stripped of everything but its hinting booted. The iPhone build copies Arial Unicode the same way (build_ipa.sh)
 STANDARD_FONTS = ['/System/Library/Fonts/Supplemental/Arial Unicode.ttf', '/System/Library/Fonts/Supplemental/Arial.ttf', r'C:\Windows\Fonts\arialuni.ttf',
                   r'C:\Windows\Fonts\arial.ttf', '/usr/share/fonts/truetype/dejavu/DejaVuSans.ttf', '/usr/share/fonts/TTF/DejaVuSans.ttf',
-                  '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf', '/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf']
+                  '/usr/share/fonts/dejavu/DejaVuSans.ttf', '/usr/share/fonts/dejavu-sans-fonts/DejaVuSans.ttf',
+                  '/usr/share/fonts/truetype/liberation/LiberationSans-Regular.ttf', '/usr/share/fonts/liberation-sans-fonts/LiberationSans-Regular.ttf',
+                  '/usr/share/fonts/liberation-sans/LiberationSans-Regular.ttf', str(BUNDLED_FONTS / 'DejaVuSans.ttf')]
 REMOTE = f'/sdcard/Android/data/{PKG}/files'
 BUILD_TOOLS, PLATFORM = '36.0.0', 'android-35'   # build_apk.py's defaults
 # libadrenotools and its hooks (dm/android/CMakeLists.txt), in every APK: DM_VK_DRIVER opens a Vulkan driver of the player's through them (dm/android/vk_driver.c), so trying
@@ -93,9 +100,7 @@ ANDROID_TESTED = {
 }
 
 
-def data_dir():   # the library of game hosts, the loader, the self test and the APK
-    base = Path(os.environ['LOCALAPPDATA']) if os.name == 'nt' and os.environ.get('LOCALAPPDATA') else Path.home() / '.local/share'
-    return base / 'nxnative' / 'android'
+def data_dir(): return data_home.data_dir()   # the library of game hosts, the loader, the self test and the APK (dm/android/tools: XDG_DATA_HOME on Linux)
 
 
 class Journaled(bi.Progress):   # the console's progress, and the same build's events as JSON lines in a journal file (a second Progress in json mode, written there)
@@ -141,7 +146,7 @@ def sdk_dir(arg):   # --sdk, the environment, then where Android Studio puts it:
     raise BuildError('Android SDK not found: give --sdk or set ANDROID_HOME')
 
 
-sys.path.append(str(REPO / 'dm/android/tools')); import host_setup, phone_id   # noqa: E401, E402  # pyright: ignore[reportMissingImports]  (--setup, a phone's name in folder names; dm/android/tools, put on the path here)
+sys.path.append(str(REPO / 'dm/android/tools')); import data_home, host_setup, phone_id   # noqa: E401, E402  # pyright: ignore[reportMissingImports]  (data_dir, --setup, a phone's name in folder names; dm/android/tools, put on the path here)
 NDK, CMAKE = '28.2.13676358', '3.22.1'   # what --setup installs, and the CI builds with; a build takes the newest NDK and CMake the SDK has
 
 
@@ -178,9 +183,13 @@ def build_nx_extract(work, logs, env):
         if p.is_file() and not {'bin', 'obj'} & set(rel.parts): h.update(rel.as_posix().encode() + b'\0' + p.read_bytes() + b'\0')
     out = data_dir() / 'tools' / f'nx_extract-{h.hexdigest()[:16]}'
     if (out / name).is_file(): return out / name
-    with tempfile.TemporaryDirectory(prefix='nx_extract_') as t:   # built outside and copied in, as that script does: MSBuild breaks on an apostrophe in the path
-        bi.run(['dotnet', 'build', src, '-c', 'Release', '-o', t, '-v', 'quiet', '-nologo'], logs / 'nx_extract_build.log', env=env)
-        if not (Path(t) / name).exists(): raise BuildError(f'nx_extract built without an executable (see {logs / "nx_extract_build.log"})')
+    with tempfile.TemporaryDirectory(prefix='nx_extract_') as tmp:   # built outside and copied in, as that script does: MSBuild breaks on an apostrophe in the path
+        # obj/ (the restore's and the compiler's files) goes there too, not into the project: DroidPlay may run from a tree it can't write, such as an AppImage's
+        # mount, where the restore stopped with "Permission denied". The trailing separator is MSBuild's rule for this property
+        t, obj = Path(tmp) / 'out', Path(tmp) / 'obj'
+        bi.run(['dotnet', 'build', src, '-c', 'Release', '-o', t, f'-p:BaseIntermediateOutputPath={obj}{os.sep}', '-v', 'quiet', '-nologo'],
+               logs / 'nx_extract_build.log', env=env)
+        if not (t / name).exists(): raise BuildError(f'nx_extract built without an executable (see {logs / "nx_extract_build.log"})')
         part = out.with_name(f'{out.name}.{os.getpid()}'); bi.rmtree(part); shutil.copytree(t, part)
         try: os.replace(part, out)
         except OSError: bi.rmtree(part)   # another run put the same build there meanwhile
