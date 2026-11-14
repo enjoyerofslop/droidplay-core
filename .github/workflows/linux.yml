@@ -55,3 +55,4 @@ jobs:
           DM_TARGET=linux python3 dm/tools/patch_nso.py "$st/main.nso" "$st/patched" main
           DM_DBG=1 timeout 120 build/dmhost_cli "$st/patched" main 2>&1 | tee "$st/log.txt"
           grep -q 'selftest: PASS' "$st/log.txt"
+          ! grep -E 'CRASH|FATAL' "$st/log.txt"   # nor a crash after it (a guest thread's exit)

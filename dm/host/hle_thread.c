@@ -468,7 +468,14 @@ static void thread_exit(thr_t *t) {
 #if defined(__aarch64__)
     // pthread_exit on the host thread's own stack, not the guest's: the libc runs the key destructors and frees memory there, and some guest stacks are a few KiB.
     // Bowser's Fury on Android: SIGSEGV just below sp inside bionic's pthread_exit (jemalloc under a key destructor) when a thread with a small stack exited
+#if defined(DM_LINUX)
+    // glibc's pthread_exit unwinds the stack (libgcc's forced unwind) back to start_thread, and this frame's unwind information describes the guest's stack, not the
+    // host's: the unwinder read through it and faulted (the self test's second thread, SIGSEGV in libgcc_s). Entered with no return address, exit_on_host is the
+    // last frame, and glibc ends the unwind at the end of the stack by jumping back to start_thread
+    if (hsp) __asm__ volatile("mov sp, %0\n\tmov x29, #0\n\tmov x30, #0\n\tbr %1" :: "r"(hsp), "r"(exit_on_host) : "memory");
+#else
     if (hsp) __asm__ volatile("mov sp, %0\n\tmov x29, #0\n\tblr %1\n\tbrk #0" :: "r"(hsp), "r"(exit_on_host) : "memory");
+#endif
 #endif
     pthread_exit(NULL);
 }
