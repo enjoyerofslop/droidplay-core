@@ -51,8 +51,10 @@ General mechanisms used here:
 
 - **An Unreal pak key split into two 16-byte literals in `main`'s code** (`uepak.py` `code_keys`): [An Unreal pak key split into two 16-byte literals](../../../docs/reference/shaders.md#an-unreal-pak-key-split-into-two-16-byte-literals), [01, Compressed RomFS content](../../../docs/agents/01-extract.md#compressed-romfs-content).
 - **Offline depth metadata:** [Offline pipeline archive and profile depth disagree](../../../docs/reference/shaders.md#offline-pipeline-archive-and-profile-depth-disagree).
+- **Android: the AAudio output's 5 ms pacer** (`coreaudio_aaudio.c`, `au_pace.h`): its CRIWARE output (`audio #0`, 6 channels) keeps about three small buffers queued and appends one each time one comes back, so an AYN Thor Pro whose AAudio stream calls back with 960 frames padded about a quarter of every callback with zeros (4,963 underruns and 9.26 s zero-padded in 2,000 callbacks), and the sound crackled and played slowed down at any frame rate (droidplay-core issue #485): [Android: a device that asks for 20 ms at once starves a game's few small buffers](../../../docs/reference/audio.md#android-a-device-that-asks-for-20-ms-at-once-starves-a-games-few-small-buffers).
 
 ## Open
 
 - The iPhone: no IPA built or tested yet.
+- Android: not run by us. The sound fix for issue #485 was checked on FINAL FANTASY RESONANCE's CRIWARE output, the same three 240-frame buffers, on an Ayn Odin 2 made to call back with 960 frames (`DM_DBG_AU_FRAMES=960`), not on this game or the Thor Pro itself.
 - Only the opening and the prologue were played; the first town, a battle and a church save are not tested yet. 38 of the 39 geometry shaders have not been seen in play.

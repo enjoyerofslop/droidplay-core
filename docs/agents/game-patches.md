@@ -76,7 +76,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 | [NieR:Automata The End of YoRHa Edition (010056B015FE8000)](#nierautomata-the-end-of-yorha-edition-010056b015fe8000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [NieR:Automata The End of YoRHa Edition (0100B8E016F76000)](#nierautomata-the-end-of-yorha-edition-0100b8e016f76000) | 8 | 0 | 0 | 0 | 1 | `build` → `game` ×2 |
 | [Paper Mario: The Thousand-Year Door](#paper-mario-the-thousand-year-door) | 1 | 0 | 1 | 0 | 0 | `build` → `game` |
-| [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 3 | 1 | 0 | `game`, `build` → `game` |
+| [Pokémon Legends: Arceus](#pokémon-legends-arceus) | 0 | 0 | 3 | 2 | 0 | `game` ×2, `build` → `game` |
 | [Pokémon: Let's Go, Pikachu!](#pokémon-lets-go-pikachu) | 0 | 0 | 2 | 0 | 0 | `build` → `game` |
 | [Super Mario 3D All-Stars: Super Mario Sunshine](#super-mario-3d-all-stars-super-mario-sunshine) | 2 | 0 | 0 | 0 | 0 | `build` → `game` |
 | [Super Mario Bros. Wonder](#super-mario-bros-wonder) | 0 | 0 | 1 | 0 | 0 | `build` → `game` |
@@ -432,6 +432,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
 [Pokémon Legends: Arceus](../../dm/games/01001F5010DFA000/README.md), `01001F5010DFA000`, [patches.py](../../dm/games/01001F5010DFA000/patches.py).
 
 - **`game`**, runtime, at goal, checked: function-matched on 1.1.1, the only build on hand: exactly one match, a boot to the field setup, and the patched function run on the module's own bytes in a small interpreter for both null paths. Issue #712's reporters ran the earlier cuts for about 7 hours with no crash; the path itself has not been reached with these cuts: capture demo: the empty result when the weak reference at +0x88 is unset or dead. The game's own function dereferences its own weak reference; no host service is on the path, so no host or engine rule can hold it. Whether another Game Freak game shares the function is unchecked
+- **`game`**, runtime, at goal, checked: function-matched on 1.1.1, the only build on hand: each of the three functions matches once and the rewriter writes the seven cuts. On a OnePlus Pad 3 at the 60 fps default, idle at the title (the note's "Title screen freeze"): 0 of 20 starts froze, against 1 of 20 without the cuts; with a ~1 ms spin inside the leader's second count, 0 of 6 against 4 of 4: fork/join count: each update one atomic add. A data race in the game's own render job system (a count updated outside its mutex on one side); no host service is on the path, and no host rule can make a plain load and store atomic. Whether Game Freak's other games share the functions is unchecked
 - **`build` → `game`**, frame rate, gap, judgement: present interval 2 → 1 with a target fps, and the frame period from the host's frame step. The game's own display settings word and frame-time object; MATCH_FRAME_STEP could carry the three stubs (the start-up function, the period getter and the scene update), not tried: 1.1.1 is the only build on hand
 
 - **1.1.1 `main`** `aee8f150…` ([patches.py:56](../../dm/games/01001F5010DFA000/patches.py#L56))
@@ -439,6 +440,7 @@ Every patch bound tighter than it could be: the open gaps, then the blocked, kep
   - frame step `+0x278303c`: frame step: the frame period read is the host's vsyncs × 16,666,667 ns (state page target fps; 0 = the stored period)
   - frame step `+0x279a6f4`: frame step: counts the vsyncs the scene update steps
 - **function-matched** (`main` of builds without CUTS): capture demo: the empty result when the weak reference at +0x88 is unset or dead: 1 function, 5 cuts
+- **function-matched** (`main` of builds without CUTS): fork/join count: each update one atomic add: 3 functions, 7 cuts
 
 ### Pokémon: Let's Go, Pikachu!
 
