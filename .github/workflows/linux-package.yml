@@ -6,8 +6,6 @@
 name: linux-package
 
 on:
-  push:
-    branches: [linux/appimage]   # the work branch, until this file is on main: Run workflow needs it on the default branch
   pull_request:
     paths:
       - dm/android/linux/**
