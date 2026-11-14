@@ -1,8 +1,13 @@
-# Adds DroidPlay for Windows' installers and DroidPlay Core's source to a release. DroidPlay-Setup-<version>.exe (with its .sha256) is the one players download:
-# windows-package.yml builds and checks it from the release's tag. Install DroidPlay.cmd, the installer before it, stays for the players who have it. Install DroidPlay.cmd downloads the source as droidplay-core-<version>.tar.xz
+# Adds DroidPlay for Windows' installers, DroidPlay for Linux's AppImage and DroidPlay Core's source to a release. DroidPlay-Setup-<version>.exe (with its .sha256) is
+# the one Windows players download: windows-package.yml builds and checks it from the release's tag. Install DroidPlay.cmd, the installer before it, stays for the players
+# who have it. DroidPlay-<version>-x86_64.AppImage (with its .sha256), in preview, is Linux's: linux-package.yml builds it from the release's tag and starts it on five
+# distributions, and it goes up only once all of them passed, and only as a pair whose name, checksum and version inside are the release's, since DroidPlay for
+# Linux's Update takes it by that name with the digest GitHub lists for it (dm/android/desktop/update.py). Install DroidPlay.cmd downloads the source as droidplay-core-<version>.tar.xz
 # (about 55 MB) or .zip (about 90 MB) rather than the archive GitHub makes of the tag (about 130 MB): GitHub serves release assets from its download network,
 # where a download that is cut off can resume, and these leave out docs/ (screenshots) and .github/, which the app doesn't use. Publishing a release runs this
-# from the release's tag; Run workflow (from main) adds the assets to a release made before the tag had this file.
+# from the release's tag; Run workflow (from main) adds the assets to a release made before the tag had this file (a tag without dm/android/linux, 0.8.10 and
+# older, gets no AppImage: the linux job fails there and the rest go up as before). Run workflow with Dry run builds and checks every asset from the branch or
+# tag it runs on, named as the given tag's, and uploads nothing: neither the tag nor its release needs to exist, so a release can be tried before it's tagged.
 name: release-assets
 
 on:
@@ -13,6 +18,10 @@ on:
       tag:
         description: The release's tag (v0.2.0)
         required: true
+      dry-run:
+        description: Dry run. Build and check every asset from the branch or tag this runs on, named as that tag's, and upload nothing
+        type: boolean
+        default: false
 
 permissions:
   contents: write
@@ -29,10 +38,11 @@ jobs:
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
       GH_TOKEN: ${{ github.token }}
+      DRY_RUN: ${{ inputs.dry-run == true }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
-          ref: refs/tags/${{ env.TAG }}
+          ref: ${{ inputs.dry-run && github.sha || format('refs/tags/{0}', env.TAG) }}
           persist-credentials: false
       - name: Pack the source and upload it with the installer
         run: |
@@ -48,6 +58,7 @@ jobs:
           # droidnative-<version>, and without it fall back to GitHub's slow archive of the tag
           legacy="droidnative-${TAG#v}"; cp "$name.tar.xz" "$legacy.tar.xz"; cp "$name.zip" "$legacy.zip"
           ls -l "$name.tar.xz" "$name.zip" "$legacy.tar.xz" "$legacy.zip" Install.DroidPlay.cmd
+          if [[ $DRY_RUN == true ]]; then echo "Dry run: nothing uploaded to $TAG"; exit 0; fi
           gh release upload "$TAG" "$name.tar.xz" "$name.zip" "$legacy.tar.xz" "$legacy.zip" "Install.DroidPlay.cmd#Install DroidPlay.cmd" --clobber --repo "$GITHUB_REPOSITORY"
 
   setup:
@@ -55,7 +66,7 @@ jobs:
     uses: ./.github/workflows/windows-package.yml
     with:
       version: ${{ github.event.release.tag_name || inputs.tag }}   # stage.ps1 drops the v
-      ref: refs/tags/${{ github.event.release.tag_name || inputs.tag }}
+      ref: ${{ inputs.dry-run && github.sha || format('refs/tags/{0}', github.event.release.tag_name || inputs.tag) }}
 
   setup-asset:
     name: Setup on the release
@@ -65,6 +76,7 @@ jobs:
     env:
       TAG: ${{ github.event.release.tag_name || inputs.tag }}
       GH_TOKEN: ${{ github.token }}
+      DRY_RUN: ${{ inputs.dry-run == true }}
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
@@ -73,4 +85,61 @@ jobs:
       - name: Upload DroidPlay-Setup and its checksum
         run: |
           ls -l setup
+          if [[ $DRY_RUN == true ]]; then echo "Dry run: nothing uploaded to $TAG"; exit 0; fi
           gh release upload "$TAG" setup/DroidPlay-Setup-*.exe setup/DroidPlay-Setup-*.exe.sha256 --clobber --repo "$GITHUB_REPOSITORY"
+
+  linux:
+    name: DroidPlay for Linux's AppImage, built and started on five distributions
+    uses: ./.github/workflows/linux-package.yml
+    with:
+      version: ${{ github.event.release.tag_name || inputs.tag }}   # stage.sh drops the v
+      ref: ${{ inputs.dry-run && github.sha || format('refs/tags/{0}', github.event.release.tag_name || inputs.tag) }}
+
+  # A job of its own, as Setup's is: a distribution that fails to start the AppImage (a preview) holds back the AppImage alone, never Windows' Setup
+  linux-asset:
+    name: AppImage on the release
+    needs: linux   # every job of linux-package: the build and all five distributions
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    env:
+      TAG: ${{ github.event.release.tag_name || inputs.tag }}
+      GH_TOKEN: ${{ github.token }}
+      DRY_RUN: ${{ inputs.dry-run == true }}
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: DroidPlay-AppImage
+          path: appimage
+      - name: Check the AppImage and its checksum, then upload both
+        working-directory: appimage
+        run: |
+          v=${TAG#v}; img=DroidPlay-$v-x86_64.AppImage
+          fail() { echo "::error title=No AppImage on $TAG::$*"; exit 1; }
+          ls -l
+          # The release's pair, checked before anything goes up: the name update.py looks for, the .sha256 a player checks by hand, and the version inside,
+          # which Update compares with the release's tag (another one would offer the same update again after each update) and unpack.py names its folder by
+          [[ -f $img && -f $img.sha256 ]] || fail "linux-package made $(printf '%s ' *)but not $img and $img.sha256"
+          sha256sum --check --strict "$img.sha256" || fail "$img doesn't match its .sha256"
+          sum=$(cut -d' ' -f1 "$img.sha256"); size="$(( $(stat -c %s "$img") / 1048576 )) MB"
+          abs=$PWD/$img; chmod +x "$abs"
+          (cd "$RUNNER_TEMP" && "$abs" --appimage-extract payload/core/VERSION > /dev/null) || fail "$img wouldn't extract its VERSION"   # the static runtime needs no FUSE for it
+          inside=$(cat "$RUNNER_TEMP/squashfs-root/payload/core/VERSION") || fail "$img has no payload/core/VERSION"
+          [[ $inside == "$v" ]] || fail "$img says it is version $inside inside, not $v"
+          [[ $v =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ]] || echo "::warning::$TAG isn't X.Y.Z, so DroidPlay for Linux's Update won't offer $img (update.py APPIMAGE_NAME); it can still be downloaded"
+          if [[ $DRY_RUN == true ]]; then
+              echo "Dry run: nothing uploaded to $TAG"
+              printf '**Dry run:** %s (%s, SHA-256 %s) and its .sha256 checked, not uploaded to %s\n' "$img" "$size" "$sum" "$TAG" >> "$GITHUB_STEP_SUMMARY"
+              exit 0
+          fi
+          # Both or neither: the AppImage without its .sha256, the reverse, or a file GitHub lists another digest for would be a half or a wrong set, so what
+          # went up of a failed upload is taken off again and the job fails, for a re-run
+          drop() { for f in "$img" "$img.sha256"; do gh release delete-asset "$TAG" "$f" --yes --repo "$GITHUB_REPOSITORY" 2> /dev/null || true; done; }
+          on_release() {   # as Update reads the release: both names there, the AppImage with GitHub's digest of the file checked above
+              local l; l=$(gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" --jq '.assets[] | .name + " " + (.digest // "none")') || return 1
+              grep -qxF "$img sha256:$sum" <<< "$l" && grep -qF "$img.sha256 " <<< "$l"
+          }
+          gh release upload "$TAG" "$img" "$img.sha256" --clobber --repo "$GITHUB_REPOSITORY" || { drop; fail "the upload failed, so neither file is on $TAG now: re-run this job"; }
+          ok=''; for _ in 1 2 3 4 5; do on_release && { ok=1; break; }; sleep 3; done
+          [[ $ok ]] || { drop; fail "$TAG didn't list both files with the AppImage's digest sha256:$sum after the upload, so neither is on it now: re-run this job"; }
+          echo "$img ($size) and its .sha256 are on $TAG, with the digest sha256:$sum"
+          printf '%s (%s, SHA-256 %s) and its .sha256 uploaded to %s\n' "$img" "$size" "$sum" "$TAG" >> "$GITHUB_STEP_SUMMARY"
