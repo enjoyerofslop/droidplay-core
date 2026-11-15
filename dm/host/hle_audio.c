@@ -354,6 +354,8 @@ static void stats_drain(void) {
     pthread_mutex_unlock(&g_aos_lock);
     for (int i = 0; i < n; i++) stats_log(&reports[i]);
 }
+// hle_audren.c's stuck-step watch over the audio renderer's render threads, run from this watchdog's tick (its definition wins; weak so a test with only this file links)
+__attribute__((weak)) void dm_audren_watch(void) {}
 static void *au_watchdog(void *p) {
     (void)p; uint64_t last = now_ns();
     for (;;) {
@@ -392,6 +394,7 @@ static void *au_watchdog(void *p) {
         }
         pthread_mutex_unlock(&g_aos_lock);
         stats_drain();
+        dm_audren_watch();   // outside g_aos_lock: it logs, and reads the thread table under its own lock
     }
     return NULL;
 }

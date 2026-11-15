@@ -37,6 +37,11 @@ int dm_pcmout_append(void *k, void *b) {
 }
 void *dm_pcmout_released(void *k) { (void)k; return NULL; }
 void dm_pcmout_wait(void *k, int ms) { (void)k; (void)ms; }
+// hle_thread.c's: the render lock taken as a native wait, the catch-up wait marked as one, and the stuck-step watch's thread lookup (no guest threads here)
+void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
+void dm_thread_native_wait(int entering) { (void)entering; }
+uint32_t thr_cur_handle(void) { return 0; }
+int dm_thread_peek(uint32_t handle, int *svc, uint64_t *lr, int *wkind, uint64_t *waddr, int *state) { (void)handle; (void)svc; (void)lr; (void)wkind; (void)waddr; (void)state; return 0; }
 void hle_bind_system_event(void *ev, int ac) { (void)ev; (void)ac; }
 uint32_t hle_dup_readable_handle(uint32_t h) { return h; }
 
@@ -143,6 +148,7 @@ static void test_malformed(int sdk, int bad) {
     fflush(stderr); int saved = dup(STDERR_FILENO); assert(saved >= 0);
     assert(dup2(fileno(log), STDERR_FILENO) >= 0);
     int got = capture(&g_ar[0], list, n, out);
+    notes_flush();   // capture's lines are written once the render lock is released (render_unlock)
     fflush(stderr); assert(dup2(saved, STDERR_FILENO) >= 0); close(saved);
     char text[2048]; assert(fseek(log, 0, SEEK_SET) == 0); size_t bytes = fread(text, 1, sizeof text - 1, log); text[bytes] = 0; fclose(log);
     assert(got == 0);
@@ -173,6 +179,7 @@ static void test_histogram(void) {
     fflush(stderr); int saved = dup(STDERR_FILENO); assert(saved >= 0);
     assert(dup2(fileno(log), STDERR_FILENO) >= 0);
     int16_t out[FRAME_MAX * 2]; assert(capture(&g_ar[0], cl, len, out) == 0);
+    notes_flush();
     fflush(stderr); assert(dup2(saved, STDERR_FILENO) >= 0); close(saved);
     char text[2048]; assert(fseek(log, 0, SEEK_SET) == 0); size_t bytes = fread(text, 1, sizeof text - 1, log); text[bytes] = 0; fclose(log);
     const char *hist = strstr(text, "by command ID:"); assert(hist);

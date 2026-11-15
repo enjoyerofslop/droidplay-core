@@ -96,6 +96,11 @@ void dm_pcmout_start(void *k) { (void)k; }
 int dm_pcmout_append(void *k, void *b) { (void)k; (void)b; return 0; }
 void *dm_pcmout_released(void *k) { (void)k; return NULL; }
 void dm_pcmout_wait(void *k, int ms) { (void)k; (void)ms; }
+// hle_thread.c's: the render lock taken as a native wait, the catch-up wait marked as one, and the stuck-step watch's thread lookup (no guest threads here)
+void dm_host_lock(pthread_mutex_t *m) { pthread_mutex_lock(m); }
+void dm_thread_native_wait(int entering) { (void)entering; }
+uint32_t thr_cur_handle(void) { return 0; }
+int dm_thread_peek(uint32_t handle, int *svc, uint64_t *lr, int *wkind, uint64_t *waddr, int *state) { (void)handle; (void)svc; (void)lr; (void)wkind; (void)waddr; (void)state; return 0; }
 void hle_bind_system_event(void *ev, int ac) {
     assert(ev == sdk_event && ac == 1 && event_destroys == 2 * event_binds + 1);   // after the open destroys the SDK's local event (each earlier Close destroyed one more)
     event_binds++;

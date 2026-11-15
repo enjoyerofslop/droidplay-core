@@ -746,6 +746,20 @@ int thr_name_of(pthread_t pt, char *out, size_t n) {
     return ok;
 }
 uint32_t thr_cur_handle(void) { thr_t *t = pthread_getspecific(g_keythr); return t ? t->handle : 0; }   // Only reads TSD, usable in a signal handler
+// hle_audren.c's stuck-step watch (dm_audren_watch): a guest thread's wait (kind and address), its last SVC with the call site, and state bits 1 sleeping, 2 in a native wait,
+// 4 in host work, by handle. 1 when found, 0 when no live thread has the handle, -1 when G is busy: the watch looks again on its next tick rather than wait for G, which the
+// thread it looks at may itself hold
+int dm_thread_peek(uint32_t handle, int *svc, uint64_t *lr, int *wkind, uint64_t *waddr, int *state) {
+    if (pthread_mutex_trylock(&G)) return -1;
+    thr_t *t = handle ? h_peek(handle, O_THREAD) : NULL;
+    int ok = t && !t->exited;
+    if (ok) {
+        *svc = __atomic_load_n(&t->last_svc, __ATOMIC_RELAXED); *lr = __atomic_load_n(&t->last_lr, __ATOMIC_RELAXED); *wkind = t->wkind & 7; *waddr = t->waddr;
+        *state = (t->sleeping ? 1 : 0) | (t->native_wait ? 2 : 0) | (t->host_work && *t->host_work ? 4 : 0);
+    }
+    pthread_mutex_unlock(&G);
+    return ok;
+}
 // Find a live guest thread by thread name (used by the sampler); returns 0 if not found
 int thr_find_by_name(const char *name, pthread_t *out) {
     char nb[32]; int ok = 0;
