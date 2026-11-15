@@ -185,7 +185,8 @@ static inline size_t malloc_good_size(size_t n) { return (n + 15) & ~(size_t)15;
 typedef struct malloc_zone { int unused; } malloc_zone_t;
 static inline malloc_zone_t *malloc_create_zone(size_t a, unsigned f) { (void)a; (void)f; static malloc_zone_t z; return &z; }
 static inline void malloc_set_zone_name(malloc_zone_t *z, const char *n) { (void)z; (void)n; }
-static inline void *malloc_zone_malloc(malloc_zone_t *z, size_t n) { (void)z; return malloc(n); }
+// Darwin's malloc returns every block 16-byte aligned (PhysX and Unreal rely on it: "Allocations must be 16-byte aligned"); bionic's can return 8-byte aligned blocks for tiny sizes
+static inline void *malloc_zone_malloc(malloc_zone_t *z, size_t n) { (void)z; void *p = NULL; return posix_memalign(&p, 16, n) ? NULL : p; }
 static inline void *malloc_zone_memalign(malloc_zone_t *z, size_t a, size_t n) { (void)z; void *p = NULL; return posix_memalign(&p, a < sizeof(void *) ? sizeof(void *) : a, n) ? NULL : p; }
 static inline void *malloc_zone_realloc(malloc_zone_t *z, void *p, size_t n) { (void)z; return realloc(p, n); }
 static inline void malloc_zone_free(malloc_zone_t *z, void *p) { (void)z; free(p); }
