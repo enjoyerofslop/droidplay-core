@@ -2649,6 +2649,7 @@ static VkFormat view_format(const vtex *v, const view_t *vv) {
     if (v->conv && f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_BC7_SRGB_BLOCK) { int c, px; f = bc_target(f, &c, &px); }
     if (v->conv == CONV_U16H || v->conv == CONV_S16H) { int c, px; VkFormat h = n16_twin(f, &c, &px); if (h) f = h; }   // a 16-bit normalized view of an image made as halves
     if (!f || f == v->fmt) return VK_FORMAT_UNDEFINED;
+    if (v->mutable_ && f == srgb_twin(v->fmt)) return f;   // the image's sRGB / UNORM twin, block formats too (which fmt_bytes doesn't size): vt_create lists it
     if (v->fixed_fmt && f != srgb_twin(v->fmt)) { RED_ONCE(121, "texture view in format %d over an image of format %d, which lists only its own and its sRGB twin (DM_VK_UBWC=0 views it in any): read in the image's", f, v->fmt); return VK_FORMAT_UNDEFINED; }
     if (!v->mutable_ || !fmt_bytes(f) || fmt_bytes(f) != fmt_bytes(v->fmt)) { RED_ONCE(118, "texture view in format %d over an image of format %d: read in the image's", f, v->fmt); return VK_FORMAT_UNDEFINED; }
     return f;

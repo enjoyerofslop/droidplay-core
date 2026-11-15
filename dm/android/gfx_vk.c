@@ -1440,8 +1440,13 @@ static VkFormat srgb_twin(VkFormat f) {
         case VK_FORMAT_A8B8G8R8_UNORM_PACK32: return VK_FORMAT_A8B8G8R8_SRGB_PACK32; case VK_FORMAT_A8B8G8R8_SRGB_PACK32: return VK_FORMAT_A8B8G8R8_UNORM_PACK32;
         case VK_FORMAT_R8_UNORM: return VK_FORMAT_R8_SRGB; case VK_FORMAT_R8_SRGB: return VK_FORMAT_R8_UNORM;
         case VK_FORMAT_R8G8_UNORM: return VK_FORMAT_R8G8_SRGB; case VK_FORMAT_R8G8_SRGB: return VK_FORMAT_R8G8_UNORM;
-        default: return VK_FORMAT_UNDEFINED;
+        default: break;
     }
+    // the block formats that come in a UNORM / SRGB pair, each UNORM odd and its SRGB the next number: BC1-3 and BC7, ETC2's three and every ASTC size (BC4-6 have none)
+    if ((f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_BC3_SRGB_BLOCK) || f == VK_FORMAT_BC7_UNORM_BLOCK || f == VK_FORMAT_BC7_SRGB_BLOCK ||
+        (f >= VK_FORMAT_ETC2_R8G8B8_UNORM_BLOCK && f <= VK_FORMAT_ETC2_R8G8B8A8_SRGB_BLOCK) || (f >= VK_FORMAT_ASTC_4x4_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK))
+        return (f & 1) ? (VkFormat)(f + 1) : (VkFormat)(f - 1);
+    return VK_FORMAT_UNDEFINED;
 }
 // DM_VK_UBWC=0 (env.txt): colour images MUTABLE_FORMAT with no format list, as before (vt_create)
 static int ubwc_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_UBWC"); v = !(e && *e == '0') && g_fmt_list; LOG("[vk] colour images %s", v ? "list their format and its sRGB twin, so Adreno keeps their framebuffer compression (DM_VK_UBWC=0: MUTABLE_FORMAT, any format of the texel size)" : g_fmt_list ? "MUTABLE_FORMAT with no format list (DM_VK_UBWC=0)" : "MUTABLE_FORMAT with no format list (no VK_KHR_image_format_list)"); } return v; }
@@ -1498,7 +1503,8 @@ static vtex *vt_create(const tex_t *t) {
     v->usage = u;   // STORAGE added later if the texture is bound to an image slot all the same (vt_storage_up)
     // an uncompressed colour image may be viewed in another format of its texel size (NVN texture views: sRGB over UNORM and the like): mutable. So may a BC image
     // decoded on the CPU, which holds uncompressed texels: a BC7_SRGB view of a BC7 texture is its RGBA8 image viewed as RGBA8_SRGB (gfx_vk_draw.inc view_format)
-    int mut = !rows && v->aspect == VK_IMAGE_ASPECT_COLOR_BIT && !(f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK);
+    int comp = f >= VK_FORMAT_BC1_RGB_UNORM_BLOCK && f <= VK_FORMAT_ASTC_12x12_SRGB_BLOCK;   // a block format the GPU samples itself (not decoded on the CPU)
+    int mut = !rows && v->aspect == VK_IMAGE_ASPECT_COLOR_BIT && !comp;
     // MUTABLE_FORMAT alone lets a view take any format of the texel size, and Adreno then leaves the image without UBWC, its framebuffer compression: every target
     // stored and loaded uncompressed. nx2android (github.com/shirai91/nx2android, a1b4f54) found that a format list keeps it: Super Mario Bros. Wonder's GPU time
     // 11.8 -> 8.8 ms a frame on an Adreno 830. A colour image that is not a storage image now lists its format and its sRGB twin (MUTABLE_FORMAT only with a twin);
@@ -1506,6 +1512,10 @@ static vtex *vt_create(const tex_t *t) {
     VkFormat fl[2] = {f, srgb_twin(f)};
     VkImageFormatListCreateInfoKHR fli = {.sType = VK_STRUCTURE_TYPE_IMAGE_FORMAT_LIST_CREATE_INFO_KHR, .viewFormatCount = fl[1] ? 2 : 1, .pViewFormats = fl};
     if (mut && !(u & VK_IMAGE_USAGE_STORAGE_BIT) && ubwc_on()) { v->fixed_fmt = 1; mut = fl[1] != VK_FORMAT_UNDEFINED; }
+    // A block image with an sRGB twin may be viewed as that twin (the same block layout; listed where the driver takes a list): Pokopia makes its BC7 textures UNORM
+    // and reads them through BC7_SRGB views. Read as the image's UNORM, the colours skipped their sRGB decode: the whole picture, menus too, came out pale and
+    // washed out (droidplay-core#491)
+    if (comp && !rows && fl[1]) { mut = 1; v->fixed_fmt = g_fmt_list; }
     v->mutable_ = mut || (u & VK_IMAGE_USAGE_STORAGE_BIT);
     VkImageCreateInfo ic = {.sType = VK_STRUCTURE_TYPE_IMAGE_CREATE_INFO, .imageType = v->type, .format = f, .extent = {v->w, v->h, v->d}, .mipLevels = v->levels,
         .arrayLayers = v->layers, .samples = v->samples, .tiling = VK_IMAGE_TILING_OPTIMAL, .usage = u, .sharingMode = VK_SHARING_MODE_EXCLUSIVE,

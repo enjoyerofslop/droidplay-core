@@ -1824,6 +1824,13 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
 - **Check:** the same targets now take room for the compression's metadata (`5.60 MB of memory for 5.49 MB of texels`). GPU time a frame (p50) on an Ayn Odin 2, kept against `DM_VK_UBWC=0`: Super Mario Odyssey's opening 4.30 against 5.57 ms, Brilliant Diamond's Eterna City 6.22 against 8.41, Animal Crossing's island 8.59 against 9.80, Skyward Sword HD's Skyloft 3.64 against 5.59, Link's Awakening's Ancient Ruins 5.91 against 5.83. On a OnePlus Pad 3: Odyssey 8.05 against 9.33 ms, Animal Crossing 15.09 against 15.59. The runs' last screenshots match apart from animation. No red line in any of the six test games.
 - **Found on:** [Super Mario Odyssey](../../dm/games/0100000000010000/README.md), with the other test games in the [Android baselines](../../dm/android/baselines.md).
 
+### Block textures read through their sRGB twin (Android)
+
+- **Symptom:** Android only: the whole picture is pale and washed out, menus and HUD too, and the log has `[RED] [vk] texture view in format 146 over an image of format 145: read in the image's` (a BC7_SRGB view of a BC7_UNORM image).
+- **Cause:** `vt_create` never made a block-format image (BC, ETC2, ASTC sampled by the GPU itself) mutable, and `srgb_twin` had no block formats, so `view_format` read an sRGB view of such an image in the image's UNORM format. The texels skipped their sRGB decode, and sRGB-encoded colours read as linear come out too bright and grey.
+- **Fix:** `srgb_twin` also pairs the block formats that have an sRGB form (BC1–3, BC7, ETC2's three, every ASTC size; each UNORM is odd and its SRGB the next number). `vt_create` makes a block image with a twin `MUTABLE_FORMAT`, with the format list of its format and its twin where the driver has `VK_KHR_image_format_list`. `view_format` takes a view in the image's twin before its texel-size check, which block formats don't pass.
+- **Found on:** Pokémon Pokopia on a Retroid Pocket G2 (Adreno 735 on Turnip), droidplay-core#491. Not checked on a phone of ours: the reporter's run is the check.
+
 ### Compressed render targets through an uncompressed shadow on Vulkan
 
 - **Symptom:** Android only: `[RED] [vk] texture view in format 95 over an image of format 139: read in the image's` (an RGBA16UI view of a BC4 image), and in the kernel log (`adb shell dmesg`) `CP opcode error interrupt | opcode=0x00000000` with `kgsl … ctx_type VK` lines, one per submission that holds the pass; whatever else those submissions recorded (uploads, other passes) never reaches the GPU.
