@@ -211,6 +211,10 @@ public class Launcher extends Activity {
         settings.clear(); chosen.clear();
         define(g.nacp);
         for (Setting s : settings) chosen.put(s.key, prefs.getString(s.key, s.def));
+        // launcher.txt is written by the pause menu too (Gamepad.setSplit, which runs with no launcher): a row it holds wins over this screen's last saved choice, so pressing
+        // Play does not undo a split made while playing. A row whose env.txt value is fixed is left out of that file anyway (the loop below)
+        Map<String, String> saved = readKeys(new File(g.dir, "launcher.txt"));
+        for (Setting s : settings) if (saved.containsKey(s.key)) { chosen.put(s.key, saved.get(s.key)); prefs.edit().putString(s.key, saved.get(s.key)).apply(); }
         setContentView(build(g));
     }
 
@@ -258,6 +262,15 @@ public class Launcher extends Activity {
         s = new Setting("DM_PAD_RAISE", "range", "Controls", "Touch control height",
             "Moves the stick, the D-pad and the buttons up from the bottom. 0% is the standard layout; 100% stops just below the shoulder buttons.");
         s.lo = 0; s.hi = 1; s.step = 0.05f; s.def = "0"; settings.add(s);
+        // the game above and the controls below (Gamepad.layoutBand, front_android.c picture_range): a foldable held open, or a tablet. The split is the picture's share of
+        // the height; the pause menu's row changes it while playing, and both write it to launcher.txt, from where picture_range derives the picture's top and height
+        s = new Setting("DM_PAD_HALF", "toggle", "Controls", "Game above, controls below",
+            "Splits the screen as a handheld does: the game in the top part, the touch controls in the band under it. For a phone held open or a tablet. The game's own touch screen shrinks to its part too.");
+        s.def = "0"; settings.add(s);
+        s = new Setting("DM_SPLIT", "choice", "Controls", "Split at",
+            "Where the game's part ends: 50% is half the screen each.");
+        s.values = new String[] {"30", "35", "40", "45", "50", "55", "60", "65", "70"};
+        s.labels = new String[] {"30%", "35%", "40%", "45%", "50%", "55%", "60%", "65%", "70%"}; s.def = "50"; settings.add(s);
         for (Setting t : settings) if (defaults.containsKey(t.key)) t.def = defaults.get(t.key);
     }
 

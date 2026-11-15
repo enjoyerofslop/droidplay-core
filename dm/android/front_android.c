@@ -292,6 +292,22 @@ void front_android_present(const tex_t *t, const int crop[4]) { (void)t; (void)c
 // ---------- Vulkan ----------
 static VkInstance g_inst; static VkPhysicalDevice g_pd; static VkDevice g_dev; static VkQueue g_q; static uint32_t g_qf;
 static VkSurfaceKHR g_surf; static VkSwapchainKHR g_sc; static VkImage g_img[8]; static uint32_t g_nimg; static VkFormat g_fmt; static VkExtent2D g_ext2;
+// The picture's area in the window (the swapchain's pixels), as a share of the window. DM_PAD_HALF=1 with DM_SPLIT=<percent> puts the game in the top that share (the touch
+// controls keep the band under it: DM_PAD_HALF, Gamepad.java). The blit's destination rectangle in frame_draw is this area, and the game's touch screen (Gamepad.pushGame) is
+// normalized on it, so the band shows and takes the same picture. Read once: the swapchain follows the window, not this
+static void picture_range(float *top, float *h) {
+    static float t = -1, f = -1;
+    if (t < 0) {
+        const char *half = getenv("DM_PAD_HALF"), *sp = getenv("DM_SPLIT");
+        int split = sp && *sp ? atoi(sp) : 0;
+        if (half && *half && *half != '0' && split > 0) { t = (float)split / 100.f; f = 1.f - t; }
+        else { t = 0.f; f = 1.f; }
+        if (t < 0.f) t = 0.f; if (t > 1.f) t = 1.f; if (f <= 0.f) f = 1.f; if (f > 1.f - t) f = 1.f - t;
+        if (t > 0.f) LOG("picture: the game keeps the top %.0f%% of the window (DM_PAD_HALF=%s DM_SPLIT=%s): the touch controls below it", t * 100, half, sp ? sp : "0");   // the split off says nothing
+        else if (half && *half && *half != '0') LOG("[RED] DM_PAD_HALF=%s without DM_SPLIT, or with one outside 1 to 99: the game fills the window", half);
+    }
+    *top = t; *h = f;
+}
 static int g_sc_srgb, g_sc_has_srgb;   // the swapchain made in R8G8B8A8_SRGB; the surface lists it (sc_encoding)
 static VkCommandPool g_cpool; static VkCommandBuffer g_cb; static VkBuffer g_stg; static VkDeviceMemory g_stgm; static void *g_stgp; static VkDeviceSize g_stg_sz;
 static VkFence g_fence; static VkSemaphore g_acq, g_done;
@@ -569,10 +585,12 @@ static int frame_draw(void) {
     vkCmdClearColorImage(g_cb, g_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, &black, 1, &all);
     VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT, .dstAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT};
     vkCmdPipelineBarrier(g_cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
-    // the crop rectangle into the window, scaled to fit with its aspect kept
+    // the crop rectangle into the window, scaled to fit with its aspect kept, inside the picture's area (DM_PICTURE_TOP / DM_PICTURE_HEIGHT: the whole window by default)
     int cw = fr.crop[2] > 0 ? fr.crop[2] : (int)fr.w, ch = fr.crop[3] > 0 ? fr.crop[3] : (int)fr.h;
-    double sx = (double)g_ext2.width / cw, sy = (double)g_ext2.height / ch, sc = sx < sy ? sx : sy;
-    int dw = (int)(cw * sc), dh = (int)(ch * sc), dx = ((int)g_ext2.width - dw) / 2, dy = ((int)g_ext2.height - dh) / 2;
+    float picTop, picH; picture_range(&picTop, &picH);   // not pt: VkPresentTimeGOOGLE pt, the present's time in this function
+    int pw = (int)g_ext2.width, phh = (int)(g_ext2.height * picH), py0 = (int)(g_ext2.height * picTop);
+    double sx = (double)pw / cw, sy = (double)phh / ch, sc = sx < sy ? sx : sy;
+    int dw = (int)(cw * sc), dh = (int)(ch * sc), dx = (pw - dw) / 2, dy = py0 + (phh - dh) / 2;
     VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{fr.crop[0], fr.crop[1], 0}, {fr.crop[0] + cw, fr.crop[1] + ch, 1}},
                       .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
     if (fr.flip) { bl.srcOffsets[0].y = fr.crop[1] + ch; bl.srcOffsets[1].y = fr.crop[1]; }   // the window image is stored bottom-up (NVN's lower-left origin)
@@ -654,6 +672,12 @@ static jint JNICALL n_opmode(JNIEnv *e, jclass c) { (void)e; (void)c; return dm_
 static jint JNICALL n_layout(JNIEnv *e, jclass c) { (void)e; (void)c; return DM_GAME_PAD_LAYOUT; }
 static jstring JNICALL n_env(JNIEnv *e, jclass c, jstring n) { (void)c; const char *u = (*e)->GetStringUTFChars(e, n, NULL); const char *v = u ? getenv(u) : NULL; (*e)->ReleaseStringUTFChars(e, n, u); return v ? (*e)->NewStringUTF(e, v) : NULL; }
 static jlong JNICALL n_frames(JNIEnv *e, jclass c) { (void)e; (void)c; return (jlong)atomic_load(&g_frames); }   // the frame-rate counter (DM_SHOW_FPS, Gamepad.java)
+// The picture's area in the window, as Gamepad.pushGame normalizes the game's touch screen on it: the top and height as shares of the window (DM_PICTURE_TOP / DM_PICTURE_HEIGHT).
+// One call, both numbers: the picture is only ever in the top part of the window when the gamepad has the rest (DM_PAD_HALF)
+static void JNICALL n_picture(JNIEnv *e, jclass c, jfloatArray out) {
+    (void)c; float pt, ph; picture_range(&pt, &ph); jfloat v[2] = {pt, ph};
+    if (out) (*e)->SetFloatArrayRegion(e, out, 0, 2, v);
+}
 static void JNICALL n_log(JNIEnv *e, jclass c, jstring s) { (void)c; const char *u = (*e)->GetStringUTFChars(e, s, NULL); LOG("%s", u ? u : ""); (*e)->ReleaseStringUTFChars(e, s, u); }
 // The Java side from the APK's classes.dex (java/, tools/build_apk.py), through the activity's class loader (a native thread's FindClass sees only the system's)
 static void gamepad_start(void) {
@@ -665,6 +689,7 @@ static void gamepad_start(void) {
     if (!c) { LOG("[RED] no Java side in the app (classes.dex): no touch controls, no text input"); return; }
     static const JNINativeMethod nm[] = {{"nativeTouchPad", "(JIIII)V", (void *)n_touchpad}, {"nativeGameTouch", "([I[F[FI)V", (void *)n_gametouch},
         {"nativeShake", "(Z)V", (void *)n_shake}, {"nativeOpMode", "()I", (void *)n_opmode}, {"nativeDefaultLayout", "()I", (void *)n_layout}, {"nativeLog", "(Ljava/lang/String;)V", (void *)n_log}, {"nativeEnv", "(Ljava/lang/String;)Ljava/lang/String;", (void *)n_env}, {"nativeFrames", "()J", (void *)n_frames},
+        {"nativePicture", "([F)V", (void *)n_picture},
         {"nativePause", "(Z)Z", (void *)n_pause}};
     if ((*e)->RegisterNatives(e, c, nm, sizeof nm / sizeof *nm)) { (*e)->ExceptionClear(e); LOG("[RED] Gamepad natives not registered"); return; }
     g_gp = (*e)->NewGlobalRef(e, c);
@@ -817,6 +842,9 @@ void android_main(struct android_app *app) {
     log_start();
     LOG("DroidPlay on Android: %s (%s), files %s, internal %s", DM_GAME_NAME, DM_GAME_ID, g_game, g_int);   // a log's first line
     env_file(g_ext, "env.txt", 1); env_file(g_game, "launcher.txt", 0); env_file(g_game, "defaults.txt", 0);
+    // The two folders again as the host's environment, for the Java side: the launcher's screen split (Gamepad.setSplit) writes launcher.txt with the row the player picked,
+    // and nativeEnv reads the process's environment, not the files. Set after those are read, so neither this script nor a player's own file overrides them
+    setenv("DM_ENV_DIR", g_ext, 1); setenv("DM_GAME_DIR", g_game, 1);
     {   // and its dumps, before the host opens them: the frame table, and each audio output's PCM (<file>, <file>.<N>)
         kept += keep_prev(getenv("DM_NVN_TSV")); const char *ad = getenv("DM_AUDIO_DUMP");
         if (ad && *ad) { kept += keep_prev(ad); for (int i = 1; i < 8; i++) { char p[1024]; snprintf(p, sizeof p, "%s.%d", ad, i); kept += keep_prev(p); } }

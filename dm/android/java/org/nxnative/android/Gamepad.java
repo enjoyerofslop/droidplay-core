@@ -43,6 +43,7 @@ import java.util.concurrent.CountDownLatch;
 public final class Gamepad extends View {
     static native void nativeTouchPad(long buttons, int lx, int ly, int rx, int ry);   // the controls' state (front_android.c merges it with a physical controller's)
     static native void nativeGameTouch(int[] ids, float[] xs, float[] ys, int n);      // the game's touch screen: dm_touch_set
+    static native void nativePicture(float[] out);   // the picture's area in the window (DM_PICTURE_TOP, DM_PICTURE_HEIGHT): {top, height}, shares of the window
     static native void nativeShake(boolean on);
     static native int nativeOpMode();          // hle_oe.c dm_opmode: 0 handheld
     static native int nativeDefaultLayout();   // the game profile's pad_layout (DM_GAME_PAD_LAYOUT)
@@ -66,6 +67,10 @@ public final class Gamepad extends View {
 
     final float dp; final SharedPreferences prefs;
     boolean full, tap, padOff;
+    // Folded open with the gamepad below the game (DM_PAD_HALF=1): the picture keeps the top of the window (front_android.c picture_range) and the controls are laid out in the
+    // band under it. padTop is that band's top edge in the view's y: every vertical reference below measures from it, and a touch above it is the picture's, which goes to the
+    // game's touch screen as normalized on the picture there. Off by default: every number below then measures from 0 and the whole window, as before
+    boolean half; float padTop; float picTop, picH = 1;
     // touches by pointer id: owner (control | index << 8), the diamond keys each holds
     final long[] owner = new long[64]; final long[] faceOf = new long[64]; final boolean[] down = new boolean[64];
     final float[] px = new float[64], py = new float[64];
@@ -98,6 +103,7 @@ public final class Gamepad extends View {
             android.view.DisplayCutout c = in.getDisplayCutout();
             insL = c.getSafeInsetLeft(); insR = c.getSafeInsetRight(); insT = c.getSafeInsetTop(); insB = c.getSafeInsetBottom();
         }
+        layoutBand();   // the band's top (half mode) is a share of the height, known once the view has one
         invalidate(); return in;
     }
     // The player's size and inset (droidplay-core#222: a stick too close to the left edge of a Poco F7): DM_PAD_SCALE multiplies u, and DM_PAD_INSET (0 to 1) moves the
@@ -114,11 +120,14 @@ public final class Gamepad extends View {
         try { if (inset != null) insetSet = Math.max(0f, Math.min(1f, Float.parseFloat(inset))); } catch (NumberFormatException e) {}
         try { if (raise != null) raiseSet = Math.max(0f, Math.min(1f, Float.parseFloat(raise))); } catch (NumberFormatException e) {}
     }
-    float baseU() { return dp * Math.min(getHeight() / dp / 430f, 1.3f); }
+    // In half mode the band's height stands in for the window's: every vertical reference (the bottom the controls sit on, the height they are measured against) is the
+    // band's, and a control's y is the band's top plus its offset in it. Whole-window mode: the window's own, exactly as before
+    float padH() { return half ? getHeight() - padTop : getHeight(); }
+    float baseU() { return dp * Math.min(padH() / dp / 430f, 1.3f); }
     float padScale() {   // scaleSet, a size over 1 held where the corner groups would meet the shoulder buttons or each other
         if (scaleSet <= 1) return scaleSet;
         float b = baseU(); if (b <= 0) return 1;
-        float fit = Math.min((cornerB0() - safeT()) / ((K_UP_REACH + K_DROP_REACH + K_GAP) * b), (cornerR0() - cornerL0()) / ((K_LEFT_REACH + K_FACE_REACH + K_GAP) * b));
+        float fit = Math.min(bandH() / ((K_UP_REACH + K_DROP_REACH + K_GAP) * b), (cornerR0() - cornerL0()) / ((K_LEFT_REACH + K_FACE_REACH + K_GAP) * b));
         return Math.max(1f, Math.min(scaleSet, fit));
     }
     float u() { return baseU() * padScale(); }
@@ -129,12 +138,15 @@ public final class Gamepad extends View {
     }
     float raisePx() {   // the share of the room between the bottom groups' touch areas and the shoulder buttons' (the 3D reach, as padScale measures it) they move up by
         if (raiseSet <= 0) return 0;
-        float free = (cornerB0() - safeT()) - (K_UP_REACH + K_DROP_REACH + K_GAP) * u();
+        float free = bandH() - (K_UP_REACH + K_DROP_REACH + K_GAP) * u();
         return free > 0 ? raiseSet * free : 0;
     }
-    float safeL() { return insL; } float safeR() { return getWidth() - insR; } float safeT() { return insT; }
+    // the band's height past the safe area it starts at: subtracts safeT first so these read as one expression, cornerB0() - safeT() or either way in half mode
+    float bandH() { return cornerB0() - safeT(); }
+    float safeL() { return insL; } float safeR() { return getWidth() - insR; } float safeT() { return half ? padTop + insT : insT; }
     float cornerL0() { return insL * K_CORNER_IN; } float cornerR0() { return getWidth() - insR * K_CORNER_IN; }
-    float cornerL() { return cornerL0() + insetPx(); } float cornerR() { return cornerR0() - insetPx(); } float cornerB0() { return getHeight() - insB; } float cornerB() { return cornerB0() - raisePx(); }
+    float cornerL() { return cornerL0() + insetPx(); } float cornerR() { return cornerR0() - insetPx(); }
+    float cornerB0() { return getHeight() - insB; } float cornerB() { return cornerB0() - raisePx(); }
     float faceCx() { return cornerR() - K_FACE_X * u(); } float faceCy() { return cornerB() - K_PAD_Y * u(); }
     float faceGap() { return K_FACE_GAP * u(); } float faceR() { return K_FACE_R * u(); }
     float faceX(int b) { return b == B_A ? faceCx() + faceGap() : b == B_Y ? faceCx() - faceGap() : faceCx(); }
@@ -148,8 +160,7 @@ public final class Gamepad extends View {
     static boolean isClick(int b) { return b == B_LS || b == B_RS; }
     static boolean fullOnly(int b) { return b == B_LS || b == B_RS || b >= B_LEFT; }
     float dropCx(int b) { boolean z = b == B_ZL || b == B_ZR, r = b == B_ZR || b == B_R; float dx = (z ? K_ZL_X : K_L_X) * u(); return r ? safeR() - dx : safeL() + dx; }
-    float dropCy(int b) { boolean z = b == B_ZL || b == B_ZR; return safeT() + (z ? K_ZL_Y : K_L_Y) * u(); }
-    float dropR(int b) { return (b == B_ZL || b == B_ZR ? K_ZL_R : K_L_R) * u(); }
+    float dropCy(int b) { boolean z = b == B_ZL || b == B_ZR; return safeT() + (z ? K_ZL_Y : K_L_Y) * u(); } float dropR(int b) { return (b == B_ZL || b == B_ZR ? K_ZL_R : K_L_R) * u(); }
     float clickCx(int b) { return b == B_RS ? safeR() - K_CLICK_X * u() : safeL() + K_CLICK_X * u(); } float clickCy() { return safeT() + K_ZL_Y * u(); }
     RectF pill(int b) { float w = K_PILL_W * u(), h = K_PILL_H * u(), cx = (safeL() + safeR()) / 2 + (b == B_PLUS ? K_PILL_DX : -K_PILL_DX) * u(), cy = safeT() + K_PILL_Y * u();
         return new RectF(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2); }
@@ -157,6 +168,54 @@ public final class Gamepad extends View {
     // the menu button (back to the launcher), left of −: past the − pill's grown hit area, so the two never share a touch
     float menuCx() { return swapCx() - (K_PILL_DX + K_PILL_W / 2 + 14 + K_SWAP_R) * u(); } float menuCy() { return swapCy(); }
     static float dist(float x0, float y0, float x1, float y1) { return (float)Math.hypot(x0 - x1, y0 - y1); }
+    // ---- Half mode: the game above, the controls below (DM_PAD_HALF=1) ----
+    // The band starts where the picture's own area ends: both come from DM_PAD_HALF and DM_SPLIT as front_android.c's picture_range reads them, so a touch is always handled by
+    // the half it is drawn in. Read from the environment the host started with: a change (setSplit) takes effect at the next start
+    void layoutBand() {
+        half = !tap && !padOff && nativeEnv("DM_PAD_HALF") != null && !nativeEnv("DM_PAD_HALF").equals("0");
+        float[] pr = new float[2];
+        if (half) { try { nativePicture(pr); } catch (UnsatisfiedLinkError old) { half = false; } }   // a host older than the split has no nativePicture
+        picTop = pr[0]; picH = pr[1] > 0 ? pr[1] : 1;
+        // The band is a share of the view's height, so it is only known once the view has one: an inset arrives before the first layout (h=0), and the band then waits for
+        // onSizeChanged. Left at 0, every control would be laid out in the whole window over a picture squeezed into it
+        padTop = half && getHeight() > 0 ? (float)Math.rint(getHeight() * picTop) : 0;
+    }
+    int splitPct() {   // the split the host started with (DM_SPLIT): a change to it takes effect at the next start
+        String s = nativeEnv("DM_SPLIT"); try { int p = s == null ? 0 : Integer.parseInt(s.trim()); return p > 0 ? p : SPLIT_DEFAULT; } catch (NumberFormatException e) { return SPLIT_DEFAULT; }
+    }
+    // The split, judged once before anything else: the view is laid out again when it moves, which sends the insets again and draws with the new numbers
+    void setSplit(int pct) {   // 0 turns it off; otherwise the picture's share of the height, 30 to 70 (SPLIT_MIN / SPLIT_MAX)
+        boolean off = pct <= 0;
+        pct = off ? SPLIT_DEFAULT : Math.max(SPLIT_MIN, Math.min(SPLIT_MAX, pct));
+        prefs.edit().putInt("DmPadSplit", pct).putBoolean("DmPadHalf", !off).apply();
+        writeLauncherKeys(new String[][] {{"DM_PAD_HALF", off ? "0" : "1"}, {"DM_SPLIT", String.valueOf(pct)}});
+        // the picture is placed when the host starts (front_android.c picture_range): this run keeps the split it started with, and the band follows the picture's area
+        layoutBand();
+        requestLayout(); invalidate();
+        nativeLog("gamepad: the game " + (off ? "over the whole screen again" : "above, the controls below at " + pct + "%") + " for the next start (launcher.txt)");
+    }
+    int nextSplit(int pct) { return pct <= SPLIT_MIN ? 0 : pct - SPLIT_STEP; }   // on 50% → 45% → … → 30% → off
+    // The settings screen's file (Launcher.java saveSettings) for keys it does not carry itself: a line each, kept as a player wrote them. env.txt still wins over these
+    void writeLauncherKeys(String[][] keys) {
+        String d = nativeEnv("DM_GAME_DIR"); if (d == null || d.isEmpty()) return;
+        java.io.File f = new java.io.File(d, "launcher.txt"), t = new java.io.File(d, "launcher.txt.tmp");
+        StringBuilder sb = new StringBuilder("# written by the settings screen and the pause menu (Gamepad.java); env.txt wins over these\n");
+        try {
+            java.util.Set<String> done = new java.util.HashSet<String>();
+            java.util.List<String> lines = f.isFile() ? java.nio.file.Files.readAllLines(f.toPath(), java.nio.charset.StandardCharsets.UTF_8) : new java.util.ArrayList<String>();
+            for (String l : lines) {
+                if (l.startsWith("#") || !l.contains("=")) continue;
+                String k = l.substring(0, l.indexOf('='));
+                String v = null;
+                for (String[] kv : keys) if (kv[0].equals(k)) { v = kv[1]; done.add(k); }
+                if (v != null) sb.append(k).append('=').append(v).append('\n');
+            }
+            for (String[] kv : keys) if (!done.contains(kv[0])) sb.append(kv[0]).append('=').append(kv[1]).append('\n');
+            java.nio.file.Files.write(t.toPath(), sb.toString().getBytes(java.nio.charset.StandardCharsets.UTF_8));
+            if (!t.renameTo(f)) throw new java.io.IOException("could not replace " + f);
+        } catch (Exception x) { nativeLog("gamepad: launcher.txt not written: " + x); }
+    }
+    static final int SPLIT_MIN = 30, SPLIT_MAX = 70, SPLIT_STEP = 5, SPLIT_DEFAULT = 50;
     int btnAt(float x, float y) {
         for (int b : K_BTNS) {
             if (fullOnly(b) && !full) continue;
@@ -223,10 +282,10 @@ public final class Gamepad extends View {
         lastBtn = face | dpad | btn; lastAx = ax;
         invalidate();
     }
-    void pushGame() {   // the game's touch screen: normalized on the centred 16:9 picture
-        float w = getWidth(), h = getHeight(); if (w <= 0 || h <= 0) return;
+    void pushGame() {   // the game's touch screen: normalized on the picture (the centred 16:9 area of the band it is shown in: front_android.c frame_draw, picture_range)
+        float w = getWidth(), h = half ? getHeight() * picH : getHeight(); if (w <= 0 || h <= 0) return;
         if (w / h > 16f / 9) w = h * 16 / 9; else h = w * 9 / 16;
-        float x0 = (getWidth() - w) / 2, y0 = (getHeight() - h) / 2;
+        float x0 = (getWidth() - w) / 2, y0 = (half ? getHeight() * picTop : 0) + (getHeight() * (half ? picH : 1) - h) / 2;
         int[] ids = new int[16]; float[] xs = new float[16], ys = new float[16]; int n = 0;
         for (int i = 0; i < 16; i++) if (game[i] >= 0) {
             ids[n] = i; xs[n] = Math.min(Math.max((px[game[i]] - x0) / w, 0), 0.999f); ys[n] = Math.min(Math.max((py[game[i]] - y0) / h, 0), 0.999f); n++;
@@ -236,24 +295,26 @@ public final class Gamepad extends View {
     boolean gameBegin(int p) { for (int i = 0; i < 16; i++) if (game[i] < 0) { game[i] = p; owner[p] = C_GAME | (long)i << 8; return true; } return false; }
     void begin(int p, float x, float y) {
         down[p] = true; px[p] = x; py[p] = y; owner[p] = C_NONE; faceOf[p] = 0;
-        boolean g = false;
-        boolean menuThere = inMenu(x, y); menuReveal();   // judged before the touch brings the button back: a tap on its hidden place goes to the game
+        boolean g = false, inPic = half && y < padTop;   // the band's controls are laid out below padTop: a touch above it is the picture's
+        boolean menuThere = !inPic && inMenu(x, y); menuReveal();   // judged before the touch brings the button back: a tap on its hidden place goes to the game
         if (menuThere) owner[p] = C_MENU;   // shown with a controller too (the pad hidden): the way back to the launcher
         else if (padOff) g = gameBegin(p);
+        else if (inPic) g = gameBegin(p);
         else {
-            int hit = tap ? -1 : btnAt(x, y);
+            float bx = x, by = half ? y - padTop : y;   // into the band (box): the controls' own coordinates
+            int hit = tap ? -1 : btnAt(bx, by);
             if (hit >= 0) owner[p] = C_BTN | (long)hit << 8;
-            else if (inSwap(x, y)) owner[p] = C_SWAP;
+            else if (inSwap(bx, by)) owner[p] = C_SWAP;
             else if (tap) g = gameBegin(p);
             else {   // the diamond, the D-pad, the left stick: the smallest distance / grab radius, if it is <= 1
                 float best = 1; int kind = C_NONE, idx = 0;
-                float f = dist(x, y, faceCx(), faceCy()) / (faceGap() + faceR() * (full ? K_FACE_GRAB_3D : K_FACE_GRAB)); if (f <= best) { best = f; kind = C_FACE; }
-                if (full) { float d = dist(x, y, dpadCx(), dpadCy()) / (dpadR() * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
-                if (stick[0] < 0) { float s = dist(x, y, homeX(), homeY()) / (stickR(0) * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; } }
-                if (kind == C_NONE && full && stick[1] < 0 && inRightArea(x)) { kind = C_STICK; idx = 1; rcx = x; rcy = y; }
-                if (kind == C_FACE) { owner[p] = C_FACE; faceOf[p] = faceAt(x, y); }
+                float f = dist(bx, by, faceCx(), faceCy()) / (faceGap() + faceR() * (full ? K_FACE_GRAB_3D : K_FACE_GRAB)); if (f <= best) { best = f; kind = C_FACE; }
+                if (full) { float d = dist(bx, by, dpadCx(), dpadCy()) / (dpadR() * K_DPAD_GRAB); if (d < best) { best = d; kind = C_DPAD; } }
+                if (stick[0] < 0) { float s = dist(bx, by, homeX(), homeY()) / (stickR(0) * K_STICK_GRAB); if (s < best) { best = s; kind = C_STICK; } }
+                if (kind == C_NONE && full && stick[1] < 0 && inRightArea(x)) { kind = C_STICK; idx = 1; rcx = bx; rcy = by; }
+                if (kind == C_FACE) { owner[p] = C_FACE; faceOf[p] = faceAt(bx, by); }
                 else if (kind == C_DPAD) owner[p] = C_DPAD;
-                else if (kind == C_STICK) { owner[p] = C_STICK | (long)idx << 8; stick[idx] = p; stickX[idx] = x; stickY[idx] = y; }
+                else if (kind == C_STICK) { owner[p] = C_STICK | (long)idx << 8; stick[idx] = p; stickX[idx] = bx; stickY[idx] = by; }
                 else g = gameBegin(p);
             }
         }
@@ -262,14 +323,14 @@ public final class Gamepad extends View {
     void move(int p, float x, float y) {
         if (!down[p]) return;
         px[p] = x; py[p] = y; int c = (int)(owner[p] & 0xff);
-        if (c == C_FACE) faceOf[p] = faceAt(x, y);
-        else if (c == C_STICK) { int i = (int)(owner[p] >> 8); stickX[i] = x; stickY[i] = y;
-            if (i == 1) { float d = dist(x, y, rcx, rcy), r = stickR(1); if (d > r) { rcx = x - (x - rcx) * r / d; rcy = y - (y - rcy) * r / d; } } }
+        if (c == C_FACE) faceOf[p] = faceAt(x, half ? y - padTop : y);
+        else if (c == C_STICK) { int i = (int)(owner[p] >> 8); float bx = x, by = half ? y - padTop : y; stickX[i] = bx; stickY[i] = by;
+            if (i == 1) { float d = dist(bx, by, rcx, rcy), r = stickR(1); if (d > r) { rcx = bx - (bx - rcx) * r / d; rcy = by - (by - rcy) * r / d; } } }
     }
     boolean end(int p, boolean ended) {   // → the layout button was released on it
         if (!down[p]) return false;
-        boolean swap = ended && (owner[p] & 0xff) == C_SWAP && inSwap(px[p], py[p]);
-        if (ended && (owner[p] & 0xff) == C_MENU && inMenu(px[p], py[p])) menuGo = true;   // released on it
+        boolean swap = ended && (owner[p] & 0xff) == C_SWAP && inSwap(px[p], half ? py[p] - padTop : py[p]);
+        if (ended && (owner[p] & 0xff) == C_MENU && inMenu(px[p], half ? py[p] - padTop : py[p])) menuGo = true;   // released on it
         if ((owner[p] & 0xff) == C_GAME) game[(int)(owner[p] >> 8) & 15] = -1;
         for (int i = 0; i < 2; i++) if (stick[i] == p) stick[i] = -1;
         down[p] = false; owner[p] = 0; faceOf[p] = 0;
@@ -340,7 +401,12 @@ public final class Gamepad extends View {
     void fpsDraw(Canvas c) {
         if (fps == null) return;
         if (fpsPaint == null) { fpsPaint = new Paint(Paint.ANTI_ALIAS_FLAG); fpsPaint.setTypeface(Typeface.DEFAULT_BOLD); fpsPaint.setShadowLayer(3, 1, 1, Color.BLACK); }
-        float u = u(); fpsPaint.setTextSize(16 * u); fpsPaint.setColor(Color.argb(230, 255, 255, 255)); c.drawText(fps, 12 * u, 26 * u, fpsPaint);
+        float u = u(); fpsPaint.setTextSize(16 * u); fpsPaint.setColor(Color.argb(230, 255, 255, 255)); c.drawText(fps, 12 * u, (half ? padTop : 0) + 26 * u, fpsPaint);
+    }
+
+    @Override protected void onSizeChanged(int w, int h, int ow, int oh) {
+        super.onSizeChanged(w, h, ow, oh);
+        layoutBand();   // the band's share of the height, now that there is one
     }
 
     @Override protected void onDraw(Canvas c) {
@@ -375,9 +441,17 @@ public final class Gamepad extends View {
     // ---- The pause menu: ≡ (or a controller's Mode / Menu key, front_android.c) opens it and the game is held under it (nativePause) until it closes ----
     // Rows that every device and game has: nothing here is saved but the touch layout, which the layout button saves too. Touch: a row is chosen where the finger lifts
     // on the row it went down on, ≡ again resumes. A controller: up / down, A chooses, left / right change a row's value, B resumes (menuKey, from the native input queue)
-    static final int M_RESUME = 0, M_LAYOUT = 1, M_FPS = 2, M_SAVE = 3, M_LEAVE = 4;   // M_SAVE is the launcher's screen: a game app, which has none, has no such row
-    int menuN() { return hasLauncher() ? 5 : 4; }
-    int menuId(int row) { return row < M_SAVE || hasLauncher() ? row : row + 1; }
+    // M_SPLIT is the game above and the controls below (the layout button's own Tap layout leaves no controls to put there). Its value is written to launcher.txt and read at
+    // the next start: the picture is placed when the host starts (front_android.c picture_range), so this run keeps the split it started with
+    static final int M_RESUME = 0, M_LAYOUT = 1, M_SPLIT = 2, M_FPS = 3, M_SAVE = 4, M_LEAVE = 5;   // M_SAVE is the launcher's screen: a game app, which has none, has no such row
+    int menuN() { return (hasLauncher() ? 6 : 5) - (tap ? 1 : 0); }
+    // the row on the screen → its id: the split's row is gone in Tap, and the save's without a launcher
+    int menuId(int row) {
+        int i = row;
+        if (i >= M_SPLIT && tap) i++;
+        if (i >= M_SAVE && !hasLauncher()) i++;
+        return i;
+    }
     static final int MK_TOGGLE = 0, MK_UP = 1, MK_DOWN = 2, MK_LEFT = 3, MK_RIGHT = 4, MK_OK = 5, MK_BACK = 6;   // front_android.c's
     static final float K_MENU_W = 300, K_MENU_HEAD = 48, K_MENU_ROW = 46, K_MENU_PAD = 10;
     boolean menuOpen; int menuSel, menuDown = -1; Paint menuPaint;
@@ -396,18 +470,19 @@ public final class Gamepad extends View {
         catch (UnsatisfiedLinkError e) { nativeLog("gamepad: menu: this game's host is older than the pause menu"); return false; }
     }
     RectF menuBox() {
-        float u = baseU(), w = Math.min(K_MENU_W * u, getWidth() * 0.9f), h = (K_MENU_HEAD + menuN() * K_MENU_ROW + K_MENU_PAD) * u, cx = getWidth() / 2f, cy = getHeight() / 2f;
+        float u = baseU(), w = Math.min(K_MENU_W * u, getWidth() * 0.9f), h = (K_MENU_HEAD + menuN() * K_MENU_ROW + K_MENU_PAD) * u, cx = getWidth() / 2f, cy = (padTop + getHeight()) / 2f;
         return new RectF(cx - w / 2, cy - h / 2, cx + w / 2, cy + h / 2);
     }
     RectF menuRow(int i) { RectF b = menuBox(); float u = baseU(), t = b.top + (K_MENU_HEAD + i * K_MENU_ROW) * u; return new RectF(b.left + K_MENU_PAD * u, t, b.right - K_MENU_PAD * u, t + K_MENU_ROW * u); }
     int menuRowAt(float x, float y) { for (int i = 0, n = menuN(); i < n; i++) if (menuRow(i).contains(x, y)) return i; return -1; }
-    String menuLabel(int i) { i = menuId(i); return i == M_RESUME ? "Resume" : i == M_LAYOUT ? "Touch controls" : i == M_FPS ? "Frame-rate counter" : i == M_SAVE ? "Export or import the save…" : hasLauncher() ? "Back to the launcher" : "Home screen"; }
-    String menuValue(int i) { i = menuId(i); return i == M_LAYOUT ? (tap ? "Tap" : full ? "3D" : "2D") : i == M_FPS ? (fpsOn ? "On" : "Off") : null; }
+    String menuLabel(int i) { i = menuId(i); return i == M_RESUME ? "Resume" : i == M_LAYOUT ? "Touch controls" : i == M_SPLIT ? "Game above, controls below" : i == M_FPS ? "Frame-rate counter" : i == M_SAVE ? "Export or import the save…" : hasLauncher() ? "Back to the launcher" : "Home screen"; }
+    String menuValue(int i) { i = menuId(i); return i == M_LAYOUT ? (tap ? "Tap" : full ? "3D" : "2D") : i == M_SPLIT ? (half ? splitPct() + "%" : "Off") : i == M_FPS ? (fpsOn ? "On" : "Off") : null; }
     void menuAct(int i) {
         i = menuId(i);
         performHapticFeedback(HapticFeedbackConstants.KEYBOARD_TAP);
         if (i == M_RESUME) menuSet(false);
         else if (i == M_LAYOUT) nextLayout();
+        else if (i == M_SPLIT) setSplit(half ? nextSplit(splitPct()) : SPLIT_DEFAULT);   // on → 45% … → 30% → off → 50%
         else if (i == M_FPS) fpsSet(!fpsOn);
         else if (i == M_SAVE) { menuSet(false); toLauncher(true); }   // the game's screen there has the Save rows (LauncherSaves.java), which ask before closing the game: a save is never swapped under a running host
         else if (i == M_LEAVE) { menuSet(false); toLauncher(); }   // as ≡ did: the game goes on behind the launcher, and Play there comes back to it
@@ -536,8 +611,15 @@ public final class Gamepad extends View {
         check("the left stick's touch area below the shoulder buttons'", homeY() - stickR(0) * K_STICK_GRAB > dropCy(B_L) + dropR(B_L) * 1.35f);
         check("the left group's touch area clear of the face buttons'", cornerL() + K_LEFT_REACH * u() < faceX(B_Y) - faceR() * 1.25f);
         // the game's touch screen: a touch in the middle, on no control
-        int g = gameTouches; press(getWidth() / 2f, getHeight() / 2f); check("a touch in the middle goes to the game's touch screen", gameTouches > g && game[0] >= 0);
-        release(getWidth() / 2f, getHeight() / 2f); check("and is lifted", game[0] < 0);
+        int g = gameTouches; press(getWidth() / 2f, (padTop + getHeight()) / 2f); check("a touch in the middle goes to the game's touch screen", gameTouches > g && game[0] >= 0);
+        release(getWidth() / 2f, (padTop + getHeight()) / 2f); check("and is lifted", game[0] < 0);
+        // the split (DM_PAD_HALF): the controls stay in the band under the picture, and a touch over the picture reaches the game, not a control
+        if (half && padTop > 0) {
+            check("the split: every control below the picture", homeY() - stickR(0) >= padTop && faceY(B_X) - faceR() >= padTop && dropCy(B_ZL) - dropR(B_ZL) >= padTop);
+            int h0 = gameTouches; press(getWidth() / 2f, padTop / 2f); check("the split: a touch over the picture goes to the game", gameTouches > h0 && game[0] >= 0);
+            release(getWidth() / 2f, padTop / 2f); check("the split: and is lifted", game[0] < 0);
+            check(String.format(java.util.Locale.ROOT, "the split: the menu row reads %d%%", splitPct()), splitPct() >= SPLIT_MIN && splitPct() <= SPLIT_MAX);
+        } else nativeLog("gamepad check: no split (DM_PAD_HALF): the game above the controls is not checked");
         // the pause menu, with a game to hold (without one ≡ leaves for the launcher: not pressed here)
         if (hold(true)) {
             hold(false);
@@ -578,6 +660,7 @@ public final class Gamepad extends View {
             if (decor.getWindowToken() == null) { h.postDelayed(this, 100); return; }   // the activity's window is not attached yet
             ctx = a.getApplicationContext(); view = new Gamepad(a);
             view.setPadSize(nativeEnv("DM_PAD_SCALE"), nativeEnv("DM_PAD_INSET"), nativeEnv("DM_PAD_RAISE"));   // the launcher's choices (launcher.txt) or env.txt
+            view.layoutBand();   // before the first frame: a split screen has its controls below the picture from the start
             popup = new PopupWindow(view, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, false);
             popup.setTouchable(true); popup.setFocusable(false); popup.setClippingEnabled(false);
             if (android.os.Build.VERSION.SDK_INT >= 22) popup.setAttachedInDecor(false);
@@ -593,6 +676,7 @@ public final class Gamepad extends View {
             nativeLog("gamepad: touch controls shown (" + (view.tap ? "Tap" : view.full ? "3D" : "2D") + (view.scaleSet != 1 || view.insetSet != 0 || view.raiseSet != 0 ?
                 String.format(java.util.Locale.ROOT, ", size %.0f%%, inset %.0f%%, height %.0f%%", view.scaleSet * 100, view.insetSet * 100, view.raiseSet * 100) : "") + ")");
             if ("1".equals(nativeEnv("DM_SHOW_FPS"))) view.fpsSet(true);
+            view.nativeLog("gamepad: " + (view.half ? "the game above, the controls below at " + view.splitPct() + "%" : "the game over the whole screen"));
             String t = nativeEnv("DM_PAD_TEST"); if (t != null && !t.equals("0")) h.postDelayed(new Runnable() { public void run() { view.selfCheck(); } }, 1500);
         } });
     }

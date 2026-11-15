@@ -233,6 +233,12 @@ or **Build Game App** (an APK, or an XAPK for an installer app). Its README has 
   where the Save rows are (they ask before closing the game: a save is not swapped under a running game), and **Back to the launcher** goes there while the game
   keeps running behind it: **Play** on the same game resumes it, and picking another game asks before closing the running one. A game app has no launcher: it has
   no save row, and its last row is **Home screen**.
+- **The game above, the controls below.** On a phone held open, or a tablet, the settings screen's **Game above, controls below** puts the game in the top
+  `DM_SPLIT` percent of the screen (50 by default) and the touch controls in the band under it, as a handheld does: the picture is fitted into that part, the
+  game's own touch screen shrinks to it, and a touch above the band is the game's, not a control's. The pause menu's row of the same name steps the split while
+  playing (50% → 45% → … → 30% → off → 50%) and writes it to the game's `launcher.txt`, which `env.txt` still wins over; the picture is placed when the host starts,
+  so a change takes effect at the next start. It is the same thing the Foldable Gaming Mode of Android 17 does from the system's side, for games whose host reads a
+  virtual gamepad; DroidPlay draws its own, so it needs no system support and works on any Android the app runs on.
 - **Saves** stay in the app's internal storage (`saves/<title ID>`), so updating the app keeps them; each game's screen exports, imports and puts back its save
   ([Saves](#saves)), and the desktop app backs them all up to the computer. The log is
   `Android/data/org.nxnative.android/files/log.txt` (also `adb logcat -s DroidPlay`). The start before's is kept as `log.prev.txt`, so a game the system closed
