@@ -138,7 +138,8 @@ menu** gives it a menu entry. Where FUSE is missing, `--appimage-extract-and-run
   export or import the save, and back to the list, where **Play** on the same game resumes it.
 - **Saves** stay in the app's storage, so updating the app keeps them. DroidPlay for Windows backs them up to your computer from its **Phones** page.
 - **Game apps:** **Manage › Build a game app…** in DroidPlay for Windows makes one game into an app of its own, with its own icon and saves, to copy to a
-  device and install there. It's for your own devices only: it carries the game, so never share it.
+  device and install there. It's for your own devices only: it carries the game, so never share it. A game app has no launcher, so its pause menu has no save
+  row and it can't export or import its save yet; uninstalling it deletes the save.
 
 More: [The Android app](docs/android.md#the-android-app) · [Game apps](docs/android.md#game-apps).
 
