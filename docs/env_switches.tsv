@@ -267,6 +267,7 @@ DM_PAD_SCALE	player	Android: `=0.6..1.4` sizes the touch controls (default 1); a
 DM_PAD_TEST	test	Android: `1` sends made-up touches to the virtual gamepad and checks every control (`Gamepad.java` selfCheck)
 DM_PATCH_FRONT	switch	`=<bytes>`: the size of the patch area right before the module base for a long text (`BIG_TEXT`); set only by the rewriter's own rerun with the size it needs
 DM_PHONE_MOTION	switch	On iOS, whether the phone's own device motion drives player 1's six-axis sensor: `auto` (default) while no controller supplies fresh motion, `1` phone only, `0` never; each source keeps its own orientation
+DM_PICTURE_FILL	player	Android: `1` stretches the picture over its area instead of keeping its shape (`0` or unset, with bars where the area is not 16:9: a split screen's part, `DM_PAD_HALF`), `front_android.c` frame_draw; launcher setting, or `env.txt` in a game app
 DM_PICTURE_FIT	player	`fill` scales the 16:9 picture on the iPhone and iPad until it covers the screen in landscape and crops the edges (a portrait or tabletop split and a TV stay fitted); `fit` or unset, the largest 16:9 rectangle with black bars. Launcher and in-game menu setting
 DM_PIPELINE_CACHE	path	Android: the Vulkan pipeline cache file; `<file>.keys4` lists the pipelines made, made again at start (`gfx_vk_draw.inc`, set by `front_android.c`)
 DM_PREEMPT	switch	`0` / `1` overrides the profile's `core_preempt`: also check already-runnable higher-priority peers on the caller's core after every thread SVC

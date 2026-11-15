@@ -235,7 +235,9 @@ or **Build Game App** (an APK, or an XAPK for an installer app). Its README has 
   no save row, and its last row is **Home screen**.
 - **The game above, the controls below.** On a phone held open, or a tablet, the settings screen's **Game above, controls below** puts the game in the top
   `DM_SPLIT` percent of the screen (50 by default) and the touch controls in the band under it, as a handheld does: the picture is fitted into that part, the
-  game's own touch screen shrinks to it, and a touch above the band is the game's, not a control's. The pause menu's row of the same name steps the split while
+  game's own touch screen shrinks to it, and a touch above the band is the game's, not a control's. That part is not 16:9 (1840x1104 against the picture's 16:9),
+  so the picture keeps its shape, centred with narrow bars above and below it; **Picture in its part** stretches it over the part instead, the whole picture still on
+  screen but a little tall. The pause menu's row of the same name steps the split while
   playing (50% → 45% → … → 30% → off → 50%) and writes it to the game's `launcher.txt`, which `env.txt` still wins over; the picture is placed when the host starts,
   so a change takes effect at the next start. It is the same thing the Foldable Gaming Mode of Android 17 does from the system's side, for games whose host reads a
   virtual gamepad; DroidPlay draws its own, so it needs no system support and works on any Android the app runs on.

@@ -301,6 +301,7 @@ A line like `DM_PRESENT_SNAP=0` in `Documents/env.txt` (in the Files app, under 
 | Touch control height (Android) | `DM_PAD_RAISE` | `0` to `1` (default `0`) |
 | Game above, controls below (Android) | `DM_PAD_HALF` | `1`, `0` (default); the game in the top of the screen, the touch controls under it |
 | Split at (Android) | `DM_SPLIT` | `30` to `70` (percent of the height the game keeps; default `50`) |
+| Picture in its part (Android) | `DM_PICTURE_FILL` | `0` keeps the 16:9 shape with bars where the part is not 16:9 (default), `1` stretches it over the part |
 | Controller face buttons (Android) | `DM_PAD_ABXY` | `position` (default), `label` |
 | Game rumble | `DM_RUMBLE` | `1`, `0` |
 | Rumble strength | `DM_RUMBLE_GAIN` | `0` to `3` |

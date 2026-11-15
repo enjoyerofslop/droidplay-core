@@ -188,6 +188,8 @@ public final class Gamepad extends View {
         boolean off = pct <= 0;
         pct = off ? SPLIT_DEFAULT : Math.max(SPLIT_MIN, Math.min(SPLIT_MAX, pct));
         prefs.edit().putInt("DmPadSplit", pct).putBoolean("DmPadHalf", !off).apply();
+        // The picture keeps its shape in its part (DM_PICTURE_FILL=0, the default): a split's half is not 16:9, so narrow bars stay above and below the picture, where
+        // stretching it would make everything a little tall. Turning the split off leaves the row out, so the whole window keeps the picture whole
         writeLauncherKeys(new String[][] {{"DM_PAD_HALF", off ? "0" : "1"}, {"DM_SPLIT", String.valueOf(pct)}});
         // the picture is placed when the host starts (front_android.c picture_range): this run keeps the split it started with, and the band follows the picture's area
         layoutBand();

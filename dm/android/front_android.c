@@ -589,8 +589,14 @@ static int frame_draw(void) {
     int cw = fr.crop[2] > 0 ? fr.crop[2] : (int)fr.w, ch = fr.crop[3] > 0 ? fr.crop[3] : (int)fr.h;
     float picTop, picH; picture_range(&picTop, &picH);   // not pt: VkPresentTimeGOOGLE pt, the present's time in this function
     int pw = (int)g_ext2.width, phh = (int)(g_ext2.height * picH), py0 = (int)(g_ext2.height * picTop);
-    double sx = (double)pw / cw, sy = (double)phh / ch, sc = sx < sy ? sx : sy;
-    int dw = (int)(cw * sc), dh = (int)(ch * sc), dx = (pw - dw) / 2, dy = py0 + (phh - dh) / 2;
+    // DM_PICTURE_FILL: how the crop fills the picture's area. Unset or 0 keeps the aspect and centres it, with bars where the area is not 16:9; 1 stretches it over the whole
+    // area. A split screen's part is not 16:9 -- a Pixel Fold's top half is 1840x1104 with the band below, against the picture's 16:9 -- so fitting a 1280x720 game left bars
+    // above and below it. Both keep the whole picture on screen: stretching it is what makes the game fill that half
+    static int fill = -1;
+    if (fill < 0) { const char *f = getenv("DM_PICTURE_FILL"); fill = f && *f && *f != '0'; }
+    int dw, dh, dx, dy;
+    if (fill) { dw = pw; dh = phh; dx = 0; dy = py0; }
+    else { double sx = (double)pw / cw, sy = (double)phh / ch, sc = sx < sy ? sx : sy; dw = (int)(cw * sc); dh = (int)(ch * sc); dx = (pw - dw) / 2; dy = py0 + (phh - dh) / 2; }
     VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{fr.crop[0], fr.crop[1], 0}, {fr.crop[0] + cw, fr.crop[1] + ch, 1}},
                       .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
     if (fr.flip) { bl.srcOffsets[0].y = fr.crop[1] + ch; bl.srcOffsets[1].y = fr.crop[1]; }   // the window image is stored bottom-up (NVN's lower-left origin)
