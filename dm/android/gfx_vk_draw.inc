@@ -119,7 +119,7 @@ static void pcache_made(void) { pcache_made_n(1); }   // pipe_get made a pipelin
 
 // ---------------- Shaders ----------------
 typedef struct { int binding, slot; uint32_t ext; } rb_cbuf;   // ext: bytes the shader reads of it (cb_ext_pick: res.json's or spv_cb_ext2's; 0 = all)
-typedef struct { int binding, slot, cb_slot, cb_off, flags; } rb_sbuf;
+typedef struct { int binding, slot, cb_slot, cb_off, flags; uint32_t ofw, ofk; } rb_sbuf;   // ofw, ofk: a written one's order-free class and store constant (ofw.h, ofw_note)
 // The elements of a stage's texture or image array that stage_set writes at most; spv_harr.h shortens a module's longer arrays to it (spv_fit_harr), so that its
 // layout holds no more descriptors than are written
 enum { TEX_ARR_MAX = 1024 };
@@ -159,6 +159,25 @@ typedef struct {
     uint8_t tbrows;   // a texture slot of it read a buffer texture as rows (tex_rows_slot, stage_textures): draw_view lands pending writes to those first
 } vshader;
 static int memu_on(void); static int memu_facts(vshader *s, const jv *e); static int memu_ready(vshader *s); static vshader *memu_pvs_get(const char *key);   // gfx_vk_meshemu.inc
+// DM_VK_OFW=0 (env.txt): a storage buffer a draw writes in an order-free way takes a copy of its own, as other written storage buffers do (ofw_bind)
+static int ofw_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_OFW"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_OFW=0: storage buffers draws write in an order-free way take a copy each, as before"); } return v; }
+static const char *ofw_name(uint32_t c) { static const char *n[] = {"-", "stores of one constant", "atomic adds", "atomic unsigned min", "atomic unsigned max", "atomic signed min", "atomic signed max", "atomic and", "atomic or", "atomic xor"}; return c < 10 ? n[c] : "?"; }
+static uint64_t g_ofw_shaders;   // shaders with a storage buffer written in an order-free way
+// Which storage buffers a draw's shader writes in an order-free way (ofw.h), from its module as packed (the file's binding numbers, as res.json's). A dispatch's are left as
+// they are: a dispatch writes on its chunk's copy already, behind a barrier (buf_fwd); so is a task or mesh shader in compute form (its kernels are dispatches)
+static void ofw_note(vshader *s, const uint32_t *w, size_t nw) {
+    if (s->stage == SH_CS || s->memu || nw < 5 || !w[3] || !ofw_on()) return;
+    int any = 0; for (int i = 0; i < s->nsb; i++) any |= s->sb[i].flags & 1;
+    if (!any) return;
+    uint32_t *sc = malloc(6 * (size_t)w[3] * sizeof *sc); if (!sc) return;
+    ofw_bind_t o[32]; int k = ofw_scan(w, nw, sc, o, 32); free(sc);
+    int got = 0;
+    for (int i = 0; i < s->nsb; i++) if (s->sb[i].flags & 1) for (int j = 0; j < k; j++)
+        if (o[j].binding == (uint32_t)s->sb[i].binding && o[j].cls != OFW_NONE) { s->sb[i].ofw = o[j].cls; s->sb[i].ofk = o[j].k; got = 1;
+            if (g_ofw_shaders < 8) LOG("[vk] shader %s writes storage buffer binding %d in an order-free way (%s, constant %#x): its draws share one copy a chunk, landed by combining (ofw_bind)",
+                                       s->key, s->sb[i].binding, ofw_name(o[j].cls), o[j].k); }
+    g_ofw_shaders += got;
+}
 // Descriptor sets bound again instead of written again (stage_set, sr_find). Every draw copies its constant buffers to new arena offsets, so a set holding those offsets
 // never matched the draw before, and stage_set wrote every set of every stage: Breath of the Wild about 7,500 a frame, vkUpdateDescriptorSets 3.4 ms a frame of the
 // replay on an Ayn Odin 2. With the constant buffers dynamic uniform buffers, their offsets go to vkCmdBindDescriptorSets, and what a set holds (buffer, range, views,
@@ -780,7 +799,7 @@ static vshader *sh_get(const char *key) {
     t_pool_info = 0; t_harr_info = 0; t_lbase_info = 0;
     snprintf(p, sizeof p, s->memu ? "%s/%s.cs.spv" : "%s/%s.spv", g_spv_dir, s->key); s->mod = sh_module(s, p, &s->b0);   // (a task / mesh shader in compute form: its kernel, through the same rewrites and binding map)
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw);
-      if (w) { if (s->stage == SH_CS || s->memu) s->tgs = tgs_bytes(w, nw, s->key); if (has_tf && nw > 1) { tf_outs = spv_tff_outs(w, nw); tf_ver = w[1]; } spv_io(w, nw, &s->io_in, &s->io_out); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
+      if (w) { if (s->stage == SH_CS || s->memu) s->tgs = tgs_bytes(w, nw, s->key); if (has_tf && nw > 1) { tf_outs = spv_tff_outs(w, nw); tf_ver = w[1]; } spv_io(w, nw, &s->io_in, &s->io_out); ofw_note(s, w, nw); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
     sh_bind_apply(s);   // the layout and stage_set's writes from here on: the numbers the modules have (the matching above read the file's)
     if (s->stage == SH_VS || (s->stage == SH_MS && !s->memu)) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = sh_module(s, p, &s->b0); }
     if (t_lbase_info & 1) { s->lbpc = 1; s->lbase = s->stage == SH_VS && s->wlayer && !(t_lbase_info & 2); }   // its modules read the layer base (spv_fit_lbase)
@@ -2494,6 +2513,7 @@ static void wb_promote(uintptr_t lo, uintptr_t hi) {
     int copy = 0; for (int k = 0; k < C->ncop; k++) if (C->cop[k].dst < hi && lo < C->cop[k].dst + C->cop[k].n) copy = 1;
     int n = g_fwd_nwb >= 0 && g_fwd_nwb <= C->nwb ? g_fwd_nwb : C->nwb;
     for (int i = n - 1; i >= 0; i--) { wb_t *w = &C->wb[i]; if (!wb_hits(w, lo, hi)) continue;   // the newest that writes into the range decides
+        if (w->ofw) return;   // an order-free write's copy is not the range's bytes (ofw_bind): the read waits for it to land
         if (wb_promote_ok(lo, hi, (uintptr_t)w->dst, w->row_bytes, w->rows, w->st, w->fwd, w->inpl, w->lin, w->ds_n != 0, copy)) { rp_end(); cb_barrier(); w->fwd = 1; C->nfwd++; g_wb_promote++; }
         return; }
 }
@@ -2537,6 +2557,33 @@ static int rd_bind_w(uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *ao) {  
     g_rd_back[g_rd_nback].sb = sb; g_rd_back[g_rd_nback].so = so; g_rd_back[g_rd_nback].hb = hb; g_rd_back[g_rd_nback].ho = ho; g_rd_back[g_rd_nback].n = n; g_rd_back[g_rd_nback++].seq = C->seq;
     *b = sb; *ao = so; g_rd_w[1]++; return 1;
 }
+// A storage buffer a draw writes in an order-free way (ofw.h: stores of one constant, or one commutative atomic whose old value no one reads). Each draw took its own
+// arena copy of it and a write-back against a snapshot, and the next draw to bind it waited for that write-back to land before copying it again (draw_view): Tears of the
+// Kingdom's fragment shaders mark cells of a 131,584-byte grid from about 700 draws a frame at Thyphlo Ruins by night, each a submission and a wait for it (2.9 fps on a
+// Galaxy S25 Edge, the GPU 118 ms a frame with its render passes cut at every draw). Such a copy needs nothing of guest memory: it starts as the operation's identity, and the
+// draws of a chunk that write the range the same way share it. The newest write of the chunk to the range decides: after another kind of write (a dispatch's, another
+// constant, another operation) a new copy starts, so the copies land in the draws' order. Each lands by combining the words the GPU changed with guest memory (gfx_vk.c
+// ofw_apply), after what earlier write-backs land. draw_view makes no sync for such a binding; no later shader reads the copy on the GPU (fwd_hit: not forwardable,
+// wb_promote and own_alias leave it): a read of the range waits for it to land, as for any write-back. The draws of a chunk write the copy with no barrier between them:
+// stores of one constant and commutative atomics come out the same in any order. DM_VK_OFW=0 (env.txt): a copy for each draw, as before
+static int ofw_ok(const rb_sbuf *sb, int cs, uint64_t addr, uint64_t n) {   // cs: a dispatch, or a draw run as one (draw_view's cs, stage_set's g_rd_cs)
+    return sb->ofw && (sb->flags & 1) && !cs && addr && n && !(addr & 3) && !(n & 3) && n <= g_vk.props.limits.maxStorageBufferRange && !vk_safe() && ofw_on();
+}
+static uint64_t g_ofw_chain, g_ofw_new;   // bindings on a copy of the chunk; copies made
+static int ofw_bind(const rb_sbuf *sb, uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *ao) {
+    if (!cur()) return 0;
+    uintptr_t lo = (uintptr_t)addr, hi = lo + n; VkDeviceSize al = g_vk.props.limits.minStorageBufferOffsetAlignment;
+    for (int i = C->nwb - 1; i >= 0; i--) { const wb_t *w = &C->wb[i]; if (!wb_hits(w, lo, hi)) continue;
+        if (w->ofw == sb->ofw && w->ofk == sb->ofk && w->st < 0 && w->rows == 1 && lo >= (uintptr_t)w->dst && hi <= (uintptr_t)w->dst + w->row_bytes) {
+            VkDeviceSize o = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst);
+            if (!al || o % al == 0) { *b = C->ar[-1 - w->st].b; *ao = o; g_ofw_chain++; return 1; } }
+        break; }
+    uint32_t *d = (uint32_t *)(void *)ar_alloc((n + 15) & ~(size_t)15, b, ao); if (!d) return 0;
+    uint32_t id = ofw_identity(sb->ofw, sb->ofk); for (size_t q = 0; q < n / 4; q++) d[q] = id;
+    wb_t *w = wb_add(); if (!w) return 0;
+    *w = (wb_t){-1 - C->ar_last, (size_t)*ao, n, 1, n, n, (uint8_t *)(uintptr_t)addr, NULL}; w->ofw = sb->ofw; w->ofk = sb->ofk;
+    g_ofw_new++; return 1;
+}
 // A shader that binds the same guest memory twice (Final Fantasy Resonance's Niagara argument shader 544e80ec57b3a10b: one 8 KB buffer as an R32ui image it
 // reads and as a format-less one it clears): on the Switch the two views are one buffer. When the draw or dispatch is the first in its chunk to write it, buf_fwd
 // finds no write-back to bind in place (it looks only at those from before the draw, g_fwd_nwb), so each binding got an arena copy and a write-back of its own:
@@ -2549,6 +2596,7 @@ static int own_alias(const char *key, uint64_t addr, uint64_t n, VkDeviceSize al
     if (!C || !addr || !n || g_fwd_nwb < 0 || g_fwd_nwb > C->nwb || !alias_on()) return 0;
     for (int i = C->nwb - 1; i >= g_fwd_nwb; i--) {   // this draw's or dispatch's own write-backs (g_fwd_nwb: the chunk's count when it began)
         const wb_t *w = &C->wb[i]; uint64_t at;
+        if (w->ofw) continue;   // an order-free write's copy holds only what was written (ofw_bind)
         if (!wb_alias_at(w->st < 0 || w->inpl, w->rows, (uintptr_t)w->dst, w->row_bytes, w->off, addr, n, al, &at)) continue;   // (in place: off is its offset in the pool piece, gfx_vk_gmem_inplace.inc)
         if (!g_alias++) LOG("[vk] shader %s binds %#llx+%llu again: bound on the copy of its other binding (own_alias)", key, (unsigned long long)addr, (unsigned long long)n);
         *b = w->inpl ? w->ipb : C->ar[-1 - w->st].b; *o = (VkDeviceSize)at; return 1;
@@ -2959,6 +3007,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         else if (u && u->addr && gm_inplace_w(u->addr, n, disp_like(s), &b, &ao, &ipr)) {   // written, in a placed pool: bound there, its write-back only a note (gfx_vk_gmem_inplace.inc)
             bi[nbi] = (VkDescriptorBufferInfo){b, ao, ipr}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)sb->binding, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL};
             continue; }
+        else if (u && u->addr && ofw_ok(sb, g_rd_cs, u->addr, n)) { if (!ofw_bind(sb, u->addr, n, &b, &ao)) return 0; }   // written in an order-free way: on its chunk's copy, or a new one that starts as the identity (draw_view made no sync for it: never a copy of guest memory)
         else if (u && u->addr) { uint8_t *d = ar_alloc((n + 15) & ~(size_t)15, &b, &ao); if (!d) return 0; memcpy(d, (const void *)(uintptr_t)u->addr, n);
             if (sb->flags & 1) {   // written by the shader: what it changed is copied back when the chunk completes
                 wb_t *w = wb_add(); uint8_t *snap = malloc(n); if (snap) memcpy(snap, (const void *)(uintptr_t)u->addr, n);   // from guest memory, as d was: the arena may be write-combined (ar_mem_type)
@@ -3383,7 +3432,7 @@ static void dep_log(vshader *const sh[4], const rd_rng *r, const char *kd, const
         if (every ? (nhit++ % (uint64_t)every) != 0 : nlog++ >= 40) continue;
         const wb_t *b = &C->wb[w]; const vshader *rs = ks[q] >= 0 && sh[ks[q]] ? sh[ks[q]] : sh[0];
         LOG("[vk] draw dependency: shader %s (stage %d) reads %c %#lx+%#lx, pending write-back %d of %d: %s%s dst %p rows %zu x %zu", rs ? rs->key : "-", rs ? rs->stage : -1, kd[q], (unsigned long)r[q].lo,
-            (unsigned long)(r[q].hi - r[q].lo), w, C->nwb, b->inpl ? "in place in a placed pool (storage buffer)" : b->st >= 0 ? "staging (texture copy)" : b->snap ? "arena with snapshot (storage buffer)" : "arena (feedback / buffer image)", b->fwd ? " of a dispatch" : "",
+            (unsigned long)(r[q].hi - r[q].lo), w, C->nwb, b->ofw ? "order-free copy (storage buffer)" : b->inpl ? "in place in a placed pool (storage buffer)" : b->st >= 0 ? "staging (texture copy)" : b->snap ? "arena with snapshot (storage buffer)" : "arena (feedback / buffer image)", b->fwd ? " of a dispatch" : "",
             (void *)b->dst, b->rows, b->row_bytes); }
 }
 // What a draw copies from guest memory lands first when an earlier draw, dispatch or copy wrote it and that write is still pending (gfx_vk.c ranges_view):
@@ -3416,8 +3465,8 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
             VkBuffer ub_; VkDeviceSize uo_; if (u->addr && un && !ext_check()) { wb_promote((uintptr_t)u->addr, (uintptr_t)(u->addr + un)); if (ub_fwd(u->addr, un, &ub_, &uo_)) continue; }
             RNG(u->addr, u->size); }
         K = 's'; for (int i = 0; i < s->nsb; i++) { const rb_sbuf *sb = &s->sb[i]; uint32_t off = 4u * (uint32_t)sb->cb_off, base = (uint32_t)c_bases[nst] << 4;
-            if (sb->cb_slot == 0 && nst == 5 && off >= 0x210 && off < 0x310 && !((off - 0x210) % 16)) { const p_bind_buf *u = &D.ubo[5][(off - 0x210) / 16]; FWD(sb_fwd, u->addr, u->size, sb->flags & 1); }   // compute: its uniform buffer table (stage_set)
-            else if (sb->cb_slot == 0 && base && off >= base && off - base < 0x100 && !((off - base) % 16)) { const p_bind_buf *u = &D.ssbo[nst][(off - base) / 16]; FWD(sb_fwd, u->addr, u->size, sb->flags & 1); } } }
+            if (sb->cb_slot == 0 && nst == 5 && off >= 0x210 && off < 0x310 && !((off - 0x210) % 16)) { const p_bind_buf *u = &D.ubo[5][(off - 0x210) / 16]; if (!ofw_ok(sb, cs, u->addr, u->size)) FWD(sb_fwd, u->addr, u->size, sb->flags & 1); }   // compute: its uniform buffer table (stage_set); an order-free write needs no sync (ofw_bind)
+            else if (sb->cb_slot == 0 && base && off >= base && off - base < 0x100 && !((off - base) % 16)) { const p_bind_buf *u = &D.ssbo[nst][(off - base) / 16]; if (!ofw_ok(sb, cs, u->addr, u->size)) FWD(sb_fwd, u->addr, u->size, sb->flags & 1); } } }
     if (over) { cpu_view(); g_fwd_nwb = 0; return; }   // more ranges than r holds: anything pending lands
     dep_log(sh, r, kd, ks, n);
     int before = (int)(g_view_cur + g_view_fly); ranges_view(r, n);
@@ -3427,7 +3476,7 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
         for (int i = 0; i < s->nsb; i++) { const rb_sbuf *sb = &s->sb[i]; uint32_t off = 4u * (uint32_t)sb->cb_off;
             if (sb->cb_slot < 3 || sb->cb_slot - 3 >= 16) continue;
             const p_bind_buf *g = &D.ubo[nst][sb->cb_slot - 3]; uint64_t ad; uint32_t sz;
-            if (g->addr && off + 12 <= g->size) { memcpy(&ad, (const void *)(uintptr_t)(g->addr + off), 8); memcpy(&sz, (const void *)(uintptr_t)(g->addr + off + 8), 4); FWD(sb_fwd, ad, sz, sb->flags & 1); } } }
+            if (g->addr && off + 12 <= g->size) { memcpy(&ad, (const void *)(uintptr_t)(g->addr + off), 8); memcpy(&sz, (const void *)(uintptr_t)(g->addr + off + 8), 4); if (!ofw_ok(sb, cs, ad, sz)) FWD(sb_fwd, ad, sz, sb->flags & 1); } } }
     // buffer textures (t) and images (m): their handles may sit in the game's uniform buffers too (landed above), and their memory is the registry entry each names
     if (tbuf_range_on()) { pthread_mutex_lock(&g_reg_mu);
         for (int k = 0; k < 4; k++) { const vshader *s = sh[k]; if (!s) continue; int nst = nvn_stage_of(s->stage); KS = (signed char)k;

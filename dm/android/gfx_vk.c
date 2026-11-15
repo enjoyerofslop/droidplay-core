@@ -50,6 +50,7 @@
 #include "sb_reuse.h"   // a read-only storage buffer's copy bound again while its pages are unwritten (gfx_vk_sbcopy.inc)
 #include "apipe_rule.h"   // which draws are left out while their new pipeline builds in the background (gfx_vk_draw.inc apipe_ok)
 #include "wb_promote.h"   // whether a read of a draw's pending storage buffer write takes its copy on the GPU after a barrier (gfx_vk_draw.inc wb_promote)
+#include "ofw.h"   // storage buffer bindings written in an order-free way, their copies' identity and how they land (gfx_vk_draw.inc ofw_bind, chunk_done ofw_apply)
 #include "tex_aspect.h"   // which aspect of its image a texture slot reads: stencil mode (gfx_vk_draw.inc tex_aspect)
 #include "tbuf_rows.h"   // a buffer texture read through a 2D slot as rows of 16384 texels (vt_create, vt_upload_, gfx_vk_draw.inc tex_rows_slot)
 #include "rd_home.h"   // the home ranges of storage buffers draws under rasterizer discard write (gfx_vk_draw.inc rd_bind_w)
@@ -350,7 +351,10 @@ typedef struct { int st; size_t off, row_bytes, rows, src_pitch, dst_pitch; uint
                  // vd: a draw under rasterizer discard wrote it, run as a dispatch (gfx_vk_draw.inc rd_bind_w): a read it overlaps but does not cover learns a home range (fwd_hit)
                  int vd;
                  // rbx: texels of an image of NVN's RGB-order 16-bit formats (vtex rbx): exchanged into the guest's order at the source before they land (chunk_done)
-                 int rbx; } wb_t;
+                 int rbx;
+                 // ofw: an order-free write's copy (ofw.h, gfx_vk_draw.inc ofw_bind), OFW_* with ofk the constant of OFW_STORE: it started as the operation's identity, holds only
+                 // what the draws wrote, and lands by combining (ofw_apply); never read on the GPU by a later shader, and never a snapshot
+                 uint32_t ofw, ofk; } wb_t;
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; VkDeviceSize n, used; } arena_blk;
 typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; uint64_t q0, q1; } post_op;   // kind 1 event, 2 counter, 3 samples passed (occlusion queries q0..q1)
 typedef struct { int kind; uint64_t h; } dead_t;
@@ -1057,6 +1061,15 @@ static int wb_apply(const wb_t *w, const uint8_t *s) {
     if (w->lin && w->snap) atomic_fetch_add(&g_lwb_bytes, n);
     return 1;
 }
+// An order-free write's copy lands (ofw.h): each word the draws changed from the identity is combined with guest memory by the operation, and only the span from the first
+// such word to the last is prepared
+static _Atomic uint64_t g_ofw_landed, g_ofw_words;
+static void ofw_apply(const wb_t *w, const uint8_t *s) {
+    size_t i0, i1; const uint32_t *c = (const uint32_t *)(const void *)s;
+    if (!ofw_span(w->ofw, w->ofk, c, w->row_bytes / 4, &i0, &i1)) return;
+    dm_guest_write_prepare(w->dst + 4 * i0, 4 * (i1 - i0 + 1));
+    atomic_fetch_add(&g_ofw_words, ofw_land(w->ofw, w->ofk, c, (volatile uint32_t *)(void *)w->dst, i0, i1)); atomic_fetch_add(&g_ofw_landed, 1);
+}
 static void post_apply(const post_op *o);   // with the submission code below
 static void gm_ip_done(const chunk *c, int i);   // gfx_vk_gmem_inplace.inc
 static void gm_chunk_done(chunk *c);   // gfx_vk_gmem.inc
@@ -1075,6 +1088,7 @@ static void chunk_done(chunk *c) {
         const uint8_t *s = w->rb ? c->rb.p + (w->rb - 1) : (w->st >= SP_ST ? c->sb[w->st - SP_ST].p : w->st >= 0 ? c->stg[w->st].p : c->ar[-1 - w->st].p) + w->off;
         if (w->st < 0) { an++; ab += w->rows ? w->src_pitch * (w->rows - 1) + w->row_bytes : 0; ar += w->rb != 0; }
         if (w->rbx) rb16_rows((uint8_t *)(uintptr_t)s, w->row_bytes, w->rows, w->src_pitch, w->rbx);   // the GPU's copy, in Vulkan's order, into the guest's (before the snapshot compare)
+        if (w->ofw) { ofw_apply(w, s); continue; }   // (no snapshot to give back)
         if (w->lin && wb_revert_on()) rv_check(w, s);   // before it lands: guest memory still holds what the CPU wrote during the pass
         uint64_t t0 = w->lin ? clock_gettime_nsec_np(CLOCK_MONOTONIC) : 0; int clean = w->lin == 2 && wb_absorb_on() ? ab_clean(w) : 0, wrote = wb_apply(w, s);
         if (w->lin) atomic_fetch_add(!w->snap || !lsnap_on() ? &g_lwb_whole : wrote ? &g_lwb_diff : &g_lwb_same, 1);
@@ -2737,6 +2751,9 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     LOG("[vk] guest reads of draws: waited for the current submission %llu, for submissions in flight %llu, no wait %llu (%llu of them after a barrier that made a draw's write readable on the GPU: wb_promote); uniform updates and small copies: %llu / %llu / %llu; submissions %llu (cumulative)",
         (unsigned long long)g_view_cur, (unsigned long long)g_view_fly, (unsigned long long)g_view_free, (unsigned long long)g_wb_promote, (unsigned long long)g_mem_cur, (unsigned long long)g_mem_fly, (unsigned long long)g_mem_free,
         (unsigned long long)g_flushes);
+    if (g_ofw_new) LOG("[vk] storage buffers draws write in an order-free way: %llu bindings on a copy of their chunk, %llu copies made from the identity, %llu landed with words to combine (%llu words); "
+                       "%llu shaders write one so (cumulative; gfx_vk_draw.inc ofw_bind, ofw.h, DM_VK_OFW)", (unsigned long long)g_ofw_chain, (unsigned long long)g_ofw_new,
+                       (unsigned long long)atomic_load(&g_ofw_landed), (unsigned long long)atomic_load(&g_ofw_words), (unsigned long long)g_ofw_shaders);
     LOG("[vk] constant and storage buffer copies: %llu reused, %llu made, %llu MB copied to the arena and %llu MB to the shadows (cumulative; gfx_vk_draw.inc ucopy); constant buffer bindings of the shaders loaded: %llu bounded by res.json, %llu by the SPIR-V scan, %llu read whole, %llu res.json extents below the scan's (gfx_vk_draw.inc cb_ext_pick)%s",
         (unsigned long long)g_ucopy_hit, (unsigned long long)g_ucopy_miss, (unsigned long long)(g_ucopy_bytes >> 20), (unsigned long long)(g_ucopy_shadow >> 20), (unsigned long long)g_cbx[0], (unsigned long long)g_cbx[2], (unsigned long long)g_cbx[3], (unsigned long long)g_cbx[1],
         ext_check() ? "; DM_VK_EXT_CHECK on" : "");

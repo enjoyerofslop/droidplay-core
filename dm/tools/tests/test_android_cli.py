@@ -521,6 +521,42 @@ class Setup(unittest.TestCase):   # --setup (dm/android/tools/host_setup.py): wh
             (self.tmp / 'home/Android/Sdk/platform-tools').mkdir(parents=True)   # Android Studio's, which --setup then completes
             self.assertEqual(ba.sdk_dir(None), self.tmp / 'home/Android/Sdk')
 
+    def distro(self):   # Linux with no ANDROID_HOME reaching DroidPlay (a desktop launch, #508) and a distribution's SDK at a stand-in for /opt/android-sdk
+        self.linux(); distro = self.tmp / 'opt/android-sdk'
+        cms = [mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data'), mock.patch.object(ba, 'DISTRO_SDKS', (str(distro),)), mock.patch.object(ba.os, 'name', 'posix'),
+               mock.patch.dict(os.environ, {'HOME': str(self.tmp / 'home')})]
+        for cm in cms: cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+        for k in ('ANDROID_HOME', 'ANDROID_SDK_ROOT', 'LOCALAPPDATA'): os.environ.pop(k, None)
+        return distro
+
+    @unittest.skipIf(os.name == 'nt', "Linux's places: pathlib can't make POSIX paths on Windows")
+    def test_a_distributions_sdk_is_found_after_the_players_own(self):   # Arch's /opt/android-sdk, Debian's /usr/lib/android-sdk
+        distro = self.distro()
+        with self.assertRaises(ba.BuildError): ba.sdk_dir(None)
+        (distro / 'platform-tools').mkdir(parents=True); self.assertEqual(ba.sdk_dir(None), distro)
+        (self.tmp / 'data/tools/android-sdk/platform-tools').mkdir(parents=True)   # one Install what's missing made goes first
+        self.assertEqual(ba.sdk_dir(None), self.tmp / 'data/tools/android-sdk')
+        with mock.patch.object(ba.host_setup, 'LINUX', False):   # on a Mac or Windows the Linux places aren't looked in
+            shutil.rmtree(self.tmp / 'data'); self.assertRaises(ba.BuildError, ba.sdk_dir, None)
+
+    @unittest.skipIf(os.name == 'nt' or os.geteuid() == 0, 'Unix file modes, which root ignores')
+    def test_setup_puts_what_a_read_only_sdk_lacks_into_a_whole_sdk_of_the_players_own(self):   # not sdkmanager failing on a folder only root can write
+        distro = self.distro(); (distro / 'platform-tools').mkdir(parents=True); own = self.tmp / 'data/tools/android-sdk'
+        self.assertEqual(ba.setup_target(None, {'NDK'}), (distro, {'NDK'}))   # one the player can write to is completed in place
+        os.chmod(distro, 0o555); self.addCleanup(os.chmod, distro, 0o755)
+        self.assertEqual(ba.setup_target(None, {'NDK', '.NET SDK 10'}), (own, {'NDK', '.NET SDK 10', 'Android SDK'}))
+        self.assertEqual(ba.setup_target(None, {'.NET SDK 10'}), (distro, {'.NET SDK 10'}))   # nothing of the SDK's missing: the distribution's stays the one used
+        self.assertEqual(ba.setup_target(str(distro), {'NDK'}), (distro, {'NDK'}))   # named with --sdk: completed as asked
+
+    def test_the_sdk_row_says_whether_the_variables_reached_droidplay(self):   # "not set" (a desktop launch) told apart from "set, but no SDK there"
+        self.linux()
+        with mock.patch.dict(os.environ, {}):
+            for k in ('ANDROID_HOME', 'ANDROID_SDK_ROOT'): os.environ.pop(k, None)
+            detail, fix = ba.sdk_not_found(); self.assertIn('not set', detail); self.assertIn('environment.d', fix)
+            with mock.patch.object(ba.host_setup, 'LINUX', False): self.assertNotIn('environment.d', ba.sdk_not_found()[1])
+            os.environ['ANDROID_HOME'] = '/nowhere'
+            detail, fix = ba.sdk_not_found(); self.assertIn('ANDROID_HOME=/nowhere has no platform-tools', detail); self.assertNotIn('environment.d', fix)
+
     def test_dotnet_runs_without_icu_where_linux_has_none(self):   # .NET stops at its first start without ICU unless told to go without
         self.linux()
         with mock.patch.dict(os.environ, {'PATH': '/usr/bin'}), mock.patch.object(self.hs, 'has_icu', lambda: False):
@@ -1175,10 +1211,12 @@ class Update(unittest.TestCase):   # dm/android/desktop/update.py, the desktop a
         threading.Thread(target=server.serve_forever, daemon=True).start(); self.addCleanup(server.server_close); self.addCleanup(server.shutdown)
         self.base = f'http://127.0.0.1:{server.server_address[1]}'
 
-    def release(self, digest=None, name='DroidPlay-Setup-0.5.1.exe'):
+    def release(self, digest=None, name='DroidPlay-Setup-0.5.1.exe', appimage='sha256:' + '1' * 64):
         digest = f'sha256:{hashlib.sha256(self.setup).hexdigest()}' if digest is None else digest
         self.files['/api'] = json.dumps({'tag_name': 'v0.5.1', 'html_url': 'https://example.invalid/v0.5.1', 'assets': [
             {'name': 'droidplay-core-0.5.1.zip', 'size': 1, 'browser_download_url': self.base + '/x', 'digest': 'sha256:' + '0' * 64},
+            {'name': 'DroidPlay-0.5.1-x86_64.AppImage', 'size': 3, 'browser_download_url': self.base + '/a', 'digest': appimage},
+            {'name': 'DroidPlay-0.5.1-x86_64.AppImage.sha256', 'size': 99, 'browser_download_url': self.base + '/s', 'digest': 'sha256:' + '2' * 64},
             {'name': name, 'size': len(self.setup), 'browser_download_url': self.base + '/setup.exe', 'digest': digest}]}).encode()
         return upd.latest_release(self.base + '/api')
 
@@ -1191,6 +1229,10 @@ class Update(unittest.TestCase):   # dm/android/desktop/update.py, the desktop a
         r = self.release(); self.assertEqual((r['tag'], r['setup']['name'], r['setup']['sha256']), ('v0.5.1', 'DroidPlay-Setup-0.5.1.exe', hashlib.sha256(self.setup).hexdigest()))
         self.assertIsNone(self.release(digest='')['setup'])   # nothing to check the download against: the release's page instead
         self.assertIsNone(self.release(name='Install.DroidPlay.cmd')['setup'])
+
+    def test_the_appimage_beside_it(self):   # DroidPlay for Linux's file in the same release, by the same rule; its .sha256 file isn't taken for it
+        r = self.release(); self.assertEqual((r['appimage']['name'], r['appimage']['url'], r['appimage']['sha256']), ('DroidPlay-0.5.1-x86_64.AppImage', self.base + '/a', '1' * 64))
+        self.assertIsNone(self.release(appimage='')['appimage']); self.assertIsNotNone(self.release(appimage='')['setup'])
 
     def test_setup_downloaded_and_checked(self):
         folder = self.tmp / 'updates'; folder.mkdir(); (folder / 'DroidPlay-Setup-0.5.0.exe').write_bytes(b'old')
@@ -1213,6 +1255,8 @@ class Update(unittest.TestCase):   # dm/android/desktop/update.py, the desktop a
         self.assertFalse(upd.setup_install(app / 'core'))
         (app / 'unins000.exe').write_bytes(b''); (app / 'runtime' / 'pythonw.exe').write_bytes(b'')
         self.assertTrue(upd.setup_install(app / 'core'))
+        r = self.release(); self.assertEqual(upd.how(r, app / 'core', {}), ('setup', None)); self.assertEqual(upd.how(r, self.tmp / 'checkout', {}), (None, None))
+        self.assertEqual(upd.how(dict(r, setup=None), app / 'core', {}), (None, None))   # a release without its Setup: the release's page
 
 
 if __name__ == '__main__':

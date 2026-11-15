@@ -2,12 +2,11 @@
 # PySide6 cut to what the app uses, and the tree as a release ships it, packed by appimagetool with AppImage's static runtime. stage.sh checks what it staged
 # (--check's Python rows, the fonts, every ELF file's glibc needs, the window offscreen). Then the AppImage is started as players start it: here on Ubuntu
 # 24.04 with FUSE, and in containers of five distributions without it (dm/android/linux/smoke_test.sh), under X11, Wayland and offscreen. The AppImage and its
-# .sha256 are kept as this run's artifact for a few days, for testers. Pull requests that touch what goes in run this.
+# .sha256 are kept as this run's artifact for a few days, for testers. Pull requests that touch what goes in run this; release-assets.yml calls it for a
+# release's AppImage, which it uploads only once the build and every distribution passed.
 name: linux-package
 
 on:
-  push:
-    branches: [linux/appimage-p2]   # Phase 2's work branch, for its CI runs before a pull request: comes out before merging
   pull_request:
     paths:
       - dm/android/linux/**
@@ -19,6 +18,11 @@ on:
       - scripts/build_android_from_nsp.py
       - .github/workflows/linux-package.yml
   workflow_dispatch:
+    inputs:
+      version:
+        description: The version the AppImage's VERSION file says (default git describe). An X.Y.Z build takes updates, from a stand-in release too (DM_UPDATE_FEED)
+        type: string
+        default: ''
   workflow_call:
     inputs:
       version:
@@ -33,8 +37,8 @@ on:
 permissions:
   contents: read
 
-concurrency:
-  group: linux-package-${{ github.event.pull_request.number || github.ref }}
+concurrency:   # a build run by hand with a version of its own (an updater test's older and newer AppImage) neither waits for nor replaces another
+  group: linux-package-${{ github.event.pull_request.number || github.ref }}-${{ inputs.version }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 defaults:

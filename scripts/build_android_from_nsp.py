@@ -139,12 +139,26 @@ class Journaled(bi.Progress):   # the console's progress, and the same build's e
     def exit(self, code): self.close(ok=code == 0); self.write({'ev': 'exit', 'code': code}); self.f.close()
 
 
-def sdk_dir(arg):   # --sdk, the environment, where Android Studio puts it (Windows, Linux, macOS), then where --setup makes one on Linux (default_sdk)
+# Where Linux distributions' packages put the SDK: Arch's (AUR android-sdk) and Debian's / Ubuntu's (android-sdk). A shell's ANDROID_HOME doesn't reach an app started from
+# the desktop (fish's universal variables, a .bashrc), so without these an SDK installed this way was "not found" (#508)
+DISTRO_SDKS = ('/opt/android-sdk', '/usr/lib/android-sdk')
+
+
+def sdk_dir(arg):   # --sdk, the environment, where Android Studio puts it (Windows, Linux, macOS), where --setup makes one on Linux (default_sdk), then a distribution's
     la = os.environ.get('LOCALAPPDATA')
     for c in (arg, os.environ.get('ANDROID_HOME'), os.environ.get('ANDROID_SDK_ROOT'), la and os.path.join(la, 'Android', 'Sdk'), os.path.expanduser('~/Android/Sdk'),
-              os.path.expanduser('~/Library/Android/sdk'), data_dir() / 'tools' / 'android-sdk'):
+              os.path.expanduser('~/Library/Android/sdk'), data_dir() / 'tools' / 'android-sdk', *(DISTRO_SDKS if host_setup.LINUX else ())):
         if c and (Path(c) / 'platform-tools').is_dir(): return Path(c)
     raise BuildError('Android SDK not found: give --sdk or set ANDROID_HOME')
+
+
+def sdk_not_found():   # check()'s "Android SDK" row when sdk_dir finds none: (detail, fix), saying whether the variables reached this process at all
+    env = [(k, os.environ[k]) for k in ('ANDROID_HOME', 'ANDROID_SDK_ROOT') if os.environ.get(k)]
+    fix = 'install Android Studio or the command-line tools, then set ANDROID_HOME (or give --sdk)'
+    if env: return 'not found: ' + ', '.join(f'{k}={v} has no platform-tools' for k, v in env), fix
+    if host_setup.LINUX: fix += ('. ANDROID_HOME and ANDROID_SDK_ROOT are not set for DroidPlay: an app started from the desktop does not see variables set in a shell '
+                                 '(.bashrc, fish\'s set -Ux). Set them in ~/.config/environment.d/ and log in again, or use Install what\'s missing')
+    return 'not found (ANDROID_HOME and ANDROID_SDK_ROOT are not set)', fix
 
 
 def default_sdk():
@@ -1427,7 +1441,7 @@ def check(sdk_arg):
     except BuildError as e: dn = None; row('.NET SDK 10', False, str(e), 'install the .NET 10 SDK: https://dotnet.microsoft.com/download')
     else: row('.NET SDK 10', dn and dn.split('.')[0] == '10', dn or 'not found', 'install the .NET 10 SDK: https://dotnet.microsoft.com/download')
     try: sdk = sdk_dir(sdk_arg)
-    except BuildError: sdk = None; row('Android SDK', False, 'not found', 'install Android Studio or the command-line tools, then set ANDROID_HOME (or give --sdk)')
+    except BuildError: sdk = None; row('Android SDK', False, *sdk_not_found())
     else: row('Android SDK', True, str(sdk))
     if sdk:
         for what, d in (('NDK', sdk / 'ndk'), ('CMake', sdk / 'cmake')):
@@ -1446,10 +1460,18 @@ def check(sdk_arg):
     return rows
 
 
-def setup(sdk_arg, accept):   # --setup: what check() finds missing, installed (host_setup.py), then checked again; the Python modules stay pip's (or uv run's)
-    missing = {r['name'] for r in check(sdk_arg) if not r['ok']}
+def setup_target(sdk_arg, missing):
+    """(the SDK --setup installs into, what it installs) for check()'s missing rows: the SDK sdk_dir finds and completes, unless the player can't write to it and didn't
+    name it with --sdk (a distribution's, root's: DISTRO_SDKS). Then the parts it lacks come as a whole SDK of the player's own (default_sdk), which sdk_dir finds
+    ahead of the distribution's from then on, rather than sdkmanager failing on a folder only root can write"""
     try: sdk = sdk_dir(sdk_arg)
-    except BuildError: sdk = Path(sdk_arg).expanduser() if sdk_arg else default_sdk()
+    except BuildError: return (Path(sdk_arg).expanduser() if sdk_arg else default_sdk()), missing
+    if sdk_arg or os.access(sdk, os.W_OK) or not missing & set(sdk_packages(sdk)): return sdk, missing
+    return default_sdk(), missing | {'Android SDK'}
+
+
+def setup(sdk_arg, accept):   # --setup: what check() finds missing, installed (host_setup.py), then checked again; the Python modules stay pip's (or uv run's)
+    sdk, missing = setup_target(sdk_arg, {r['name'] for r in check(sdk_arg) if not r['ok']})
     try: done = host_setup.setup(missing, sdk, data_dir() / 'tools', sdk_packages(sdk), accept, bi.PROG, say)
     except host_setup.SetupError as e: raise BuildError(str(e)) from e
     host_setup.add_tool_paths(data_dir() / 'tools', sdk)

@@ -59,6 +59,9 @@ static void *alloc(size_t n, uint32_t a) {
     size_t alignment = align_of(n, a);
     void *p = alignment == 16 ? malloc_zone_malloc(g_zone, n ? n : 1) : malloc_zone_memalign(g_zone, alignment, n ? n : 1);
     if (p) used((int64_t)malloc_size(p));
+    static _Atomic int warned;   // a block off the boundary the engine asked for is a host bug: say it once (PhysX aborts with "Allocations must be 16-byte aligned")
+    if (p && ((uintptr_t)p & (alignment - 1)) && !atomic_exchange(&warned, 1))
+        LOG("[RED] Unreal heap: Malloc(%zu, %u) returned %p, not aligned to %zu", n, a, p, alignment);
     return p;
 }
 static void release(void *p) { if (p) { used(-(int64_t)malloc_size(p)); malloc_zone_free(g_zone, p); } }
