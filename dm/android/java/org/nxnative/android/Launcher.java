@@ -271,11 +271,12 @@ public class Launcher extends Activity {
             "Where the game's part ends: 50% is half the screen each.");
         s.values = new String[] {"30", "35", "40", "45", "50", "55", "60", "65", "70"};
         s.labels = new String[] {"30%", "35%", "40%", "45%", "50%", "55%", "60%", "65%", "70%"}; s.def = "50"; settings.add(s);
-        // how the picture fills its part (front_android.c frame_draw). A split's half is not 16:9 -- 1840x1104 against the 16:9 picture -- so the default keeps the picture
-        // whole with narrow bars above and below; 1 stretches it over the part, its people slightly tall, the whole picture still on screen
+        // how the picture fills its part (front_android.c frame_draw). A split's half is not 16:9 -- 1840x1104 against the picture's 16:9 -- so on its own the split covers that
+        // half at the aspect kept, its edges cut off: the whole half shows a picture, as the handheld the layout copies does. Crop, Keep the shape (bars above and below) and
+        // Fill (the whole picture stretched) hold it there whatever the split does
         s = new Setting("DM_PICTURE_FILL", "choice", "Controls", "Picture in its part",
-            "Keep the shape shows the whole 16:9 picture with narrow bars above and below it; Fill stretches it over the part instead, a little taller than it should be.");
-        s.values = new String[] {"0", "1"}; s.labels = new String[] {"Keep the shape", "Fill"}; s.def = "0"; settings.add(s);
+            "Automatic covers a split's part at the picture's shape, its edges cut off; Keep the shape shows the whole picture with bars; Fill stretches the whole picture over the part.");
+        s.values = new String[] {"auto", "crop", "0", "1"}; s.labels = new String[] {"Automatic", "Crop", "Keep the shape", "Fill"}; s.def = "auto"; settings.add(s);
         for (Setting t : settings) if (defaults.containsKey(t.key)) t.def = defaults.get(t.key);
     }
 
@@ -400,7 +401,9 @@ public class Launcher extends Activity {
         final Game g = game;
         if (saves.busy) { toast("Wait for the save to finish copying, then press Play"); return; }
         StringBuilder sb = new StringBuilder("# written by the settings screen (Launcher.java); env.txt wins over these\n");
-        for (Setting s : settings) if (!envFile.containsKey(s.key)) sb.append(s.key).append('=').append(chosen.get(s.key)).append('\n');
+        // A choice left empty is the setting's own default, which the host applies when the row is absent: writing "KEY=" would override that with an empty value (a
+        // picture row's Automatic is the split's own choice, not a value to pass on)
+        for (Setting s : settings) { String v = chosen.get(s.key); if (!envFile.containsKey(s.key) && v != null && !v.isEmpty()) sb.append(s.key).append('=').append(v).append('\n'); }
         try (FileOutputStream o = new FileOutputStream(new File(g.dir, "launcher.txt"))) { o.write(sb.toString().getBytes(StandardCharsets.UTF_8)); } catch (IOException e) { Log.w(TAG, "launcher.txt: " + e); }
         final String running = runningGame();
         if (running != null && running.equals(g.id)) { resume(); return; }

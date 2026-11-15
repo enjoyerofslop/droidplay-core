@@ -588,18 +588,35 @@ static int frame_draw(void) {
     // the crop rectangle into the window, scaled to fit with its aspect kept, inside the picture's area (DM_PICTURE_TOP / DM_PICTURE_HEIGHT: the whole window by default)
     int cw = fr.crop[2] > 0 ? fr.crop[2] : (int)fr.w, ch = fr.crop[3] > 0 ? fr.crop[3] : (int)fr.h;
     float picTop, picH; picture_range(&picTop, &picH);   // not pt: VkPresentTimeGOOGLE pt, the present's time in this function
-    int pw = (int)g_ext2.width, phh = (int)(g_ext2.height * picH), py0 = (int)(g_ext2.height * picTop);
+    // The picture's area is the top picTop of the window when the split is off (0) and the top picH tall with it: it starts at the swapchain's own top, so its origin is 0 and
+    // the band below it is what stays black. A picture placed at py0 = picTop * height sat in the band instead, over the controls
+    int pw = (int)g_ext2.width, phh = (int)(g_ext2.height * picH), py0 = 0;
     // DM_PICTURE_FILL: how the crop fills the picture's area. Unset or 0 keeps the aspect and centres it, with bars where the area is not 16:9; 1 stretches it over the whole
     // area. A split screen's part is not 16:9 -- a Pixel Fold's top half is 1840x1104 with the band below, against the picture's 16:9 -- so fitting a 1280x720 game left bars
     // above and below it. Both keep the whole picture on screen: stretching it is what makes the game fill that half
+    // 2 covers the area at the aspect kept, cutting the edges: what a split wants (DM_PAD_HALF, Gamepad.layoutBand), where a stretched picture is a visibly taller person and
+    // bars waste the half the player gave the game
     static int fill = -1;
-    if (fill < 0) { const char *f = getenv("DM_PICTURE_FILL"); fill = f && *f && *f != '0'; }
-    int dw, dh, dx, dy;
+    if (fill < 0) {
+        const char *f = getenv("DM_PICTURE_FILL"), *h = getenv("DM_PAD_HALF");
+        int split = h && *h && *h != '0';
+        // auto (unset, "auto", or "0" from a build whose row meant it): in a split the crop covers the part, the whole window fits. "crop", "1" and anything else are the
+        // player's choice, the same in both. "0" was the old row's default, so a game carrying it was never asked -- a split reads it as auto
+        fill = !f || !*f || !strcmp(f, "auto") || (split && !strcmp(f, "0")) ? (split ? 2 : 0) : !strcmp(f, "crop") ? 2 : *f != '0';
+        LOG("picture fill: %d (DM_PICTURE_FILL=%s, split=%d)", fill, f && *f ? f : "(unset)", split);
+    }
+    int sx0 = fr.crop[0], sy0 = fr.crop[1], dw, dh, dx, dy;
+    if (fill == 2) {   // cover: the largest crop with the area's aspect, centred in it, the rest of the picture cut off
+        double k = (double)pw / phh, ck = (double)cw / ch;
+        if (ck > k) { int nw = (int)(ch * k + 0.5); if (nw > 0) { sx0 += (cw - nw) / 2; cw = nw; } }
+        else { int nh = (int)(cw / k + 0.5); if (nh > 0) { sy0 += (ch - nh) / 2; ch = nh; } }
+    }
+    // py0 is the picture's area's own top in the swapchain's pixels (0 with no split): the whole area, not the window's
     if (fill) { dw = pw; dh = phh; dx = 0; dy = py0; }
     else { double sx = (double)pw / cw, sy = (double)phh / ch, sc = sx < sy ? sx : sy; dw = (int)(cw * sc); dh = (int)(ch * sc); dx = (pw - dw) / 2; dy = py0 + (phh - dh) / 2; }
-    VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{fr.crop[0], fr.crop[1], 0}, {fr.crop[0] + cw, fr.crop[1] + ch, 1}},
+    VkImageBlit bl = {.srcSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .srcOffsets = {{sx0, sy0, 0}, {sx0 + cw, sy0 + ch, 1}},
                       .dstSubresource = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 0, 1}, .dstOffsets = {{dx, dy, 0}, {dx + dw, dy + dh, 1}}};
-    if (fr.flip) { bl.srcOffsets[0].y = fr.crop[1] + ch; bl.srcOffsets[1].y = fr.crop[1]; }   // the window image is stored bottom-up (NVN's lower-left origin)
+    if (fr.flip) { bl.srcOffsets[0].y = sy0 + ch; bl.srcOffsets[1].y = sy0; }   // the window image is stored bottom-up (NVN's lower-left origin)
     vkCmdBlitImage(g_cb, fr.img, VK_IMAGE_LAYOUT_GENERAL, g_img[idx], VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL, 1, &bl, VK_FILTER_LINEAR);
     b.srcAccessMask = VK_ACCESS_TRANSFER_WRITE_BIT; b.dstAccessMask = 0; b.oldLayout = VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL; b.newLayout = VK_IMAGE_LAYOUT_PRESENT_SRC_KHR;
     vkCmdPipelineBarrier(g_cb, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, 0, 0, NULL, 0, NULL, 1, &b);

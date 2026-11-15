@@ -58,6 +58,8 @@ public final class Gamepad extends View {
     // DmGamepad.m's layout constants (in u; x from the outer edge, the right half mirrors)
     static final float K_ZL_X = 44, K_ZL_Y = 40, K_ZL_R = 26, K_L_X = 44, K_L_Y = 108, K_L_R = 24, K_DROP_TIP = 1.45f, K_CORNER_IN = 0.5f,
         K_FACE_X = 81, K_PAD_Y = 82, K_FACE_GAP = 50, K_FACE_R = 27, K_PILL_DX = 52, K_PILL_Y = 22, K_PILL_W = 50, K_PILL_H = 28, K_SWAP_R = 15,
+        // A split's band is wide and short: the controls sit further apart and larger there, as on the handheld the layout copies (a thumb on each half, the screen above
+        // it). K_SPLIT_* scale the groups a split has no room for otherwise
         K_STICK_X = 81, K_STICK_R = 77, K_KNOB_R = 30, K_STICK_GRAB = 1.4f, K_FULL = 0.8f, K_DEAD = 0.1f,
         K_LOW_X = 231, K_LOW_Y = 64, K_DPAD_R = 48, K_ARM_W = 17, K_ARM_IN = 11, K_DPAD_GRAB = 1.3f, K_RSTICK_R = 60, K_RSWIPE = 1f / 3, K_CLICK_X = 102, K_CLICK_R = 17,
         // the diamond's touch area past its drawn buttons, in face radii: 3D gives what's past them to the camera, so a swipe that starts beside the buttons turns it (#433)
@@ -124,11 +126,17 @@ public final class Gamepad extends View {
     // band's, and a control's y is the band's top plus its offset in it. Whole-window mode: the window's own, exactly as before
     float padH() { return half ? getHeight() - padTop : getHeight(); }
     float baseU() { return dp * Math.min(padH() / dp / 430f, 1.3f); }
-    float padScale() {   // scaleSet, a size over 1 held where the corner groups would meet the shoulder buttons or each other
-        if (scaleSet <= 1) return scaleSet;
+    // What fits the room the controls have: the size the player asked for (DM_PAD_SCALE), held where the corner groups would meet the shoulder buttons or each other. A
+    // split's band is wide and short -- a Pixel Fold's is 1840 by 546 px -- where baseU sizes u from the band's height alone, so the controls would sit small in a wide
+    // band: there the room across the band is what limits them, which is what makes the band read as the handheld the layout copies. One place, so the two never disagree
+    static final float K_SPLIT_GROW = 1.25f;   // the most a split grows them, and where they stop meeting each other
+    float padScale() {
         float b = baseU(); if (b <= 0) return 1;
-        float fit = Math.min(bandH() / ((K_UP_REACH + K_DROP_REACH + K_GAP) * b), (cornerR0() - cornerL0()) / ((K_LEFT_REACH + K_FACE_REACH + K_GAP) * b));
-        return Math.max(1f, Math.min(scaleSet, fit));
+        // the reach of the 3D layout, the widest: across the window (the D-pad's group to the face buttons') and down it (the stick to the shoulder buttons)
+        float across = (cornerR0() - cornerL0()) / ((K_LEFT_REACH + K_FACE_REACH + K_GAP) * b);
+        float down = bandH() / ((K_UP_REACH + K_DROP_REACH + K_GAP) * b);
+        float want = half ? K_SPLIT_GROW : scaleSet;   // a split asks for its own growth; the whole window for the player's size
+        return Math.max(1f, Math.min(want, Math.min(down, across)));
     }
     float u() { return baseU() * padScale(); }
     float insetPx() {   // each side's share of the room between the left group's touch area and the face buttons'
@@ -412,7 +420,6 @@ public final class Gamepad extends View {
     }
 
     @Override protected void onDraw(Canvas c) {
-        fpsDraw(c);
         if (menuOpen) { menuDraw(c); return; }
         float u = u(); long all = faceBits | dpadBits | btnBits;
         if (!padOff) {
@@ -426,9 +433,11 @@ public final class Gamepad extends View {
                     else { RectF r = pill(b); Path p = new Path(); p.addRoundRect(r, r.height() / 2, r.height() / 2, Path.Direction.CW); shape(c, p, on); label(c, NAMES[b], r.centerX(), r.centerY(), 18 * u, on); }
                 }
                 if (full) { int[] arms = {B_UP, B_RIGHT, B_DOWN, B_LEFT}; for (int i = 0; i < 4; i++) shape(c, arm(dpadCx(), dpadCy(), dpadR(), K_ARM_W * u, K_ARM_IN * u, i * Math.PI / 2), (all >> arms[i] & 1) != 0); }
+                // the ring, then the knob's own outline inside it: a held knob fills, as every control does. The split's band gets the wider ring of the handheld it copies
                 fill.setColor(RING); c.drawCircle(homeX(), homeY(), stickR(0), fill); c.drawCircle(homeX(), homeY(), stickR(0), line);
                 float[] o = knob(0); float k = K_KNOB_R * u;
-                shape(c, circle(homeX() + o[0], homeY() + o[1], k), stick[0] >= 0); c.drawCircle(homeX() + o[0], homeY() + o[1], k * 0.62f, line);
+                c.drawCircle(homeX() + o[0], homeY() + o[1], k, line);
+                if (stick[0] >= 0) shape(c, circle(homeX() + o[0], homeY() + o[1], k), true);
             }
             shape(c, circle(swapCx(), swapCy(), K_SWAP_R * u), swapHeld); label(c, tap ? "Tap" : full ? "3D" : "2D", swapCx(), swapCy(), 12 * u, swapHeld);
         }
@@ -663,10 +672,18 @@ public final class Gamepad extends View {
             ctx = a.getApplicationContext(); view = new Gamepad(a);
             view.setPadSize(nativeEnv("DM_PAD_SCALE"), nativeEnv("DM_PAD_INSET"), nativeEnv("DM_PAD_RAISE"));   // the launcher's choices (launcher.txt) or env.txt
             view.layoutBand();   // before the first frame: a split screen has its controls below the picture from the start
+            // The game's own window's size, taken from the decor it is attached to: MATCH_PARENT under TOP|START took the display's size where a window's bounds start below the
+            // display's top (a split's game), which put the band's controls past the bottom of the game. onSizeChanged lays the band out from the size the view gets
+            // MATCH_PARENT, attached in the decor: the popup then measures to the activity's own window, whatever the window's place on the display. A pixel size read from
+            // the decor here was 0 until the decor was laid out, and a popup of 0 by 0 never drew a frame (a split's window made that plain)
             popup = new PopupWindow(view, ViewGroup.LayoutParams.MATCH_PARENT, ViewGroup.LayoutParams.MATCH_PARENT, false);
             popup.setTouchable(true); popup.setFocusable(false); popup.setClippingEnabled(false);
-            if (android.os.Build.VERSION.SDK_INT >= 22) popup.setAttachedInDecor(false);
-            popup.showAtLocation(decor, Gravity.NO_GRAVITY, 0, 0);
+            // attached in the decor (the default), NOT detached: a detached popup is laid out against the display, so a window that starts below the display's top (a split's
+            // game, this phone's inset one) drew the band's controls at the wrong place, or off the bottom of the game
+            if (android.os.Build.VERSION.SDK_INT >= 22) popup.setAttachedInDecor(true);
+            // TOP|START, not NO_GRAVITY: a window whose bounds start below the display's top (a split's game, or this phone's inset display) placed a NO_GRAVITY popup at the
+            // display's own origin, so the band's controls were drawn off the bottom of the game's window
+            popup.showAtLocation(decor, Gravity.TOP | Gravity.START, 0, 0);
             InputManager im = (InputManager)a.getSystemService(Context.INPUT_SERVICE);
             im.registerInputDeviceListener(new InputManager.InputDeviceListener() {
                 public void onInputDeviceAdded(int id) { view.padsChanged(); }
