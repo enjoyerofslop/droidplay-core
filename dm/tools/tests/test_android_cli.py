@@ -521,6 +521,42 @@ class Setup(unittest.TestCase):   # --setup (dm/android/tools/host_setup.py): wh
             (self.tmp / 'home/Android/Sdk/platform-tools').mkdir(parents=True)   # Android Studio's, which --setup then completes
             self.assertEqual(ba.sdk_dir(None), self.tmp / 'home/Android/Sdk')
 
+    def distro(self):   # Linux with no ANDROID_HOME reaching DroidPlay (a desktop launch, #508) and a distribution's SDK at a stand-in for /opt/android-sdk
+        self.linux(); distro = self.tmp / 'opt/android-sdk'
+        cms = [mock.patch.object(ba, 'data_dir', lambda: self.tmp / 'data'), mock.patch.object(ba, 'DISTRO_SDKS', (str(distro),)), mock.patch.object(ba.os, 'name', 'posix'),
+               mock.patch.dict(os.environ, {'HOME': str(self.tmp / 'home')})]
+        for cm in cms: cm.__enter__(); self.addCleanup(cm.__exit__, None, None, None)
+        for k in ('ANDROID_HOME', 'ANDROID_SDK_ROOT', 'LOCALAPPDATA'): os.environ.pop(k, None)
+        return distro
+
+    @unittest.skipIf(os.name == 'nt', "Linux's places: pathlib can't make POSIX paths on Windows")
+    def test_a_distributions_sdk_is_found_after_the_players_own(self):   # Arch's /opt/android-sdk, Debian's /usr/lib/android-sdk
+        distro = self.distro()
+        with self.assertRaises(ba.BuildError): ba.sdk_dir(None)
+        (distro / 'platform-tools').mkdir(parents=True); self.assertEqual(ba.sdk_dir(None), distro)
+        (self.tmp / 'data/tools/android-sdk/platform-tools').mkdir(parents=True)   # one Install what's missing made goes first
+        self.assertEqual(ba.sdk_dir(None), self.tmp / 'data/tools/android-sdk')
+        with mock.patch.object(ba.host_setup, 'LINUX', False):   # on a Mac or Windows the Linux places aren't looked in
+            shutil.rmtree(self.tmp / 'data'); self.assertRaises(ba.BuildError, ba.sdk_dir, None)
+
+    @unittest.skipIf(os.name == 'nt' or os.geteuid() == 0, 'Unix file modes, which root ignores')
+    def test_setup_puts_what_a_read_only_sdk_lacks_into_a_whole_sdk_of_the_players_own(self):   # not sdkmanager failing on a folder only root can write
+        distro = self.distro(); (distro / 'platform-tools').mkdir(parents=True); own = self.tmp / 'data/tools/android-sdk'
+        self.assertEqual(ba.setup_target(None, {'NDK'}), (distro, {'NDK'}))   # one the player can write to is completed in place
+        os.chmod(distro, 0o555); self.addCleanup(os.chmod, distro, 0o755)
+        self.assertEqual(ba.setup_target(None, {'NDK', '.NET SDK 10'}), (own, {'NDK', '.NET SDK 10', 'Android SDK'}))
+        self.assertEqual(ba.setup_target(None, {'.NET SDK 10'}), (distro, {'.NET SDK 10'}))   # nothing of the SDK's missing: the distribution's stays the one used
+        self.assertEqual(ba.setup_target(str(distro), {'NDK'}), (distro, {'NDK'}))   # named with --sdk: completed as asked
+
+    def test_the_sdk_row_says_whether_the_variables_reached_droidplay(self):   # "not set" (a desktop launch) told apart from "set, but no SDK there"
+        self.linux()
+        with mock.patch.dict(os.environ, {}):
+            for k in ('ANDROID_HOME', 'ANDROID_SDK_ROOT'): os.environ.pop(k, None)
+            detail, fix = ba.sdk_not_found(); self.assertIn('not set', detail); self.assertIn('environment.d', fix)
+            with mock.patch.object(ba.host_setup, 'LINUX', False): self.assertNotIn('environment.d', ba.sdk_not_found()[1])
+            os.environ['ANDROID_HOME'] = '/nowhere'
+            detail, fix = ba.sdk_not_found(); self.assertIn('ANDROID_HOME=/nowhere has no platform-tools', detail); self.assertNotIn('environment.d', fix)
+
     def test_dotnet_runs_without_icu_where_linux_has_none(self):   # .NET stops at its first start without ICU unless told to go without
         self.linux()
         with mock.patch.dict(os.environ, {'PATH': '/usr/bin'}), mock.patch.object(self.hs, 'has_icu', lambda: False):

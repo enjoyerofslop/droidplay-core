@@ -1422,14 +1422,14 @@ class SettingsPage(QWidget):
         missing = self.installable()
         if not missing: return
         sdk_rows = set(ba.sdk_packages(Path('.'))) | {'Android SDK'}
+        to, whole = ba.setup_target(None, set(missing))   # as --setup will: a distribution's SDK the player can't write to gets a whole one of their own instead (#508)
         parts = (['JDK 21, Microsoft\'s build (about 190 MB)'] if any(n.startswith('JDK') for n in missing) else []) + \
                 (['.NET SDK 10 (about 290 MB)'] if '.NET SDK 10' in missing else []) + \
                 (['the Android SDK: its command-line tools, platform-tools, platform, build-tools, NDK and CMake (about 1.1 GB to download, 4 GB installed)']
-                 if 'Android SDK' in missing else   # with no SDK found, --check lists none of its parts but adb
+                 if 'Android SDK' in whole else   # with no SDK found, --check lists none of its parts but adb
                  [f'the Android SDK\'s {", ".join(n for n in missing if n in sdk_rows)}'] if any(n in sdk_rows for n in missing) else [])
         sdk = any(n in sdk_rows for n in missing)
-        try: where = f'the Android SDK into the one it found, {ba.sdk_dir(None)}'
-        except ba.BuildError: where = f'the Android SDK into {ba.default_sdk()}' + (', where Android Studio keeps it' if os.name == 'nt' else '')
+        where = f'the Android SDK into {to}' + (', where Android Studio keeps it' if os.name == 'nt' else '') if 'Android SDK' in whole else f'the Android SDK into the one it found, {to}'
         b = QMessageBox(QMessageBox.Question, "Install what's missing", 'DroidPlay downloads and installs:\n\n• ' + '\n• '.join(parts) +
                         f'\n\nThe JDK and the .NET SDK go into {ba.data_dir() / "tools"}, for this app alone' + (f'; {where}' if sdk else '') + '. All of it goes into your own folders: '
                         'nothing asks for administrator rights.', QMessageBox.Cancel, self)

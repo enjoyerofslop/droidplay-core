@@ -157,7 +157,10 @@ DroidPlay for Linux is the app of [DroidPlay for Windows](#droidplay-for-windows
   4 GB on disk). Everything goes into your own folders: no `sudo`, no package manager, nothing in the system. The Android SDK isn't inside the AppImage:
   Google's licence doesn't allow passing it on, so it always comes from Google. An SDK you have already is used and completed instead (`ANDROID_HOME`,
   `ANDROID_SDK_ROOT`, or Android Studio's `~/Android/Sdk`), and so are your distribution's adb, JDK or .NET SDK 10 when they're on your PATH (Bazzite and
-  Fedora ship adb: DroidPlay uses it). Where Linux has no ICU library (minimal installs), .NET runs without it. The build's fonts need nothing: DejaVu Sans
+  Fedora ship adb: DroidPlay uses it). Your distribution's own SDK package is found too (`/opt/android-sdk` on Arch, `/usr/lib/android-sdk` on Debian and
+  Ubuntu), even with no `ANDROID_HOME`; if it lacks a part and only root can write to it, Install what's missing puts a whole SDK in your own folder instead.
+  An `ANDROID_HOME` set in your shell (`.bashrc`, fish's `set -Ux`) doesn't reach DroidPlay when you start it from the desktop: set it in
+  `~/.config/environment.d/` and log in again. Where Linux has no ICU library (minimal installs), .NET runs without it. The build's fonts need nothing: DejaVu Sans
   comes with the AppImage. On Linux on arm64 there's nothing to install: Google publishes the Android SDK for x86_64 Linux alone.
 - **Your phone over USB** ([Phones on Linux](#phones-on-linux)): Fedora, Arch, Bazzite and other distributions with systemd 258 or later let the person
   at the screen use a phone's USB debugging with nothing to install. Elsewhere adb lists the phone as `no permissions`: DroidPlay keeps it in the phone
