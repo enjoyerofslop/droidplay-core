@@ -677,7 +677,9 @@ void dm_audren_watch(void) {
         if (!atomic_load(&a->open)) continue;
         int s = atomic_load_explicit(&a->step, memory_order_acquire); uint64_t t = atomic_load_explicit(&a->step_ns, memory_order_relaxed);
         if (a->watch_ns && t != a->watch_ns) { LOG("audren: renderer %d's render thread went on after about %.0f ms (now %s)", i, (t - a->watch_ns) / 1e6, g_ar_step[s]); a->watch_ns = 0; }
-        if (s == AR_ST_OUT || !t || now - t < WATCH_STUCK_NS || a->watch_ns || reports >= WATCH_REPORTS) continue;
+        // t > now: the render thread began this step after the tick read the clock. The unsigned now - t then wrapped to ~1.8e19 ns and a step
+        // 50 ms old was reported as stuck for 18446744073710 ms (the 0.8.12 smoke, Super Mario Odyssey and Breath of the Wild)
+        if (s == AR_ST_OUT || !t || t > now || now - t < WATCH_STUCK_NS || a->watch_ns || reports >= WATCH_REPORTS) continue;
         uint32_t h = atomic_load(&a->tt_handle), holder = atomic_load(&g_render_holder);
         int svc = 0, wkind = 0, state = 0; uint64_t lr = 0, waddr = 0;
         int found = dm_thread_peek(h, &svc, &lr, &wkind, &waddr, &state);
