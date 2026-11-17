@@ -54,6 +54,7 @@
 #include "apipe_rule.h"   // which draws are left out while their new pipeline builds in the background (gfx_vk_draw.inc apipe_ok)
 #include "wb_promote.h"   // whether a read of a draw's pending storage buffer write takes its copy on the GPU after a barrier (gfx_vk_draw.inc wb_promote)
 #include "ofw.h"   // storage buffer bindings written in an order-free way, their copies' identity and how they land (gfx_vk_draw.inc ofw_bind, chunk_done ofw_apply)
+#include "wb_live.h"   // a pending copy holding its range's bytes, written in place by later draws behind a barrier (gfx_vk_draw.inc wl_*)
 #include "tex_aspect.h"   // which aspect of its image a texture slot reads: stencil mode (gfx_vk_draw.inc tex_aspect)
 #include "tbuf_rows.h"   // a buffer texture read through a 2D slot as rows of 16384 texels (vt_create, vt_upload_, gfx_vk_draw.inc tex_rows_slot)
 #include "rd_home.h"   // the home ranges of storage buffers draws under rasterizer discard write (gfx_vk_draw.inc rd_bind_w)
@@ -359,7 +360,12 @@ typedef struct { int st; size_t off, row_bytes, rows, src_pitch, dst_pitch; uint
                  int rbx;
                  // ofw: an order-free write's copy (ofw.h, gfx_vk_draw.inc ofw_bind), OFW_* with ofk the constant of OFW_STORE: it started as the operation's identity, holds only
                  // what the draws wrote, and lands by combining (ofw_apply); never read on the GPU by a later shader, and never a snapshot
-                 uint32_t ofw, ofk; } wb_t;
+                 uint32_t ofw, ofk;
+                 // og: an order-free write's copy that started from the range's bytes instead (gfx_vk_draw.inc ofw_bind): it lands against its snapshot as a plain copy does, and later
+                 // shaders read and write it in place; gsnap: snap is a copy the GPU made in the chunk's arena (wl_gpu_copy), not malloc'd; wl: what draws did to it since the last
+                 // barrier (wb_live.h); wlok: a copy later draws may write in place (a plain draw's or a dispatch's copy of a storage buffer, an og copy, one wl_gpu_copy made), until
+                 // another kind of draw (a mesh draw, a capture) reads it
+                 int og, gsnap, wlok; wl_st wl; } wb_t;
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; VkDeviceSize n, used; } arena_blk;
 typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; uint64_t q0, q1; } post_op;   // kind 1 event, 2 counter, 3 samples passed (occlusion queries q0..q1)
 typedef struct { int kind; uint64_t h; } dead_t;
@@ -564,8 +570,10 @@ static VkCommandBuffer cb(void) {
 }
 // Every transfer / clear is ordered after everything before it (the images stay in GENERAL; one full barrier between operations; a chunk also ends with one, which
 // orders it before every later submission on the queue)
+static uint32_t g_ep = 1;   // full barriers recorded (cb_barrier): what draws did to a copy in place is kept by this epoch (wb_live.h)
 static void cb_barrier(void) {
     if (!C || !C->open) return;
+    g_ep++;
     VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
     vkCmdPipelineBarrier(C->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
 }
@@ -1093,13 +1101,14 @@ static void chunk_done(chunk *c) {
         const uint8_t *s = w->rb ? c->rb.p + (w->rb - 1) : (w->st >= SP_ST ? c->sb[w->st - SP_ST].p : w->st >= 0 ? c->stg[w->st].p : c->ar[-1 - w->st].p) + w->off;
         if (w->st < 0) { an++; ab += w->rows ? w->src_pitch * (w->rows - 1) + w->row_bytes : 0; ar += w->rb != 0; }
         if (w->rbx) rb16_rows((uint8_t *)(uintptr_t)s, w->row_bytes, w->rows, w->src_pitch, w->rbx);   // the GPU's copy, in Vulkan's order, into the guest's (before the snapshot compare)
-        if (w->ofw) { ofw_apply(w, s); continue; }   // (no snapshot to give back)
+        if (w->ofw && !w->og) { ofw_apply(w, s); continue; }   // (no snapshot to give back)
         if (w->lin && wb_revert_on()) rv_check(w, s);   // before it lands: guest memory still holds what the CPU wrote during the pass
         uint64_t t0 = w->lin ? clock_gettime_nsec_np(CLOCK_MONOTONIC) : 0; int clean = w->lin == 2 && wb_absorb_on() ? ab_clean(w) : 0, wrote = wb_apply(w, s);
         if (w->lin) atomic_fetch_add(!w->snap || !lsnap_on() ? &g_lwb_whole : wrote ? &g_lwb_diff : &g_lwb_same, 1);
         if (w->lin == 2 && wrote && wb_absorb_on()) ab_note(w, s, clean);   // right after it: before a later write-back or post of the chunk
         if (w->lin) atomic_fetch_add(&g_lwb_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0);
-        snap_give(w->snap, w->snap_cap); snap_give(w->dsnap, w->snap_cap); }   // a storage buffer's snapshot: snap_cap 0, freed
+        if (!w->gsnap) snap_give(w->snap, w->snap_cap);
+        snap_give(w->dsnap, w->snap_cap); }   // a storage buffer's snapshot: snap_cap 0, freed (one the GPU made lives in the arena: gsnap)
     if (c->nwb) { atomic_fetch_add(&g_wb_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - wt0); atomic_fetch_add(&g_awb_n, an); atomic_fetch_add(&g_awb_bytes, ab); atomic_fetch_add(&g_awb_rb, ar); }
     c->rb.used = 0;
     if (c->npq) prof_collect(c);
@@ -1387,6 +1396,7 @@ typedef struct {
     VkImageUsageFlags usage; int ext_store;   // its usage; ext_store: STORAGE for views of another format only (EXTENDED_USAGE, vt_storage_up), so each view takes the usage its format has (view_get)
     uint8_t rbx;   // NVN RGBA4 / RGB5 / RGB5A1 / RGB565: the image holds the Vulkan format's order and guest bytes are exchanged where they cross (rb16.h: red's bit, 4 for RGBA4); 0: as they are
     uint8_t ds_copied;   // a depth image a copy wrote since its last render pass (copy_t2t; gfx_vk_dscopy.inc copied_depth_pass)
+    uint8_t sparse; uint64_t vgen, vseen;   // uploaded through its sparse pool's page table (sparse_tex), and the mapping generations of that upload and of the last look
 } vtex;
 static nvn_hmap g_tex = {.klen = 8}, g_cpuw = {.klen = 8};   // serial → vtex; serials the CPU wrote (WriteTexels). Keyed by the 8-byte serial
 static uint64_t g_pkg_uploads, g_pkg_reuploads, g_pkg_edge_skips, g_up_bytes, g_draws_skipped;
@@ -1405,6 +1415,20 @@ static VkImageAspectFlags aspect_of(VkFormat f) {
 // its pages were written (rows at the texture's own stride: vt_upload)
 static int is_linear(const tex_t *t) { return (t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET)) != 0; }
 static int is_packaged(const tex_t *t) { return t->mem && (t->has_layout || is_linear(t) || nvn_hm_get(&g_cpuw, &t->serial)); }
+// A sampled texture in a sparse virtual pool (hle_nvn.c) holds what the CPU wrote into the physical pages mapped there: it is read through the pool's page table (nvn_sparse_copy),
+// with unmapped pages read as 0, and uploaded again when a mapping in its range changes or the CPU writes a page behind it (nvn_sparse_since), as nvn_mtl.m tex_from_storage does.
+// Its own addresses are no memory on Android, which can't alias the physical pages there (plat_android.c vm_remap): it was a GPU texture of zeros. Metroid Prime Remastered streams
+// its light-probe volumes (six 512x256x368 BC1 / BC6H 3D textures, a pool each) that way; a vertex shader samples them into the records its materials are lit by, and with zeros
+// every model lit by probes (the arm cannon, debris) was dark but for its own glow. DM_VK_SPARSE_TEX=0 (env.txt): GPU textures, as before
+int nvn_sparse_pool(const void *pool); uint64_t nvn_sparse_gen(void); uint64_t nvn_sparse_copy(const void *pool, void *dst, uint64_t a, uint64_t n);   // hle_nvn.c
+int nvn_sparse_since(const void *pool, uint64_t a, uint64_t n, uint64_t gen, uint64_t stamp); void nvn_sparse_protect(const void *pool, uint64_t a, uint64_t n);
+static uint64_t g_sp_up, g_sp_reup, g_sp_bytes, g_sp_max, g_sp_ns;   // sparse uploads, of them again after a change, the bytes read through the page table, the largest, their time (the periodic syncs line)
+static int sparse_tex_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_SPARSE_TEX"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_SPARSE_TEX=0: textures in sparse pools are GPU textures, as before"); } return v; }
+static int sparse_tex(const tex_t *t) {
+    return t->mem && t->pool && t->pool->magic == MAGIC('P', 'O', 'O', 'L') && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) && t->d.target != NVN_TEXTURE_TARGET_BUFFER
+        && !(t->d.flags & (NVN_TEXTURE_FLAGS_LINEAR | NVN_TEXTURE_FLAGS_LINEAR_RENDER_TARGET | NVN_TEXTURE_FLAGS_COMPRESSIBLE | NVN_TEXTURE_FLAGS_IMAGE))
+        && nvn_sparse_pool(t->pool) && sparse_tex_on();
+}
 void vkb_frame_forget(uint64_t serial);
 // g_vt_gen: bumped (under g_bk) whenever a vtex is freed or a serial stops resolving to the vtex it did (vt_destroy, the g_tex deletions): a draw's textures resolved in
 // stage_textures are used again in stage_set only while it has not moved (gfx_vk_draw.inc tex_once)
@@ -1637,17 +1661,23 @@ static void up_view(const vtex *v, const tex_t *t) {
 }
 static int vt_upload_(vtex *v, const tex_t *t, int track) {
     up_view(v, t);
-    if (track) { v->stamp = nvn_dirty_now(); nvn_dirty_protect(t->mem, t->L.size); }
+    // a sparse pool's texture: its bytes through the page table, after the stamp, the generation and the protection of the pages behind it are taken (a write or a mapping
+    // during the copy is then seen as a change)
+    const uint8_t *src = t->mem; uint8_t *sp = NULL; v->sparse = (uint8_t)sparse_tex(t);
+    if (!v->sparse && v->pkg && t->pool && (t->pool->flags & NVN_MEMORY_POOL_FLAGS_VIRTUAL) && !mtl_addr((uint64_t)(uintptr_t)t->mem, t->L.size, NULL, NULL)) return 0;   // a pool that stopped being sparse: its old range is no memory
+    if (track) { v->stamp = nvn_dirty_now(); if (v->sparse) { v->vgen = v->vseen = nvn_sparse_gen(); nvn_sparse_protect(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size); } else nvn_dirty_protect(t->mem, t->L.size); }
+    if (v->sparse) { if (!(sp = malloc(t->L.size ? t->L.size : 1))) return 0; nvn_sparse_copy(t->pool, sp, (uint64_t)(uintptr_t)t->mem, t->L.size); src = sp;
+        g_sp_up++; g_sp_bytes += t->L.size; if (t->L.size > g_sp_max) g_sp_max = t->L.size; }
     int bw, bh, bpb = nvn_fmt_bpb(t->d.format, &bw, &bh);
-    if (!bpb) { RED_ONCE(20, "packaged texture format %#x has no block size", t->d.format); return 0; }
+    if (!bpb) { RED_ONCE(20, "packaged texture format %#x has no block size", t->d.format); free(sp); return 0; }
     size_t total = 0;
     for (unsigned l = 0; l < v->levels; l++) {
         uint32_t w = v->w >> l ? v->w >> l : 1, h = v->h >> l ? v->h >> l : 1, z = v->type == VK_IMAGE_TYPE_3D ? (v->d >> l ? v->d >> l : 1) : 1;
         size_t pitch = v->conv ? (size_t)w * v->px : (size_t)((w + bw - 1) / bw) * bpb, rows = v->conv ? h : (h + bh - 1) / bh;
         total += pitch * rows * z * v->layers;
     }
-    stg_sl s = stg_take(total, v->conv ? v->px : bpb); if (!s.p) return 0;
-    VkCommandBuffer c = cb(); if (!c) return 0;   // may end an open pass: lin_writeback takes staging too (s stays valid: stg_take)
+    stg_sl s = stg_take(total, v->conv ? v->px : bpb); if (!s.p) { free(sp); return 0; }
+    VkCommandBuffer c = cb(); if (!c) { free(sp); return 0; }   // may end an open pass: lin_writeback takes staging too (s stays valid: stg_take)
     uint8_t *tmp = NULL; size_t off = 0;
     for (unsigned l = 0; l < v->levels; l++) {
         uint32_t w = v->w >> l ? v->w >> l : 1, h = v->h >> l ? v->h >> l : 1, z = v->type == VK_IMAGE_TYPE_3D ? (v->d >> l ? v->d >> l : 1) : 1;
@@ -1656,7 +1686,7 @@ static int vt_upload_(vtex *v, const tex_t *t, int track) {
             size_t out = v->conv ? (size_t)w * v->px * h * z : pitch * rows * z;
             if (v->conv) {
                 tmp = realloc(tmp, pitch * rows * z);
-                if (nvn_deswizzle(&t->d, l, y, t->mem, tmp, pitch)) { RED_ONCE(21, "deswizzle failed format %#x target %d", t->d.format, t->d.target); free(tmp); return 0; }
+                if (nvn_deswizzle(&t->d, l, y, src, tmp, pitch)) { RED_ONCE(21, "deswizzle failed format %#x target %d", t->d.format, t->d.target); free(tmp); free(sp); return 0; }
                 for (uint32_t k = 0; k < z; k++) bc_decode(v->conv, tmp + k * pitch * rows, pitch, w, h, s.p + off + (size_t)k * w * v->px * h, (size_t)w * v->px, v->px);
             } else if (t->d.target == NVN_TEXTURE_TARGET_BUFFER) tbr_fill(s.p + off, out, t->mem, t->L.size);   // rows of 16384 texels (vt_create): the buffer's bytes as they lie
             else if (is_linear(t)) {   // linear: block rows at the texture's stride (its layer's bytes over its block rows, as GetStorageSize gives them)
@@ -1668,17 +1698,17 @@ static int vt_upload_(vtex *v, const tex_t *t, int track) {
                     for (size_t r = 0; r < rows; r++) { size_t at = r * srow, k = at < left ? (left - at < pitch ? left - at : pitch) : 0;
                         memcpy(s.p + off + r * pitch, src + at, k); memset(s.p + off + r * pitch + k, 0, pitch - k); }
                 } else for (size_t r = 0; r < rows; r++) memcpy(s.p + off + r * pitch, src + r * srow, pitch);
-            } else if (nvn_deswizzle(&t->d, l, y, t->mem, s.p + off, pitch)) { RED_ONCE(21, "deswizzle failed format %#x target %d", t->d.format, t->d.target); free(tmp); return 0; }
+            } else if (nvn_deswizzle(&t->d, l, y, src, s.p + off, pitch)) { RED_ONCE(21, "deswizzle failed format %#x target %d", t->d.format, t->d.target); free(tmp); free(sp); return 0; }
             if (v->rbx) rb16_rows(s.p + off, out, 1, out, v->rbx);   // the guest's order into the image's (rb16.h)
             VkBufferImageCopy r = {.bufferOffset = s.off + off, .imageSubresource = {v->aspect, l, y, 1}, .imageExtent = {w, h, z}};
             vkCmdCopyBufferToImage(c, s.b, v->img, VK_IMAGE_LAYOUT_GENERAL, 1, &r);
             off += out;
         }
     }
-    free(tmp); cb_barrier();
+    free(tmp); free(sp); cb_barrier();
     if (vk_debug()) LOG("[vk] upload ser=%llu mem=%p size %#llx levels %u layers %u total %zu first bytes %02x %02x %02x %02x", (unsigned long long)v->serial, t->mem, (unsigned long long)t->L.size, v->levels, v->layers, total, s.p[0], s.p[1], s.p[2], s.p[3]);
     g_up_bytes += total;
-    if (track) { v->span = nvn_dirty_span(t->mem, t->L.size); v->seen = v->stamp; }
+    if (track) { v->span = v->sparse ? NULL : nvn_dirty_span(t->mem, t->L.size); v->seen = v->stamp; }
     return 1;
 }
 // A new GPU texture's initial content (nvn_mtl.m tex_init_fill): until the GPU first uses a texture it has not written it, so what its storage holds is its content when the
@@ -1859,16 +1889,21 @@ static vtex *vt_get_(const tex_t *ct, int rows) {
     if (v && (v->store != t->mem || !desc_same(&v->desc, &t->d))) {
         static int n; if (n++ < 8) LOG("[vk] texture ser=%llu met again with %s: made anew (storage %p, now %p)", (unsigned long long)t->serial, v->store != t->mem ? "other storage" : "another description", (const void *)v->store, (const void *)t->mem);
         nvn_hm_del(&g_tex, &t->serial); g_vt_gen++; vt_unref(v); v = NULL; }
-    int pkg = is_packaged(t) || tbuf, took = 0;   // rows: from guest memory, again when its pages change, as a linear texture (vt_upload_)
+    int pkg = is_packaged(t) || tbuf || sparse_tex(t), took = 0;   // rows: from guest memory, again when its pages change, as a linear texture (vt_upload_); sparse: through the page table
     if (!v && !pkg && (took = storage_first_use(t))) pkg = 1;
     if (v && v->pkg) {
         uint64_t now = nvn_dirty_now();
-        int clean = v->span && (now == v->seen || !nvn_dirty_since_span(v->span, t->mem, t->L.size, v->stamp));
+        int clean;
+        if (v->sparse) {   // a mapping in its range since the upload, or a write into a physical page behind it (the walk only when either moved since the last look)
+            uint64_t g = nvn_sparse_gen(); clean = (now == v->seen && g == v->vseen) || !nvn_sparse_since(t->pool, (uint64_t)(uintptr_t)t->mem, t->L.size, v->vgen, v->stamp); v->vseen = g;
+        } else clean = v->span && (now == v->seen || !nvn_dirty_since_span(v->span, t->mem, t->L.size, v->stamp));
         v->seen = now;
         if (clean) return v;
-        if (wb_absorb_on() && ab_take(v, t)) return v;   // written only by its own write-back: the image holds it (ab_note)
-        if (edges_clean(v, t)) return v;
-        if (vt_upload(v, t, 1)) { g_pkg_reuploads++; edges_take(v, t); }
+        if (!v->sparse && wb_absorb_on() && ab_take(v, t)) return v;   // written only by its own write-back: the image holds it (ab_note)
+        if (!v->sparse && edges_clean(v, t)) return v;
+        { uint64_t t0 = v->sparse ? clock_gettime_nsec_np(CLOCK_MONOTONIC) : 0; int sp0 = v->sparse;
+          if (vt_upload(v, t, 1)) { g_pkg_reuploads++; if (!v->sparse) edges_take(v, t); }
+          if (sp0) { g_sp_reup++; g_sp_ns += clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0; } }
         return v;
     }
     if (v && !pkg) { v->used = atomic_load(&g_fence); return v; }
@@ -1880,7 +1915,11 @@ static vtex *vt_get_(const tex_t *ct, int rows) {
     }
     if (!(v = vt_create(t))) return NULL;
     v->used = atomic_load(&g_fence); ev_made(v);
-    if (pkg) { v->pkg = 1; v->taken = took == 2; if (vt_upload(v, t, 1)) { g_pkg_uploads++; edges_take(v, t); } }
+    if (pkg) { v->pkg = 1; v->taken = took == 2; uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
+        if (vt_upload(v, t, 1)) { g_pkg_uploads++; if (!v->sparse) edges_take(v, t); }
+        if (v->sparse) g_sp_ns += clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0;
+        if (v->sparse) { static uint64_t n; if (n++ < 4) LOG("[vk] texture in a sparse pool: ser=%llu %ux%ux%u format %#x, uploaded through its page table, again when a mapping or a page behind it changes (%llu so far)",
+                                                             (unsigned long long)t->serial, t->d.width, t->d.height, t->d.depth, t->d.format, (unsigned long long)n); } }
     else if (t->pool) { v->filled = (uint8_t)tex_init_fill(v, t); share_take_over(&k); nvn_hm_put(&g_share, &k, v); v->shared = 1; }
     vt_ref(t->serial, v);
     return v;
@@ -2759,6 +2798,11 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     if (g_ofw_new) LOG("[vk] storage buffers draws write in an order-free way: %llu bindings on a copy of their chunk, %llu copies made from the identity, %llu landed with words to combine (%llu words); "
                        "%llu shaders write one so (cumulative; gfx_vk_draw.inc ofw_bind, ofw.h, DM_VK_OFW)", (unsigned long long)g_ofw_chain, (unsigned long long)g_ofw_new,
                        (unsigned long long)atomic_load(&g_ofw_landed), (unsigned long long)atomic_load(&g_ofw_words), (unsigned long long)g_ofw_shaders);
+    if (g_wl_n[0] || g_wl_n[1] || g_wl_n[2] || g_wl_n[3] || g_wl_n[4] || g_wl_n[6] || g_wl_n[8]) LOG("[vk] copies holding their range's bytes, written in place: draws' writes on the chunk's copy %llu, order-free writes on such a copy %llu, order-free copies "
+                       "from guest memory %llu / made on the GPU %llu, draws' copies made on the GPU %llu, barriers put in %llu; reads that waited (another kind of draw) %llu, needing a barrier "
+                       "after the pass began %llu; draws skipped (no copy to write) %llu (cumulative; gfx_vk_draw.inc wl_*, wb_live.h, DM_VK_LIVE)", (unsigned long long)g_wl_n[0],
+                       (unsigned long long)g_wl_n[1], (unsigned long long)g_wl_n[2], (unsigned long long)g_wl_n[3], (unsigned long long)g_wl_n[4], (unsigned long long)g_wl_n[5],
+                       (unsigned long long)g_wl_n[6], (unsigned long long)g_wl_n[7], (unsigned long long)g_wl_n[8]);
     LOG("[vk] constant and storage buffer copies: %llu reused, %llu made, %llu MB copied to the arena and %llu MB to the shadows (cumulative; gfx_vk_draw.inc ucopy); constant buffer bindings of the shaders loaded: %llu bounded by res.json, %llu by the SPIR-V scan, %llu read whole, %llu res.json extents below the scan's (gfx_vk_draw.inc cb_ext_pick)%s",
         (unsigned long long)g_ucopy_hit, (unsigned long long)g_ucopy_miss, (unsigned long long)(g_ucopy_bytes >> 20), (unsigned long long)(g_ucopy_shadow >> 20), (unsigned long long)g_cbx[0], (unsigned long long)g_cbx[2], (unsigned long long)g_cbx[3], (unsigned long long)g_cbx[1],
         ext_check() ? "; DM_VK_EXT_CHECK on" : "");
@@ -2832,6 +2876,8 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
           frame - f0, (double)(a - a0) / nf, (double)(r - r0) / nf, (double)(sl - s0) / nf, g_sp_on > 0 ? "" : " (DM_VK_STG_POOL=0)", nb, SP_NBLK, fr, SP_BLOCK >> 20, (unsigned long long)g_sp_made, (unsigned long long)atomic_load(&g_sp_trimmed),
           SP_MAXREQ >> 20, (unsigned long long)g_sp_big, (unsigned long long)g_sp_full);
       f0 = frame; a0 = a; r0 = r; s0 = sl; }
+    if (g_sp_up) LOG("[vk] textures of sparse pools through the page table: %llu uploads (%llu again after a change), %.1f MB read, the largest %.1f MB, %.1f ms (cumulative; sparse_tex)",
+        (unsigned long long)g_sp_up, (unsigned long long)g_sp_reup, g_sp_bytes / 1048576.0, g_sp_max / 1048576.0, g_sp_ns / 1e6);
     LOG("[vk] syncs by site (submitted / in flight): other %llu/%llu, draw %llu/%llu, upload %llu/%llu (%llu waited for nothing), t2b %llu/%llu, large copy %llu/%llu, buffer texture %llu/%llu, buffer image %llu/%llu, dispatch %llu/%llu",
         (unsigned long long)g_vsite[0][0], (unsigned long long)g_vsite[0][1], (unsigned long long)g_vsite[1][0], (unsigned long long)g_vsite[1][1], (unsigned long long)g_vsite[2][0], (unsigned long long)g_vsite[2][1], (unsigned long long)g_up_free,
         (unsigned long long)g_vsite[3][0], (unsigned long long)g_vsite[3][1], (unsigned long long)g_vsite[4][0], (unsigned long long)g_vsite[4][1], (unsigned long long)g_vsite[5][0], (unsigned long long)g_vsite[5][1],

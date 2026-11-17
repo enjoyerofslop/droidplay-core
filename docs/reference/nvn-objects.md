@@ -126,6 +126,37 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
   84 MB request failed, a 17 MB arena block was mapped inside its destination, the same request failed again 71 s later, and the replay faulted writing the block 15 ms
   after that. On a OnePlus Pad 3 the driver faulted at a submission right after a run of such requests.
 
+### Textures of a sparse pool read through its page table on Android
+
+- **Symptom:** Android only, in a game that streams textures into sparse virtual pools: what those textures feed reads as zero, with `[RED] virtual pool remap … failed: 5` lines (one per batch of mapping requests). Metroid Prime Remastered's arm cannon, and every model lit by its light probes, was dark but for its own glow on a Moto Razr Plus 2023 (Adreno 730), on Qualcomm's driver and on Turnip alike, while the Mac lit it.
+- **Cause:** two gaps, both from Android being unable to alias a physical pool's private memory into a virtual pool's range (`plat_android.c` `vm_remap`; see [A refused virtual pool mapping left a hole in the pool's reservation on Android](#a-refused-virtual-pool-mapping-left-a-hole-in-the-pools-reservation-on-android)):
+  - `vpool_map` (`hle_nvn.c`) failed a request it couldn't alias. `nvnMemoryPoolMapVirtual` then stopped at it, so only the first request of each batch reached the page table, and the game was told its mapping failed.
+  - The Vulkan replay never read a sparse pool's texture through the page table, as Metal's does ([Textures read through a 4 KB page table of a sparse pool](#textures-read-through-a-4-kb-page-table-of-a-sparse-pool)). `tex_storage_ok` leaves virtual pools out, so such a texture was a GPU texture, its image cleared to zero and never filled.
+  - Metroid Prime Remastered streams its light-probe volumes that way: six 512x256x368 3D textures (BC1 and BC6H, one sparse pool each, 64 KB tiles mapped from physical pools). A vertex shader under rasterizer discard (`f7800d296c68645b`) samples them into an 80-byte record per object, which the materials' fragment shaders read from a storage buffer (`c0 + 0x144`) for their ambient and directional light. With zeros every record held a black ambient colour.
+- **Fix:**
+  - `vpool_map` keeps a request it can't alias in the page table and goes on, as it does for one the host page can't align: textures read it, the GPU and buffers can't address it. One `[nvn] virtual pool … could not be aliased` line replaces the red lines.
+  - `gfx_vk.c` takes a sampled texture in a sparse pool (no linear, render-target, compressible or image flags, as `nvn_mtl.m` `tex_from_storage`) from its storage: `vt_upload_` copies its bytes through the page table (`nvn_sparse_copy`, unmapped pages as 0) and deswizzles them. `vt_get_` uploads it again when a mapping in its range or a physical page behind it changed (`nvn_sparse_since`), after `nvn_sparse_protect` took the pages' write protection. Such images are at most `DM_VK_SPARSE_MAX_MB` (256 MB), so an upload takes at most that much again for the copy and the staging. The periodic `[vk] textures of sparse pools through the page table` line counts the uploads, the bytes read, the largest and their time.
+  - `DM_VK_SPARSE_TEX=0` (env.txt) makes them GPU textures again; the page table keeps every request either way.
+- **Check (2026-11-17):** Metroid Prime Remastered on the Razr from a new game, the same frame-keyed route, a screenshot at frame 13,200 and frames 13,200–15,000 timed. One host, `main` 2a376a35 with [the attribute-array fix](rendering.md#a-shaders-attribute-array-its-elements-past-the-first-not-fetched-or-not-linked-android) and this change:
+  - As built: the cannon green with its yellow strips and Samus's brown glove, as on the Mac. The cannon's pass came out at a mean of (138, 156, 132) of 255. The probe volumes were uploaded through the page table (the log names the first four); no red line.
+  - With `DM_VK_SPARSE_TEX=0`: the cannon black but for its strips, a mean of (35, 33, 9), as without the change.
+  - 60.0 fps either way, GPU p50 9.97–10.18 ms and 9.94–10.15 ms.
+  - A diagnostic build logged the records the fragment shaders read before the change: the ambient colour 0 and each directional term at its encoded floor (-0.97, -1.02, -1.0, 1), what zero samples give.
+  - Not run: other GPUs.
+- **Check (2026-11-17, rebased on `main` 4e6105e5), the other games whose Android logs show sparse pools, on the Razr against `DM_VK_SPARSE_TEX=0`:**
+  - Metroid Prime Remastered as above: the cannon lit, a mean of (140, 160, 136) against (34, 30, 9); 6 uploads, 184 MB read, the largest 46 MB, 260 ms in all.
+  - OCTOPATH TRAVELER 1.0.3, from a new game to the traveler selection, whose world map is in sparse pools (three 6-minute runs):
+    - the same picture both ways;
+    - 59.4–59.6 fps, GPU p50 9.14–9.15 ms;
+    - PSS at most 1.69–1.72 GB either way;
+    - 6 uploads through the page table (4 of them after a mapping changed), 4.7 MB in all, the largest 1.4 MB, 3–6 ms.
+  - Mario Kart World 1.8.0 is too big for the Razr's 7 GB either way:
+    - the low-memory killer ended every run: with the change at 190 and 240 s (swap full), without it at 30 s; PSS 3.6–5.1 GB;
+    - one 95.6 MB sparse texture went through the page table at the start (0.2–0.6 s, once), and none after that before the kill;
+    - for that moment the copy and its staging take about twice the texture's size.
+  - Not run: Mario Kart World past its title on a phone with the memory for it.
+- **Found on:** [Metroid Prime Remastered](../../dm/games/010012101468C000/README.md#android) (q356).
+
 ### Textures read through a 4 KB page table of a sparse pool
 
 - **Symptom:** `CRASH sig=10` in `memmove` from `pkg_upload` → `nvn_deswizzle`, at an address 32 GB into a sparse virtual pool; textures with unaliased tails came out magenta.

@@ -13,3 +13,9 @@ DM_VK_RAW_GMEM=1
 # the same. A Pixel 9 Pro XL (Mali-G715) gains nothing (28.8 / 29.2 fps), and this game isn't steady there either way: with the switch it froze once in two launches
 # (no frame after the title, the GPU at its top clock), without it Mali's driver crashed once in three (2026-11-12, q278)
 DM_VK_IND_FWD=1
+# DM_VK_GPU_FLOOR=100: the launcher's Keep the GPU clock up, on by default for this game (gfx_vk_floor.inc; it acts only where the phone has Qualcomm's KGSL device,
+# others ignore it, and the settings screen still turns it off). In a Mushroom Cup race the governor alone kept a Galaxy Z Fold 8's GPU near 342 MHz, while the race needs
+# only about 18 ms of GPU a frame. Warm, three 10.5-minute launches in turn: off 24.2 and 24.4 fps (race medians), on 29.1 fps with the GPU at a median 646 MHz, still
+# 27-30 fps every minute after the phone's thermal cap fell to 461 MHz from minute 4. The cost: the skin about 2 °C warmer (43.7 °C at the end) and thermal status 2
+# (2026-11-17, q368). Ocarina of Time on the same phone gains nothing warm, so this stays per game
+DM_VK_GPU_FLOOR=100

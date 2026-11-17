@@ -2547,7 +2547,14 @@ static int vpool_map(struct vpool *v, const map_req *r) {   // caller holds g_vp
     uintptr_t from = (uintptr_t)ph->mem + (uintptr_t)r->poff;
     vm_prot_t cur, max;
     kern_return_t kr = vm_remap(mach_task_self(), &to, r->size, 0, VM_FLAGS_FIXED | VM_FLAGS_OVERWRITE, mach_task_self(), (vm_address_t)from, FALSE, &cur, &max, VM_INHERIT_NONE);
-    if (kr != KERN_SUCCESS || to != (vm_address_t)(v->base + r->voff)) { LOG("[RED] virtual pool remap %#lx → %p (%#llx bytes) failed: %d", (unsigned long)from, (void *)(v->base + r->voff), (unsigned long long)r->size, kr); return 0; }
+    // Not aliased: the request stays in the page table (vpt_set above), which textures read (nvn_sparse_copy), as for a request the host page can't align; the GPU and buffers
+    // can't address it. Android can't alias a physical pool's private memory at all (plat_android.c vm_remap), so every sparse request lands here: failed, it ended the game's
+    // batch at its first request, and the rest never reached the page table (Metroid Prime Remastered's light-probe volumes, one 64 KB tile each, read as zero)
+    if (kr != KERN_SUCCESS || to != (vm_address_t)(v->base + r->voff)) {
+        static _Atomic uint64_t nf; if (!atomic_fetch_add(&nf, 1)) LOG("[nvn] virtual pool %p: a request could not be aliased (%#lx → %p, %#llx bytes: %d), kept in the page table only: textures read it, the GPU cannot address it (later cases are not logged)",
+                                                                       (const void *)v->pool, (unsigned long)from, (void *)(v->base + r->voff), (unsigned long long)r->size, kr);
+        return 1;
+    }
     mprotect((void *)to, r->size, PROT_READ | PROT_WRITE);   // the source may be write-protected by the dirty tracker at this moment; the alias itself is plain memory
     vrun_set(v, (uint64_t)r->voff, (uint64_t)r->voff + r->size, 1);
     uint64_t end = (uint64_t)r->voff + r->size;
