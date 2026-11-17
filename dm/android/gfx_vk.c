@@ -54,6 +54,7 @@
 #include "apipe_rule.h"   // which draws are left out while their new pipeline builds in the background (gfx_vk_draw.inc apipe_ok)
 #include "wb_promote.h"   // whether a read of a draw's pending storage buffer write takes its copy on the GPU after a barrier (gfx_vk_draw.inc wb_promote)
 #include "ofw.h"   // storage buffer bindings written in an order-free way, their copies' identity and how they land (gfx_vk_draw.inc ofw_bind, chunk_done ofw_apply)
+#include "wb_live.h"   // a pending copy holding its range's bytes, written in place by later draws behind a barrier (gfx_vk_draw.inc wl_*)
 #include "tex_aspect.h"   // which aspect of its image a texture slot reads: stencil mode (gfx_vk_draw.inc tex_aspect)
 #include "tbuf_rows.h"   // a buffer texture read through a 2D slot as rows of 16384 texels (vt_create, vt_upload_, gfx_vk_draw.inc tex_rows_slot)
 #include "rd_home.h"   // the home ranges of storage buffers draws under rasterizer discard write (gfx_vk_draw.inc rd_bind_w)
@@ -359,7 +360,12 @@ typedef struct { int st; size_t off, row_bytes, rows, src_pitch, dst_pitch; uint
                  int rbx;
                  // ofw: an order-free write's copy (ofw.h, gfx_vk_draw.inc ofw_bind), OFW_* with ofk the constant of OFW_STORE: it started as the operation's identity, holds only
                  // what the draws wrote, and lands by combining (ofw_apply); never read on the GPU by a later shader, and never a snapshot
-                 uint32_t ofw, ofk; } wb_t;
+                 uint32_t ofw, ofk;
+                 // og: an order-free write's copy that started from the range's bytes instead (gfx_vk_draw.inc ofw_bind): it lands against its snapshot as a plain copy does, and later
+                 // shaders read and write it in place; gsnap: snap is a copy the GPU made in the chunk's arena (wl_gpu_copy), not malloc'd; wl: what draws did to it since the last
+                 // barrier (wb_live.h); wlok: a copy later draws may write in place (a plain draw's or a dispatch's copy of a storage buffer, an og copy, one wl_gpu_copy made), until
+                 // another kind of draw (a mesh draw, a capture) reads it
+                 int og, gsnap, wlok; wl_st wl; } wb_t;
 typedef struct { VkBuffer b; VkDeviceMemory m; uint8_t *p; VkDeviceSize n, used; } arena_blk;
 typedef struct { int kind; volatile uint32_t *val; uint32_t mode, v; uint64_t addr; uint32_t type; uint64_t q0, q1; } post_op;   // kind 1 event, 2 counter, 3 samples passed (occlusion queries q0..q1)
 typedef struct { int kind; uint64_t h; } dead_t;
@@ -564,8 +570,10 @@ static VkCommandBuffer cb(void) {
 }
 // Every transfer / clear is ordered after everything before it (the images stay in GENERAL; one full barrier between operations; a chunk also ends with one, which
 // orders it before every later submission on the queue)
+static uint32_t g_ep = 1;   // full barriers recorded (cb_barrier): what draws did to a copy in place is kept by this epoch (wb_live.h)
 static void cb_barrier(void) {
     if (!C || !C->open) return;
+    g_ep++;
     VkMemoryBarrier mb = {.sType = VK_STRUCTURE_TYPE_MEMORY_BARRIER, .srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT, .dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT};
     vkCmdPipelineBarrier(C->cb, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 1, &mb, 0, NULL, 0, NULL);
 }
@@ -1093,13 +1101,14 @@ static void chunk_done(chunk *c) {
         const uint8_t *s = w->rb ? c->rb.p + (w->rb - 1) : (w->st >= SP_ST ? c->sb[w->st - SP_ST].p : w->st >= 0 ? c->stg[w->st].p : c->ar[-1 - w->st].p) + w->off;
         if (w->st < 0) { an++; ab += w->rows ? w->src_pitch * (w->rows - 1) + w->row_bytes : 0; ar += w->rb != 0; }
         if (w->rbx) rb16_rows((uint8_t *)(uintptr_t)s, w->row_bytes, w->rows, w->src_pitch, w->rbx);   // the GPU's copy, in Vulkan's order, into the guest's (before the snapshot compare)
-        if (w->ofw) { ofw_apply(w, s); continue; }   // (no snapshot to give back)
+        if (w->ofw && !w->og) { ofw_apply(w, s); continue; }   // (no snapshot to give back)
         if (w->lin && wb_revert_on()) rv_check(w, s);   // before it lands: guest memory still holds what the CPU wrote during the pass
         uint64_t t0 = w->lin ? clock_gettime_nsec_np(CLOCK_MONOTONIC) : 0; int clean = w->lin == 2 && wb_absorb_on() ? ab_clean(w) : 0, wrote = wb_apply(w, s);
         if (w->lin) atomic_fetch_add(!w->snap || !lsnap_on() ? &g_lwb_whole : wrote ? &g_lwb_diff : &g_lwb_same, 1);
         if (w->lin == 2 && wrote && wb_absorb_on()) ab_note(w, s, clean);   // right after it: before a later write-back or post of the chunk
         if (w->lin) atomic_fetch_add(&g_lwb_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0);
-        snap_give(w->snap, w->snap_cap); snap_give(w->dsnap, w->snap_cap); }   // a storage buffer's snapshot: snap_cap 0, freed
+        if (!w->gsnap) snap_give(w->snap, w->snap_cap);
+        snap_give(w->dsnap, w->snap_cap); }   // a storage buffer's snapshot: snap_cap 0, freed (one the GPU made lives in the arena: gsnap)
     if (c->nwb) { atomic_fetch_add(&g_wb_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - wt0); atomic_fetch_add(&g_awb_n, an); atomic_fetch_add(&g_awb_bytes, ab); atomic_fetch_add(&g_awb_rb, ar); }
     c->rb.used = 0;
     if (c->npq) prof_collect(c);
@@ -2759,6 +2768,11 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     if (g_ofw_new) LOG("[vk] storage buffers draws write in an order-free way: %llu bindings on a copy of their chunk, %llu copies made from the identity, %llu landed with words to combine (%llu words); "
                        "%llu shaders write one so (cumulative; gfx_vk_draw.inc ofw_bind, ofw.h, DM_VK_OFW)", (unsigned long long)g_ofw_chain, (unsigned long long)g_ofw_new,
                        (unsigned long long)atomic_load(&g_ofw_landed), (unsigned long long)atomic_load(&g_ofw_words), (unsigned long long)g_ofw_shaders);
+    if (g_wl_n[0] || g_wl_n[1] || g_wl_n[2] || g_wl_n[3] || g_wl_n[4] || g_wl_n[6] || g_wl_n[8]) LOG("[vk] copies holding their range's bytes, written in place: draws' writes on the chunk's copy %llu, order-free writes on such a copy %llu, order-free copies "
+                       "from guest memory %llu / made on the GPU %llu, draws' copies made on the GPU %llu, barriers put in %llu; reads that waited (another kind of draw) %llu, needing a barrier "
+                       "after the pass began %llu; draws skipped (no copy to write) %llu (cumulative; gfx_vk_draw.inc wl_*, wb_live.h, DM_VK_LIVE)", (unsigned long long)g_wl_n[0],
+                       (unsigned long long)g_wl_n[1], (unsigned long long)g_wl_n[2], (unsigned long long)g_wl_n[3], (unsigned long long)g_wl_n[4], (unsigned long long)g_wl_n[5],
+                       (unsigned long long)g_wl_n[6], (unsigned long long)g_wl_n[7], (unsigned long long)g_wl_n[8]);
     LOG("[vk] constant and storage buffer copies: %llu reused, %llu made, %llu MB copied to the arena and %llu MB to the shadows (cumulative; gfx_vk_draw.inc ucopy); constant buffer bindings of the shaders loaded: %llu bounded by res.json, %llu by the SPIR-V scan, %llu read whole, %llu res.json extents below the scan's (gfx_vk_draw.inc cb_ext_pick)%s",
         (unsigned long long)g_ucopy_hit, (unsigned long long)g_ucopy_miss, (unsigned long long)(g_ucopy_bytes >> 20), (unsigned long long)(g_ucopy_shadow >> 20), (unsigned long long)g_cbx[0], (unsigned long long)g_cbx[2], (unsigned long long)g_cbx[3], (unsigned long long)g_cbx[1],
         ext_check() ? "; DM_VK_EXT_CHECK on" : "");

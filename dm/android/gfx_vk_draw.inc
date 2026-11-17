@@ -2624,7 +2624,7 @@ static void wb_promote(uintptr_t lo, uintptr_t hi) {
     int copy = 0; for (int k = 0; k < C->ncop; k++) if (C->cop[k].dst < hi && lo < C->cop[k].dst + C->cop[k].n) copy = 1;
     int n = g_fwd_nwb >= 0 && g_fwd_nwb <= C->nwb ? g_fwd_nwb : C->nwb;
     for (int i = n - 1; i >= 0; i--) { wb_t *w = &C->wb[i]; if (!wb_hits(w, lo, hi)) continue;   // the newest that writes into the range decides
-        if (w->ofw) return;   // an order-free write's copy is not the range's bytes (ofw_bind): the read waits for it to land
+        if (w->ofw && !w->og) return;   // an order-free write's copy from the identity is not the range's bytes (ofw_bind): the read waits for it to land (one from the bytes is forwardable already)
         if (wb_promote_ok(lo, hi, (uintptr_t)w->dst, w->row_bytes, w->rows, w->st, w->fwd, w->inpl, w->lin, w->ds_n != 0, copy)) { rp_end(); cb_barrier(); w->fwd = 1; C->nfwd++; g_wb_promote++; }
         return; }
 }
@@ -2681,14 +2681,126 @@ static int ofw_ok(const rb_sbuf *sb, int cs, uint64_t addr, uint64_t n) {   // c
     return sb->ofw && (sb->flags & 1) && !cs && addr && n && !(addr & 3) && !(n & 3) && n <= g_vk.props.limits.maxStorageBufferRange && !vk_safe() && ofw_on();
 }
 static uint64_t g_ofw_chain, g_ofw_new;   // bindings on a copy of the chunk; copies made
+// ---- Copies that hold their range's bytes, written in place by later draws (wb_live.h) ----
+// A draw that wrote a storage buffer some other way (Tears of the Kingdom's fragment shaders that store computed values into its 8 KB and 131,584-byte buffers, their
+// interlock removed), and a draw or dispatch reading what an order-free copy held, still submitted the chunk and waited for the GPU whenever the chunk (or one in flight) had
+// a write of the range pending: 18 waits a frame at #457's save on a Galaxy S25 Edge, most of them a chunk of one draw, the replay and the GPU taking turns. A pending copy
+// that holds the range's current bytes (wl_true: a draw's or a dispatch's copy of guest memory, landed against its snapshot) can take the later draw's write itself, as a
+// dispatch's in-place write does (buf_fwd), instead of a copy of its own:
+// - a draw writing the range: bound on the chunk's newest copy of it (wl_wplan 1) behind a full barrier when needed, or on a copy the GPU makes of a chunk in flight's newest
+//   (wl_wplan 2, wl_gpu_copy: a second copy is the snapshot it lands against, the bytes as of then, which guest memory holds only once that chunk lands);
+// - an order-free write (ofw_bind): on such a copy too; and its new copy starts from the range's bytes (og: from guest memory when nothing is pending, or on the GPU from a
+//   chunk in flight's newest copy) instead of the identity, so it lands as a plain copy does and later shaders read it on the GPU (forwardable) instead of waiting.
+// Draws in a render pass have no barrier between them, so what draws did to such a copy since the last full barrier is kept (wb_live.h wl_st, the epoch g_ep that
+// cb_barrier counts): a draw reading after another's write, or writing after another's read or write, ends the pass and puts a full barrier first (wl_barrier), except
+// order-free writes of the same kind among themselves. A draw's accesses are noted once its pass has begun (wl_apply: a barrier recorded before it, such as the one closing a
+// run of dispatches, comes first), and a dispatch needs no notes: it begins behind a full barrier, and the one after it comes before the next command of another kind.
+// Only the replay's plain draws keep notes (g_wl_draw); another draw reading such a copy waits for it (wl_read), and other write-backs (buffer images, transform feedback,
+// a copy another kind of draw read) keep the old rules (wlok). DM_VK_LIVE=0 (env.txt): each such write takes a copy of its own and waits, and order-free copies start from the identity, as before
+static int wl_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_LIVE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_LIVE=0: draws' storage buffer writes take copies of their own and wait for pending ones, order-free copies start from the identity"); } return v; }
+static int g_wl_draw, g_wl_late; static uint32_t g_did = 1;   // a plain draw is made (vk_draw_); its pass has begun (wl_apply); the draw or dispatch being made
+static uint64_t g_wl_n[9];   // draws' writes on the chunk's copy, order-free writes on a copy holding the bytes, order-free copies from guest memory / from the GPU, draws' copies
+                             // made on the GPU, barriers put in, reads that waited (not a plain draw), reads that needed a barrier once the pass had begun, writes left to wait
+enum { WL_PEND = 1024 };
+static struct { uint64_t seq; int i; uint64_t kind; } g_wl_pend[WL_PEND]; static int g_wl_npend;   // the draw's accesses, noted once its pass has begun (wl_apply)
+static void wl_barrier(void) { rp_end(); cb_barrier(); g_wl_n[5]++; }
+static int wl_later(int i, uint64_t kind) {   // 0: no room to note it (the caller takes the old path)
+    if (g_wl_late) { wl_mark(&C->wb[i].wl, g_ep, g_did, kind); return 1; }
+    if (g_wl_npend == WL_PEND) return 0;
+    g_wl_pend[g_wl_npend].seq = C->seq; g_wl_pend[g_wl_npend].i = i; g_wl_pend[g_wl_npend++].kind = kind; return 1;
+}
+static void wl_apply(void) {   // the draw's pass has begun: its accesses run at this epoch
+    for (int k = 0; k < g_wl_npend; k++) if (C && g_wl_pend[k].seq == C->seq && g_wl_pend[k].i < C->nwb) wl_mark(&C->wb[g_wl_pend[k].i].wl, g_ep, g_did, g_wl_pend[k].kind);
+    g_wl_npend = 0; g_wl_late = 1;
+}
+static int wl_tb(const wb_t *w) { return w->wlok && wl_true(w->st, w->rows, w->inpl, w->lin, w->ds_n != 0, w->rbx, w->vd, w->ofw, w->og, w->snap != NULL); }
+static int wl_cop(uintptr_t lo, uintptr_t hi) { for (int k = 0; k < C->ncop; k++) if (C->cop[k].dst < hi && lo < C->cop[k].dst + C->cop[k].n) return 1; return 0; }
+// A draw's GPU read of the chunk's write-back i (fwd_hit): behind a barrier when another draw wrote it in place in this epoch, noted for the writes after it. 0: it waits
+static int wl_read(int i) {
+    wb_t *w = &C->wb[i];
+    if (!w->wlok) return 1;   // (never written in place: read as before)
+    if (!g_wl_draw) { if (w->og || w->wl.wep || w->wl.rep) { g_wl_n[6]++; return 0; } w->wlok = 0; return 1; }
+    if (wl_need(&w->wl, g_ep, g_did, WL_READ)) { if (g_wl_late) g_wl_n[7]++; else wl_barrier(); }
+    return wl_later(i, WL_READ);
+}
+// The newest copy of [lo, hi) in a chunk in flight, when nothing of the chunk being recorded writes into the range and that copy is forwardable and holds the range whole
+// (fwd_find's walk; that chunk is held until this one completes)
+static int wl_fly_find(uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o) {
+    if (!C || chunk_hits(C, lo, hi, 0) || (!atomic_load(&g_inflight_wb) && !atomic_load(&g_inflight_cop))) return 0;
+    int r = 0; pthread_mutex_lock(&g_cmu);
+    for (int f = g_fifo_n - 1; f >= 0; f--) { chunk *w = g_fifo[f]; if (fwd_hit(w, w->nwb, lo, hi, b, o, &r)) { if (r && w->hold < C->seq) w->hold = C->seq; break; } }
+    pthread_mutex_unlock(&g_cmu);
+    return r;
+}
+// [addr, addr + n) copied on the GPU from (fb, fo) into the chunk's arena, and again as the snapshot it lands against; an order-free write's (ofw) or a draw's plain write
+static int wl_gpu_copy(uint64_t addr, size_t n, VkBuffer fb, VkDeviceSize fo, uint32_t ofw, uint32_t ofk, uint64_t kind, VkBuffer *b, VkDeviceSize *ao) {
+    size_t rn = (n + 15) & ~(size_t)15; VkBuffer sb_; VkDeviceSize so;
+    if (!ar_alloc(rn, b, ao)) return 0;
+    int blk = C->ar_last; uint8_t *snap = ar_alloc(rn, &sb_, &so); if (!snap) return 0;
+    VkCommandBuffer c = cb(); if (!c) return 0;
+    VkBufferCopy r[2] = {{fo, *ao, n}, {fo, so, n}}; vkCmdCopyBuffer(c, fb, *b, 1, &r[0]); vkCmdCopyBuffer(c, fb, sb_, 1, &r[1]); cb_barrier();
+    wb_t *w = wb_add(); if (!w) return 0;
+    *w = (wb_t){-1 - blk, (size_t)*ao, n, 1, n, n, (uint8_t *)(uintptr_t)addr, snap}; w->gsnap = 1; w->ofw = ofw; w->ofk = ofk; w->og = ofw != 0; w->fwd = 1; C->nfwd++;
+    w->wlok = wl_later(C->nwb - 1, kind);   // (room is kept for it: wl_wplan, ofw_bind)
+    g_wl_n[ofw ? 3 : 4]++; return 1;
+}
+// A plain draw's storage buffer write of [addr, addr + n), not order-free: 1 on the chunk's newest copy of the range (*ix), 2 on a copy the GPU makes of a chunk in flight's,
+// 0 neither (it waits for what is pending)
+static int wl_wplan(uint64_t addr, uint64_t n, int *ix) {
+    if (!wl_on() || !g_wl_draw || !C || vk_safe() || !addr || !n || g_wl_npend > WL_PEND - 64) return 0;
+    uintptr_t lo = (uintptr_t)addr, hi = lo + (uintptr_t)n;
+    if (wl_cop(lo, hi)) return 0;
+    int nw = g_fwd_nwb >= 0 && g_fwd_nwb <= C->nwb ? g_fwd_nwb : C->nwb;
+    for (int i = nw - 1; i >= 0; i--) { const wb_t *w = &C->wb[i]; if (!wb_hits(w, lo, hi)) continue;
+        if (wl_tb(w) && wl_covers(lo, hi, (uintptr_t)w->dst, w->row_bytes, w->off, g_vk.props.limits.minStorageBufferOffsetAlignment)) { *ix = i; return 1; }
+        return 0; }
+    VkBuffer fb; VkDeviceSize fo; return wl_fly_find(lo, hi, &fb, &fo) ? 2 : 0;
+}
+enum { WL_PROM = 64 };
+static struct { uint64_t a, n; } g_wl_prom[WL_PROM]; static int g_wl_nprom;   // the draw's writes draw_view made no sync for (wl_wcheck)
+static int wl_wcheck(uint64_t addr, uint64_t n) {   // draw_view: the barrier first when the write goes on the chunk's copy
+    if (g_wl_nprom == WL_PROM) return 0;
+    int ix = -1, p = wl_wplan(addr, n, &ix);
+    if (p == 1 && wl_need(&C->wb[ix].wl, g_ep, g_did, WL_PLAIN)) wl_barrier();
+    if (p) { g_wl_prom[g_wl_nprom].a = addr; g_wl_prom[g_wl_nprom++].n = n; }
+    return p != 0;
+}
+static int wl_promised(uint64_t addr, uint64_t n) { for (int k = 0; k < g_wl_nprom; k++) if (g_wl_prom[k].a == addr && g_wl_prom[k].n == n) return 1; return 0; }
+static int wl_wbind(uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *ao) {   // stage_set: the write bound as wl_wplan says; 0: not (the caller copies the range)
+    int ix = -1, p = wl_wplan(addr, n, &ix);
+    if (p == 1) { if (wl_need(&C->wb[ix].wl, g_ep, g_did, WL_PLAIN)) wl_barrier();
+        if (!wl_later(ix, WL_PLAIN)) return 0;
+        wb_t *w = &C->wb[ix]; *b = C->ar[-1 - w->st].b; *ao = (VkDeviceSize)w->off + (VkDeviceSize)(addr - (uintptr_t)w->dst); if (!w->fwd) { w->fwd = 1; C->nfwd++; }
+        g_wl_n[0]++; return 1; }
+    if (p == 2) { VkBuffer fb; VkDeviceSize fo; uintptr_t lo = (uintptr_t)addr; if (wl_fly_find(lo, lo + n, &fb, &fo)) return wl_gpu_copy(addr, n, fb, fo, 0, 0, WL_PLAIN, b, ao); }
+    return 0;
+}
 static int ofw_bind(const rb_sbuf *sb, uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *ao) {
     if (!cur()) return 0;
     uintptr_t lo = (uintptr_t)addr, hi = lo + n; VkDeviceSize al = g_vk.props.limits.minStorageBufferOffsetAlignment;
-    for (int i = C->nwb - 1; i >= 0; i--) { const wb_t *w = &C->wb[i]; if (!wb_hits(w, lo, hi)) continue;
-        if (w->ofw == sb->ofw && w->ofk == sb->ofk && w->st < 0 && w->rows == 1 && lo >= (uintptr_t)w->dst && hi <= (uintptr_t)w->dst + w->row_bytes) {
-            VkDeviceSize o = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst);
-            if (!al || o % al == 0) { *b = C->ar[-1 - w->st].b; *ao = o; g_ofw_chain++; return 1; } }
+    int live = wl_on() && g_wl_draw && g_wl_npend <= WL_PEND - 64; uint64_t kind = wl_ofw_kind(sb->ofw, sb->ofk);
+    for (int i = C->nwb - 1; i >= 0; i--) { wb_t *w = &C->wb[i]; if (!wb_hits(w, lo, hi)) continue;
+        if (w->ofw && !w->og) {
+            if (w->ofw == sb->ofw && w->ofk == sb->ofk && w->st < 0 && w->rows == 1 && lo >= (uintptr_t)w->dst && hi <= (uintptr_t)w->dst + w->row_bytes) {
+                VkDeviceSize o = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst);
+                if (!al || o % al == 0) { *b = C->ar[-1 - w->st].b; *ao = o; g_ofw_chain++; return 1; } } }
+        else if (live && wl_tb(w) && !wl_cop(lo, hi) && wl_covers(lo, hi, (uintptr_t)w->dst, w->row_bytes, w->off, al)) {   // a copy holding the bytes: written in place
+            if (wl_need(&w->wl, g_ep, g_did, kind)) wl_barrier();
+            if (wl_later(i, kind)) { w = &C->wb[i]; *b = C->ar[-1 - w->st].b; *ao = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst); if (!w->fwd) { w->fwd = 1; C->nfwd++; }
+                g_wl_n[1]++; g_ofw_chain++; return 1; } }
         break; }
+    if (live && !wl_cop(lo, hi)) {   // a new copy from the range's bytes: guest memory's when nothing is pending, else a chunk in flight's newest copy on the GPU
+        VkBuffer fb; VkDeviceSize fo;
+        if (!wr_pending(lo, hi)) {
+            uint8_t *d = ar_alloc((n + 15) & ~(size_t)15, b, ao), *snap = d ? malloc(n) : NULL;
+            if (snap) { int blk = C->ar_last; memcpy(snap, (const void *)lo, n); memcpy(d, snap, n);
+                wb_t *w = wb_add(); if (!w) { free(snap); return 0; }
+                *w = (wb_t){-1 - blk, (size_t)*ao, n, 1, n, n, (uint8_t *)lo, snap}; w->ofw = sb->ofw; w->ofk = sb->ofk; w->og = 1; w->fwd = 1; C->nfwd++;
+                w->wlok = wl_later(C->nwb - 1, kind);
+                g_wl_n[2]++; g_ofw_new++; return 1; }
+            if (!d) return 0;
+        } else if (wl_fly_find(lo, hi, &fb, &fo)) { if (!wl_gpu_copy(addr, n, fb, fo, sb->ofw, sb->ofk, kind, b, ao)) return 0; g_ofw_new++; return 1; }
+    }
     uint32_t *d = (uint32_t *)(void *)ar_alloc((n + 15) & ~(size_t)15, b, ao); if (!d) return 0;
     uint32_t id = ofw_identity(sb->ofw, sb->ofk); for (size_t q = 0; q < n / 4; q++) d[q] = id;
     wb_t *w = wb_add(); if (!w) return 0;
@@ -3129,10 +3241,14 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             bi[nbi] = (VkDescriptorBufferInfo){b, ao, ipr}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)sb->binding, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL};
             continue; }
         else if (u && u->addr && ofw_ok(sb, g_rd_cs, u->addr, n)) { if (!ofw_bind(sb, u->addr, n, &b, &ao)) return 0; }   // written in an order-free way: on its chunk's copy, or a new one that starts as the identity (draw_view made no sync for it: never a copy of guest memory)
+        else if (u && u->addr && wr_ && !disp_like(s) && g_wl_draw && wl_wbind(u->addr, n, &b, &ao)) {}   // a draw's write on a copy holding the range's bytes (wl_wplan: draw_view made no sync for it)
+        else if (u && u->addr && wr_ && !disp_like(s) && g_wl_draw && wl_promised(u->addr, n) && wr_pending((uintptr_t)u->addr, (uintptr_t)(u->addr + n))) {   // (draw_view counted on a copy that is gone: never a copy of stale bytes)
+            g_wl_n[8]++; RED_ONCE(199, "draw of shader %s: its storage buffer write at %#llx (%zu bytes) found neither a copy to write nor its pending writes landed: skipped", s->key, (unsigned long long)u->addr, n); return 0; }
         else if (u && u->addr) { uint8_t *d = ar_alloc((n + 15) & ~(size_t)15, &b, &ao); if (!d) return 0; memcpy(d, (const void *)(uintptr_t)u->addr, n);
             if (sb->flags & 1) {   // written by the shader: what it changed is copied back when the chunk completes
                 wb_t *w = wb_add(); uint8_t *snap = malloc(n); if (snap) memcpy(snap, (const void *)(uintptr_t)u->addr, n);   // from guest memory, as d was: the arena may be write-combined (ar_mem_type)
-                if (w) { *w = (wb_t){-1 - C->ar_last, (size_t)ao, n, 1, n, n, (uint8_t *)(uintptr_t)u->addr, snap}; w->fwd = disp_like(s); w->vd = g_vdisp; if (w->fwd) C->nfwd++; } } }
+                if (w) { *w = (wb_t){-1 - C->ar_last, (size_t)ao, n, 1, n, n, (uint8_t *)(uintptr_t)u->addr, snap}; w->fwd = disp_like(s); w->vd = g_vdisp; if (w->fwd) C->nfwd++;
+                         w->wlok = w->fwd || (g_wl_draw && wl_later(C->nwb - 1, WL_PLAIN)); } } }   // later draws may write it in place: a dispatch's, or a plain draw's noted as written (wb_live.h)
         else if (!ucopy(NULL, 16, 16, &b, &ao)) return 0;
         bi[nbi] = (VkDescriptorBufferInfo){b, ao, (n + 15) & ~(size_t)15}; wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)sb->binding, 0, 1, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, NULL, &bi[nbi++], NULL};
     }
@@ -3266,6 +3382,7 @@ static int fwd_hit(chunk *c, int nwb, uintptr_t lo, uintptr_t hi, VkBuffer *b, V
     for (int i = nwb - 1; i >= 0; i--) { const wb_t *w = &c->wb[i]; if (!wb_hits(w, lo, hi)) continue;
         int ipr = !w->fwd && w->inpl && g_rd_cs && ip_read_on();   // a draw's in-place write, read by a dispatch
         *res = (w->fwd || ipr) && (w->st < 0 || w->inpl) && w->rows == 1 && lo >= (uintptr_t)w->dst && hi <= (uintptr_t)w->dst + w->row_bytes;   // (in place: read where it was written)
+        if (*res && c == C && !g_rd_cs && wl_on() && !wl_read(i)) *res = 0;   // a draw's read of the chunk's copy: behind a barrier when draws wrote it in place (wl_read), or it waits
         if (*res) { *b = w->inpl ? w->ipb : c->ar[-1 - w->st].b; *o = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst); if (ipr) g_ip_read++; }
         else if (w->vd && w->rows == 1) {   // a discarded draw's write that the read is not inside: the two as one home range (rd_home.h)
             uintptr_t wl = (uintptr_t)w->dst, wh = wl + w->row_bytes, hl = lo < wl ? lo : wl, hh = hi > wh ? hi : wh;
@@ -3549,7 +3666,7 @@ static int ind_read(uint64_t addr, void *out, size_t n) {   // indirect argument
     if (!addr || !mtl_addr(addr, n, NULL, NULL)) { RED_ONCE(105, "indirect arguments at %#llx are in no memory pool: the draw is skipped", (unsigned long long)addr); return 0; }
     memcpy(out, (const void *)(uintptr_t)addr, n); return 1;
 }
-static int vk_draw__(const p_draw *dw, const p_draw_idx *di) { int r = vk_draw_(dw, di); rd_close(); g_vdisp = 0; g_vr0 = g_vr1 = 0; g_drawing = 0; g_fwd_nwb = -1; g_c1d_on = 0; tc_clear(); return r; }
+static int vk_draw__(const p_draw *dw, const p_draw_idx *di) { int r = vk_draw_(dw, di); rd_close(); g_vdisp = 0; g_vr0 = g_vr1 = 0; g_drawing = 0; g_fwd_nwb = -1; g_c1d_on = 0; tc_clear(); g_wl_draw = g_wl_late = g_wl_npend = 0; return r; }
 // DM_VK_TBUF_RANGE=0 (env.txt): a shader with a buffer texture or image syncs its draw on anything pending, as before draw_view looked their memory up (the A/B of that alone)
 static int tbuf_range_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TBUF_RANGE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_TBUF_RANGE=0: a buffer texture or image syncs on anything pending"); } return v; }
 // DM_VK_DEP_LOG=<n> (env.txt; a diagnostic): one in every n reads that met a pending write-back is logged, the whole run long, instead of the first 40
@@ -3568,6 +3685,7 @@ static void dep_log(vshader *const sh[4], const rd_rng *r, const char *kd, const
 // A buffer texture's memory is the texture pool entry its handle names, looked up as stage_set's tbuf_view does. Synced on anything pending instead (cpu_view), it made every
 // such draw after one GPU write-back a round trip: Final Fantasy Resonance's opening reads buffer textures in most draws, ~100 syncs a frame, 15.5 fps on the Odin 2 and 10 on the Pad 3
 static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   // vtx: the vertex streams too (a draw; 0 for a dispatch)
+    g_did++;   // (wb_live.h: the accesses of one draw or dispatch)
     if (vk_safe()) { g_fwd_nwb = 0; cpu_view(); return; }
     if (!C && fwd_open_on()) cur();   // the chunk the draw is recorded in, before the lookups of pending writes in the chunks in flight (fwd_open_on)
     if (gm_view(sh)) { g_fwd_nwb = 0; return; }   // raw global memory reads anything at the GPU's time: with DM_VK_RAW_GMEM_SYNC=1 every pending write-back landed (gfx_vk_gmem.inc)
@@ -3577,7 +3695,7 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
         if (w_ && g_vdisp && (f) == sb_fwd && rd_home_on()) { uintptr_t hl_ = 0, hh_ = 0; if ((a) && (s)) rd_home_find(&g_rd_homes, (uintptr_t)(a), (uintptr_t)((a) + (s)), &hl_, &hh_); \
             if (hh_ > hl_ && !fwd_find(hl_, hh_, &fb_, &fo_)) RNG(hl_, hh_ - hl_); break; }   /* a discarded draw's write: its home range, found whole on the GPU or landed (rd_bind_w) */ \
         if (!w_ && (a) && (s)) wb_promote((uintptr_t)(a), (uintptr_t)((a) + (s)));   /* a draw's write it reads whole: on the GPU after a barrier */ \
-        if ((w_ && !cs) || !f((a), (s), w_, &fb_, &fo_)) RNG(a, s); } while (0)
+        if ((w_ && !cs) ? !((f) == sb_fwd && wl_wcheck((a), (s))) : !f((a), (s), w_, &fb_, &fo_)) RNG(a, s); } while (0)   /* a draw's storage buffer write: on a copy holding the bytes (wl_wplan), or it waits */
     g_fwd_nwb = C ? C->nwb : 0;   // cs: a dispatch (its stage alone), a draw run as one (g_vdisp), or a task / mesh draw in compute form, whose kernels are dispatches behind full barriers (gfx_vk_meshemu.inc)
     const int cs = (sh[0] && (sh[0]->stage == SH_CS || ((sh[0]->stage == SH_MS || sh[0]->stage == SH_TK) && !g_mesh))) || g_vdisp;
     g_rd_cs = cs;
@@ -3822,6 +3940,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     else if (!D.rast_discard && !g_vk_feat.vertexPipelineStoresAndAtomics && (rd_writes(k.sh[0]) || rd_writes(k.sh[2])) && !g_vsw_rast++)
         LOG("[RED] [vk] a rasterized draw writes memory from its vertex stage (shader %s), which this GPU has no vertex-stage storage writes for: drawn as it is, its writes may be lost (said once; counted on the draws not made line)", k.sh[0]->key);
     if (dw) { g_vr0 = dw->first; g_vr1 = (int64_t)dw->first + dw->count; }   // the vertices it fetches (stream_rng)
+    g_wl_draw = wl_on() && !D.rast_discard && !D.tf_on; g_wl_npend = 0; g_wl_late = 0; g_wl_nprom = 0;   // a plain draw keeps notes of its accesses to copies others write in place (wb_live.h)
     draw_view(k.sh, di, 1);   // what this draw reads of guest memory: pending GPU writes to it land first
     if (D.rast_discard && !rd) return tf_capture(k.sh[0], pprog[0], pst[0], dw, di);   // the vertex stage only: a capture, or nothing
     for (int i = 0; i < 4; i++) if (k.sh[i]) stage_textures(k.sh[i]);
@@ -3848,6 +3967,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     }
     if (g_bind_bad) { g_drop[4]++; static int nb; if (nb < 10) { nb++; LOG("[RED] [vk] draw skipped: a binding has no valid descriptor (shaders %s %s)", k.sh[0]->key, k.sh[1] ? k.sh[1]->key : "-"); } return 0; }
     if (rd ? !rd_open(rd == 2) : !rp_start()) { g_drop[5]++; return 0; }   // after the textures: their uploads end a pass begun before (it is begun again on the same targets); it only takes cur(), so the sets' chunk is the one they are bound in below
+    if (g_wl_draw) wl_apply();   // its accesses noted at the epoch it runs in
     VkCommandBuffer c = C->cb;
     if (!rd) occl_begin();
     else if (!g_rd_made++) LOG("[vk] rasterizer discard: a draw whose vertex stage writes memory runs as a dispatch, in a pass of its own%s (vertex %s, %u %s; DM_VK_RAST_DISCARD=0 leaves it out)", rd == 2 ? ", its vertex shader as a fragment shader over points" : "", k.sh[0]->key, dw ? (unsigned)dw->count : (unsigned)di->count, dw ? "vertices" : "indices");
