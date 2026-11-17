@@ -597,7 +597,9 @@ static int frame_draw(void) {
 // ---------- Input ----------
 // The touch controls (Gamepad.java) and a physical controller (the native input queue) are merged as dm/ios's DmGamepad.m does: buttons ORed, a tilted physical stick wins
 static int g_ctl_used;
-static uint64_t g_pad_btn, g_hat; static int32_t g_axis[4];   // g_hat: the directions a hat holds (they come as axes, not as keys)
+static uint64_t g_pad_btn, g_hat; static int32_t g_axis[4];   // g_hat: the buttons a controller sends as axes, not as keys: the directions a hat holds and
+// analog triggers past half. A key event's pad state includes them (droidplay-core#527): it used to send the keys alone, so on a controller whose D-pad is a hat
+// (the AYN Thor's) the repeats Android sends for a held A or B told the game the D-pad was let go, and a held hat sends nothing to say otherwise
 static pthread_mutex_t g_in_mu = PTHREAD_MUTEX_INITIALIZER; static uint64_t g_touch_btn, g_shake_btn, g_pad_now; static int32_t g_touch_ax[4];
 static int tilted(int32_t x, int32_t y) { return (int64_t)x * x + (int64_t)y * y > (int64_t)4000 * 4000; }
 // The pause menu (Gamepad.java draws it and owns its rows; the ≡ button or a controller's Mode / Menu key opens it). While it is open the game is held as a suspended
@@ -739,7 +741,7 @@ static int32_t on_input(struct android_app *app, AInputEvent *ev) {
         if (!b && code == AKEYCODE_BACK && (src & AINPUT_SOURCE_GAMEPAD) == AINPUT_SOURCE_GAMEPAD) b = DM_BTN_B;
         if (!b) return 0;
         if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_DOWN) g_pad_btn |= b; else if (AKeyEvent_getAction(ev) == AKEY_EVENT_ACTION_UP) g_pad_btn &= ~b;
-        g_ctl_used = 1; pad_now(g_pad_btn); menu_nav(g_pad_btn | g_hat); return 1;
+        g_ctl_used = 1; pad_now(g_pad_btn | g_hat); menu_nav(g_pad_btn | g_hat); return 1;
     }
     if (AInputEvent_getType(ev) != AINPUT_EVENT_TYPE_MOTION) return 0;
     if (src & AINPUT_SOURCE_JOYSTICK) {
@@ -749,14 +751,14 @@ static int32_t on_input(struct android_app *app, AInputEvent *ev) {
         if (!ax(zx) && !ax(zy)) { zx = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_RX, 0); zy = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_RY, 0); }
         g_axis[2] = ax(zx); g_axis[3] = -ax(zy);
         float hx = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_HAT_X, 0), hy = AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_HAT_Y, 0);
-        uint64_t b = g_pad_btn & ~(uint64_t)(DM_BTN_LEFT | DM_BTN_RIGHT | DM_BTN_UP | DM_BTN_DOWN);
+        uint64_t b = g_pad_btn;   // a D-pad that sends keys stays held while a stick moves (its directions are in g_pad_btn); a hat's are added below
         if (hx < -0.5f) b |= DM_BTN_LEFT; if (hx > 0.5f) b |= DM_BTN_RIGHT; if (hy < -0.5f) b |= DM_BTN_UP; if (hy > 0.5f) b |= DM_BTN_DOWN;
-        g_hat = b & ~g_pad_btn;
         // analog triggers on LTRIGGER / RTRIGGER, or BRAKE / GAS (Xbox controllers over Bluetooth, among others)
         float lt = fmaxf(AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_LTRIGGER, 0), AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_BRAKE, 0));
         float rt = fmaxf(AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_RTRIGGER, 0), AMotionEvent_getAxisValue(ev, AMOTION_EVENT_AXIS_GAS, 0));
         if (lt > 0.5f) b |= DM_BTN_ZL; else if (!(g_pad_btn & DM_BTN_ZL)) b &= ~(uint64_t)DM_BTN_ZL;
         if (rt > 0.5f) b |= DM_BTN_ZR; else if (!(g_pad_btn & DM_BTN_ZR)) b &= ~(uint64_t)DM_BTN_ZR;
+        g_hat = b & ~g_pad_btn;   // the hat's directions and the analog triggers, which the next key event's state keeps
         g_ctl_used = 1; pad_now(b); menu_nav(b); return 1;
     }
     if (src & AINPUT_SOURCE_TOUCHSCREEN) {   // the touch points as fractions of the window (the 16:9 picture once it is drawn)
