@@ -487,5 +487,41 @@ class RunTimeShaders(unittest.TestCase):
         self.assertIn({'ev': 'run_time_shaders', 'title_id': self.PROV, 'name': 'Crash', 'game_app': False}, [{k: v for k, v in e.items() if k != 't'} for e in evs])
 
 
+
+class OodleCacheStamp(unittest.TestCase):
+    """A split produced before DM_OODLE_CACHE was complete records unreadable files in pkg.key and re-splits when the cache changes; complete splits write the stamp without deleting."""
+    def setUp(self):
+        self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp, True)
+        self.work = self.tmp / 'work'; self.logs = self.work / 'logs'; self.logs.mkdir(parents=True)
+        self.cache = self.tmp / 'oodle_cache'; self.cache.mkdir()
+        (self.cache / '1.idx').write_text('abc\t10\t0\n')
+        self.provisional = Profile(self.tmp / 'profile' / GID)
+        for p in (mock.patch.object(ba.bi, 'run', side_effect=lambda cmd, log, **k: (self.work / 'spv').mkdir(exist_ok=True)),
+                  mock.patch.object(ba.bi, 'PROG', mock.MagicMock()),
+                  mock.patch.object(ba.bi.rfs, 'source', side_effect=lambda p: p),
+                  mock.patch.object(ba, 'say')):
+            p.start(); self.addCleanup(p.stop)
+
+    def run_build(self):
+        with mock.patch.object(ba.bi, 'split_shaders') as sp:
+            ba.build_shaders(['v0'], {'v0': self.tmp / 'v0'}, self.work, self.logs, {'DM_OODLE_CACHE': str(self.cache)}, self.provisional)
+        return sp
+
+    def test_re_splits_when_existing_split_had_unreadable_files(self):
+        sh = self.work / 'shader'; (sh / 'pkg').mkdir(parents=True); (sh / 'pkg.key').write_text('deadbeef\n32 shaders, 44409 file(s) unreadable\n')
+        spv = self.work / 'spv'; spv.mkdir(); (spv / 'old.spv').write_bytes(b'old')
+        sp = self.run_build()
+        sp.assert_called_once()
+        self.assertFalse((spv / 'old.spv').exists())
+        self.assertTrue((sh / 'oodle_cache.stamp').is_file())
+
+    def test_keeps_complete_split_and_writes_stamp_without_deleting(self):
+        sh = self.work / 'shader'; (sh / 'pkg').mkdir(parents=True); (sh / 'pkg.key').write_text('deadbeef\n10,792 shaders\n')
+        spv = self.work / 'spv'; spv.mkdir(); (spv / 'keep.spv').write_bytes(b'keep')
+        self.run_build()
+        self.assertTrue((spv / 'keep.spv').exists())
+        self.assertTrue((sh / 'oodle_cache.stamp').is_file())
+
+
 if __name__ == '__main__':
     unittest.main()
