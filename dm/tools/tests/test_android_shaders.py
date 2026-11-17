@@ -438,7 +438,7 @@ class RunTimeShaders(unittest.TestCase):
     def test_what_each_kind_of_profile_is_told(self):
         prov = ba.run_time_note(True, 'Crash', self.PROV, True, None, '', 0)
         self.assertIn('[RED] Crash compiles some of its shaders while it runs, so its first install may draw some things black. Play it to its first scene', prov)
-        self.assertIn('--update-shaders (DroidPlay for Windows: Manage › Update shaders from the phone)', prov)
+        self.assertIn('--update-shaders (DroidPlay for Windows and Linux: Manage › Update shaders from the phone)', prov)
         app = ba.run_time_note(True, 'Crash', self.PROV, True, None, '', 0, game_app=True)
         self.assertIn('a game app built now may draw some things black', app); self.assertIn('then build the game app again', app)
         why = f'v393216 is not a version game profile {self.TID} registers'

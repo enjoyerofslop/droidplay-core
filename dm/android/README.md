@@ -362,7 +362,7 @@ driver the player put beside `env.txt` (a Turnip build, as for Switch emulators,
   `failed_shaders=` (the first 4 distinct shader sets: vertex+fragment keys, or the compute shader's), `device_lost=` and `time=`. The front end removes the last start's when the game's
   folder is known; the host writes it when the device is made, within 2 s of a change (`vk_start_tick`, from the front end's loop, not under the replay's lock), and at
   once when the GPU is lost. A refused pipeline drops its draws: Frostpunk's Generator on a Razr's Adreno 730 (54 pipelines on the way into its city, where the log
-  names only the first 16 of each kind), Ocarina of Time's characters on an Odin 2's 740. DroidPlay for Windows reads the record to suggest a driver its catalog marks tested for that game on that GPU; it never switches one on by itself.
+  names only the first 16 of each kind), Ocarina of Time's characters on an Odin 2's 740. DroidPlay for Windows and Linux reads the record to suggest a driver its catalog marks tested for that game on that GPU; it never switches one on by itself.
 - `DM_VK_DRIVER` is opened only on a GPU another driver can run on, told by its kernel GPU driver: an Adreno (`/dev/kgsl-3d0`, Qualcomm's KGSL, which Turnip drives)
   or a Samsung Xclipse (a DRM render node whose driver name is `amdgpu`, as RADV tells its GPU: Samsung's sgpu, AMD's amdgpu adapted). libadrenotools' custom-driver
   load is the same for any vendor: the hook swaps the file the system's loader opens as `vulkan.<ro.hardware.vulkan>.so` (`vulkan.samsung.so` on an Xclipse,

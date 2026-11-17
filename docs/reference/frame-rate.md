@@ -146,6 +146,22 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
 - **Fix:** the profile key `gpu_timestamps segment` makes each report take the GPU start (`TIMESTAMP_TOP`) or end (other types) of the `sub_cut` segment ([Submissions handed to the GPU in segments](#submissions-handed-to-the-gpu-in-segments)) it was encoded in (`rep_ticks` in `nvn_mtl.m`: MTL4CommitFeedback times converted to the guest clock, written in the last segment's handler as before). A boundary's time is its age on the GPU clock taken back from Metal's paired CPU sample projected onto the guest clock (`guest_ns_at_host_time`), not from a later guest clock read, so a delay after the sample does not enter the report (`t_counter_clock`). `DM_NVN_GPU_TS=submission` gives the old timestamps.
 - **Found on:** [The Legend of Zelda: Breath of the Wild](../../dm/games/01007EF00011E000/README.md) (legacy frame-step method): BotW's frame has 5 reports in one submission (`main+0xe94584`, `main+0xe94664`); with two more cuts the controller always takes the GPU path, and the GPU time now reads the frame's GPU span, gaps where the GPU waits for the host's translation included. Measured on the Mac with two BotW runs sharing the GPU under a heavy CPU load (load average about 75, a shader rebuild running): GPU time p50 16–23 ms; the fixed run stayed at interval 2 (3 while the GPU time passed 1.9 vsyncs, 1 for under 2% of the frames) at 0.93–0.98 of real time, while a run with `DM_NVN_GPU_TS=submission` spent 10–70% of its frames at interval 1 and ran at 0.78–0.95. The same GPU time drives the game's dynamic resolution.
 
+### A timestamp report before a submission's first chunk read late (Android)
+
+- **Symptom:** Android: a game that sizes its dynamic resolution by its frame's GPU time keeps a resolution its frames don't fit, misses its vsync about half the time, and turns every GPU saving into resolution rather than frame rate. Link's Awakening on a Retroid Pocket 5 drew its world at 1024×576 to 1152×648 and ran at 33–38 fps; a higher GPU clock or framebuffer compression raised the resolution and left the frame rate where it was.
+- **Cause:** Link's Awakening reports a timestamp before the first command of each frame's submission and another after its last draw, and takes the difference as its GPU time. The replay writes a timestamp report into the open chunk with `vkCmdWriteTimestamp`. The first report of a submission found no chunk open yet, so it went to the completion path (`mtl_sub_counter`), which writes the completion thread's clock when that chunk retires. The start therefore read after the first chunk had run: 64 draws of the shadow map, 1–2 ms on that GPU. The game took its frame for that much cheaper than it was.
+- **Fix:** such a report opens the submission's chunk and is written by the GPU like the others (`gfx_vk.c` `mtl_exec`, `OP_REPORT_COUNTER`). `DM_VK_TS_FIRST=0` keeps the completion's time, as before. The statistics line's `timestamp reports N (M of them opening a submission)` counts them.
+- **Found on:** [The Legend of Zelda: Link's Awakening](../../dm/games/01006BB00C6F0000/README.md), Tal Tal Mountain Range, on a Retroid Pocket 5 (Adreno 650; q365). Launches in turn, about a minute each:
+  - on: 45.2 and 52.4 fps, the world at 960×540 and 896×504;
+  - off: 37.9 and 35.6 fps, at 1024×576.
+  - Half of the game's timestamp reports open a submission (4,487 of 8,998).
+- **Checked on the other games on that phone** (q369, launches in turn with `DM_VK_TS_FIRST=0`; the count line and a diagnostic log of what each read):
+  - Super Mario Odyssey (`dl_metro`), Skyward Sword HD (`skyloft`) and Pokémon Shield (`postwick`) report a timestamp that opens a submission too.
+  - Odyssey: 36.4–37.6 fps against 36.7–37.4, GPU 13.8 ms both ways, the same draws and picture. Its opening report had read 2.7 ms after the GPU-written report that follows it, time running backwards; the two now read the same instant.
+  - Skyward Sword HD: the span it reads became a steady 3.6–3.8 ms instead of alternating 2.7 and 5.1. Its frame rate swings with its interval drop either way: 40.7–56.5 fps (mean 49.7, six runs) against 32.9–54.5 (mean 47.1, five), GPU 8.7–9.0 ms both ways, the same picture.
+  - Shield: 29.9 fps in every run, GPU 24.8 ms both ways, the same picture.
+  - Smash and Brilliant Diamond report no timestamps, so they are untouched.
+
 ### Raw NVN timestamp units
 
 - **Symptom:** GPU time reads 32 times too small when a game converts raw NVN counter timestamps itself.

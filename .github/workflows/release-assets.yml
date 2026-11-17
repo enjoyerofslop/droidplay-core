@@ -1,6 +1,6 @@
 # Adds DroidPlay for Windows' installers, DroidPlay for Linux's AppImage and DroidPlay Core's source to a release. DroidPlay-Setup-<version>.exe (with its .sha256) is
 # the one Windows players download: windows-package.yml builds and checks it from the release's tag. Install DroidPlay.cmd, the installer before it, stays for the players
-# who have it. DroidPlay-<version>-x86_64.AppImage (with its .sha256), in preview, is Linux's: linux-package.yml builds it from the release's tag and starts it on five
+# who have it. DroidPlay-<version>-x86_64.AppImage (with its .sha256) is Linux's: linux-package.yml builds it from the release's tag and starts it on five
 # distributions, and it goes up only once all of them passed, and only as a pair whose name, checksum and version inside are the release's, since DroidPlay for
 # Linux's Update takes it by that name with the digest GitHub lists for it (dm/android/desktop/update.py). Install DroidPlay.cmd downloads the source as droidplay-core-<version>.tar.xz
 # (about 55 MB) or .zip (about 90 MB) rather than the archive GitHub makes of the tag (about 130 MB): GitHub serves release assets from its download network,
@@ -95,7 +95,7 @@ jobs:
       version: ${{ github.event.release.tag_name || inputs.tag }}   # stage.sh drops the v
       ref: ${{ inputs.dry-run && github.sha || format('refs/tags/{0}', github.event.release.tag_name || inputs.tag) }}
 
-  # A job of its own, as Setup's is: a distribution that fails to start the AppImage (a preview) holds back the AppImage alone, never Windows' Setup
+  # A job of its own, as Setup's is: a distribution that fails to start the AppImage holds back the AppImage alone, never Windows' Setup
   linux-asset:
     name: AppImage on the release
     needs: linux   # every job of linux-package: the build and all five distributions
