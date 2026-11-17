@@ -760,3 +760,23 @@ if __name__ == '__main__':
             print('decoded:', ', '.join(finish(*sys.argv[2:4])))
         else: sys.exit(__doc__ or 'usage: uepak.py list | job | finish (see the header)')
     except ValueError as e: sys.exit(f'[RED] {e}')   # a damaged main (nso.Error), pak or archive
+
+
+def inline_needs_decoder(romfs, mains=()):
+    """Whether any inline-shader pak under romfs uses Oodle compression (which Python cannot decode locally)."""
+    keys = Keys(mains)
+    for p in unreal_paks(romfs, inline=True, mains=mains):
+        try:
+            with open(p, 'rb') as f: _, _, _, methods, ver = footer(f)
+        except (OSError, ValueError, struct.error): continue
+        if ver == 4:
+            try:
+                pk = Pak(p, keys(p) if mains else None)
+                if any('Oodle' in pk.entry(name)['method'] for name in pk.files): return True
+            except (OSError, ValueError, struct.error): pass
+        elif any('Oodle' in m for m in methods): return True
+        if inline_in_containers(p):
+            folder = os.path.dirname(os.path.abspath(p))
+            for t in io_tocs(folder):
+                if os.path.dirname(t.path) == folder and any('Oodle' in m for m in t.methods): return True
+    return False
