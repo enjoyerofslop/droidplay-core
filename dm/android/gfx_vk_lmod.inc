@@ -6,7 +6,7 @@
 // VK_PIPELINE_CREATE_FAIL_ON_PIPELINE_COMPILE_REQUIRED_BIT, which the driver's cache serves (2 ms) or answers VK_PIPELINE_COMPILE_REQUIRED (0.02 ms). Only then are
 // its modules made, from the files again through the same rewrites, and the pipeline compiled as before. The SPIR-V is not kept meanwhile (Brilliant Diamond's
 // modules are about 28 KB each). Without the extension, or with DM_VK_MODULE_ID=0 (env.txt), every module is made at once, as before
-typedef struct lmod { _Atomic(VkShaderModule) m; uint32_t miss, idn; int alpha, tff; uint64_t e5; const spv_bmap *bm; uint8_t id[VK_MAX_SHADER_MODULE_IDENTIFIER_SIZE_EXT]; char path[]; } lmod;   // miss: ps_variant's (0: the file as it is); alpha: spv_alpha.h's test added to the code; tff: the vertex shader wrapped for the fragment-stage capture (spv_tffrag.h)
+typedef struct lmod { _Atomic(VkShaderModule) m; uint32_t miss, idn; int alpha, tff; uint64_t e5; const spv_bmap *bm; uint8_t id[VK_MAX_SHADER_MODULE_IDENTIFIER_SIZE_EXT]; char path[]; } lmod;   // miss: ps_variant's (0: the file as it is); alpha: spv_alpha.h's test added to the code; tff: 1 the vertex shader wrapped for the fragment-stage capture (spv_tffrag.h), 2 the vertex shader made a fragment shader over points (spv_vsfrag.h)
 static _Atomic uint64_t g_lm_ids, g_lm_hit, g_lm_miss;   // modules known by their identifier; pipelines the driver's cache gave for identifiers; pipelines that needed modules after all
 static __thread int t_pool_info;   // what spv_pool did to the modules lm_code made since sh_get cleared it
 static __thread int t_harr_info;   // what spv_harr did to them (SPV_HARR_SHRUNK, SPV_HARR_FAIL), the same way
@@ -15,7 +15,16 @@ static __thread int t_harr_info;   // what spv_harr did to them (SPV_HARR_SHRUNK
 // making, which tells *b0, logs and dumps (made again for a pipeline, it says nothing new)
 static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, int tff, uint64_t e5, const spv_bmap *bm, int first, int *b0, size_t *onw) {
     size_t n = 0; uint32_t *code = spv_read(path, &n); if (!code) return NULL;
-    if (tff) {   // first, so the rewrites below see the wrapper as any other code
+    if (tff == 2) {   // the vertex shader as a fragment shader (spv_vsfrag.h), first, so the rewrites below see a fragment shader: spv_readonly, spv_fit_vsinit and spv_fit_precise leave it alone
+        size_t cap = n + 3 * 32 + 64, k = 0; uint32_t *o = malloc(cap * 4), *s = malloc(2 * (size_t)code[3] * 4); spv_vsf_io io;
+        if (o && s) k = spv_vsf_fs(code, n, s, o, cap, &io);
+        free(s); free(code);
+        if (!k) { free(o); if (first) LOG("[RED] [vk] %s: an input that is neither a vertex attribute nor a built-in a fragment shader can be handed, so its memory writes cannot run in the fragment stage", path); return NULL; }
+        code = o; n = k;
+        const char *d = getenv("DM_DUMP_DIR");   // for spirv-val
+        if (first && d) { char q[700]; mkdir(d, 0777); const char *b = strrchr(path, '/'); snprintf(q, sizeof q, "%s/vsf_%.16s.fs.spv", d, b ? b + 1 : path); FILE *f = fopen(q, "wb"); if (f) { fwrite(code, 4, n, f); fclose(f); } }
+    }
+    if (tff == 1) {   // first, so the rewrites below see the wrapper as any other code
         size_t cap = n + 400, k = 0; uint32_t *o = malloc(cap * 4);
         if (o) k = spv_tff_vs(code, n, o, cap);
         free(code);
@@ -91,6 +100,7 @@ static lmod *lm_new_x(const char *path, uint32_t miss, int alpha, int tff, uint6
 static lmod *lm_new_e(const char *path, uint32_t miss, int alpha, uint64_t e5, const spv_bmap *bm, int *b0) { return lm_new_x(path, miss, alpha, 0, e5, bm, b0); }
 static lmod *lm_new_a(const char *path, uint32_t miss, int alpha, const spv_bmap *bm, int *b0) { return lm_new_e(path, miss, alpha, 0, bm, b0); }
 static lmod *lm_new_t(const char *path, const spv_bmap *bm, int *b0) { return lm_new_x(path, 0, 0, 1, 0, bm, b0); }   // the vertex shader wrapped for the fragment-stage capture
+static lmod *lm_new_vsf(const char *path, const spv_bmap *bm, int *b0) { return lm_new_x(path, 0, 0, 2, 0, bm, b0); }   // the vertex shader made a fragment shader (spv_vsfrag.h)
 // A module whose code exists only in memory (the capture's fragment shader, spv_tffrag.h), made now: no file to make it again from. what names it in logs
 static lmod *lm_gen(const uint32_t *code, size_t nw, const char *what) {
     size_t pl = strlen(what) + 1; lmod *l = calloc(1, sizeof *l + pl); if (!l) return NULL;

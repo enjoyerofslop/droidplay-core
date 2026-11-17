@@ -131,6 +131,7 @@ enum { SH_VS, SH_PS, SH_GS, SH_TS, SH_CS, SH_MS, SH_TK };   // SH_TS tessellatio
 typedef struct {
     char key[17]; int stage, set, ok; VkShaderStageFlagBits vkstage; struct lmod *mod, *modz, *modtf;   // modz, modtf: NULL without a .z / .tf variant (gfx_vk_lmod.inc)
     struct lmod *modtff;   // the capture's fragment shader (tf_frag): modtf is then the shader wrapped by spv_tff_vs, not its .tf.spv; NULL on the vertex-stage capture
+    struct lmod *modvsf, *modvsp;   // a vertex shader that writes memory, run as a fragment shader over points (vsf_on, spv_vsfrag.h): the shader made a fragment shader, and its pass-through vertex shader
     uint32_t tf_stride[4]; VkDescriptorSetLayout dsl_tf;
     int ncb, nsb, ntx, nim; rb_cbuf cb[CB_MAX]; rb_sbuf sb[16]; rb_tex tx[64], im[16];
     VkDescriptorSetLayout dsl;
@@ -651,6 +652,19 @@ static int tf_frag(void) {
         else if (want) LOG("[RED] [vk] transform feedback: the GPU has neither vertex- nor fragment-stage storage writes, so nothing can be captured"); }
     return v;
 }
+// Where a draw under rasterizer discard whose vertex shader writes memory runs (rd_draw). It runs as a dispatch would, its vertex stage alone, which needs
+// vertexPipelineStoresAndAtomics; Arm's Mali drivers lack it, so there the shader runs as a fragment shader over a point list, one point a vertex (spv_vsfrag.h,
+// key tf 3), which needs fragmentStoresAndAtomics. DM_VK_VS_FRAG (env.txt): 1 does so on any GPU with fragment stores (to compare the two on an Adreno), 0 never
+// (such a draw is then left out on Mali, red line 184, as before)
+static int vsf_on(void) {
+    static int v = -1;
+    if (v < 0) { const char *e = getenv("DM_VK_VS_FRAG");
+        int want = e && *e == '1' ? 1 : e && *e == '0' ? 0 : !g_vk_feat.vertexPipelineStoresAndAtomics;
+        v = want && g_vk_feat.fragmentStoresAndAtomics;
+        if (v || (e && *e)) LOG("[vk] draws under rasterizer discard whose vertex shader writes memory: run %s%s", v ? "as fragment shaders over points" : "in the vertex stage", e && *e ? " (DM_VK_VS_FRAG)" : ": the GPU has no vertex-stage storage writes"); }
+    return v;
+}
+static int rd_writes(const vshader *s);   // below: the stage writes memory
 // The capture's fragment shader for vertex shader s (its layout L, its vec4 outputs outs and SPIR-V version ver): made now, a few hundred words. NULL: red line
 static lmod *tff_fs_mod(const vshader *s, const spv_tff_layout *L, uint32_t outs, uint32_t ver) {
     enum { CAP = 4096 }; uint32_t *o = malloc(CAP * 4); if (!o) return NULL;
@@ -664,6 +678,27 @@ static lmod *tff_fs_mod(const vshader *s, const spv_tff_layout *L, uint32_t outs
     free(o); return m;
 }
 static lmod *sh_module(const vshader *s, const char *path, int *b0) { return lm_new(path, 0, s->bmap, b0); }   // *b0 |= the module reads the support buffer (spv_b0_used)
+// Vertex shader s made a fragment shader (lm_new_vsf: from its file, through lm_code's rewrites, lazily) and the pass-through vertex shader that feeds it (made now
+// from what spv_vsf_fs says it reads, a few hundred words); both or neither (a red line says why). p: a path buffer of pn bytes
+static void vsf_modules(vshader *s, char *p, size_t pn) {
+    snprintf(p, pn, "%s/%s.spv", g_spv_dir, s->key);
+    size_t nw = 0; uint32_t *w = spv_read(p, &nw); if (!w) return;
+    spv_vsf_io io; size_t cap = nw + 3 * 32 + 64, k = 0; uint32_t *o = malloc(cap * 4), *sc = nw > 4 ? malloc(2 * (size_t)w[3] * 4) : NULL;
+    if (o && sc) k = spv_vsf_fs(w, nw, sc, o, cap, &io);
+    uint32_t ver = nw > 1 ? w[1] : 0; free(sc); free(o); free(w);
+    if (!k) { LOG("[RED] [vk] vertex shader %s writes memory, and an input of it is neither a vertex attribute nor a built-in a fragment shader can be handed: its draws under rasterizer discard are left out", s->key); return; }
+    enum { CAP = 1024 }; uint32_t *v = malloc(CAP * 4); size_t vn = v ? spv_vsf_vs(&io, ver, v, CAP) : 0;
+    char what[96]; snprintf(what, sizeof what, "%s (the pass-through vertex shader of its fragment form)", s->key);
+    if (vn) {
+        const char *d = getenv("DM_DUMP_DIR");   // for spirv-val
+        if (d) { char q[700]; mkdir(d, 0777); snprintf(q, sizeof q, "%s/vsf_%s.vs.spv", d, s->key); FILE *f = fopen(q, "wb"); if (f) { fwrite(v, 4, vn, f); fclose(f); } }
+        s->modvsp = lm_gen(v, vn, what);
+    }
+    free(v);
+    if (s->modvsp) s->modvsf = lm_new_vsf(p, s->bmap, &s->b0);
+    if (!s->modvsf) s->modvsp = NULL;   // (an lmod is never freed: its module may be in a pipeline being made)
+    else { static int nl; if (nl++ < 8) LOG("[vk] vertex shader %s writes memory: under rasterizer discard it runs as a fragment shader over points (vertex inputs %#x, built-ins %#x)", s->key, io.in, io.bi); }
+}
 // Ryujinx's TextureFormat names (an image's declared format) → Vulkan, with the texel size
 static const struct { const char *n; VkFormat f; int bytes; } DECL_FMT[] = {
     {"R8Unorm", VK_FORMAT_R8_UNORM, 1}, {"R8Snorm", VK_FORMAT_R8_SNORM, 1}, {"R8Uint", VK_FORMAT_R8_UINT, 1}, {"R8Sint", VK_FORMAT_R8_SINT, 1},
@@ -809,6 +844,7 @@ static vshader *sh_get(const char *key) {
         if (!s->modtff) s->modtf = NULL;   // (an lmod is never freed: its module may be in a pipeline being made)
     }
     if (has_tf && !s->modtf) { snprintf(p, sizeof p, "%s/%s.tf.spv", g_spv_dir, s->key); s->modtf = sh_module(s, p, &s->b0); }
+    if (s->stage == SH_VS && rd_writes(s) && vsf_on()) vsf_modules(s, p, sizeof p);   // its draws under rasterizer discard run in the fragment stage
     if (!s->mod) return NULL;
     // a pool read spv_pool left, or pool arrays res.json names that it found no variable for: their arrays would be in no layout
     if (s->pool && !(t_pool_info & (SPV_POOL_IMG | SPV_POOL_SMP)) && !(t_pool_info & SPV_POOL_FAIL)) { t_pool_info |= SPV_POOL_FAIL; static int nl; if (nl++ < 8) LOG("[RED] [vk] shader %s: res.json names texture pool arrays its module does not have as spv_pool knows them: its draws are dropped", s->key); }
@@ -820,13 +856,14 @@ static vshader *sh_get(const char *key) {
     }
     // the set's layout: support buffer, constant buffers, storage buffers, textures, images
     VkDescriptorSetLayoutBinding b[1 + CB_MAX + 16 + 64 + 16 + 5]; uint32_t nb = 0;
-    b[nb++] = (VkDescriptorSetLayoutBinding){0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, (VkShaderStageFlags)s->vkstage, NULL};
+    VkShaderStageFlags dst = (VkShaderStageFlags)s->vkstage | (s->modvsf ? VK_SHADER_STAGE_FRAGMENT_BIT : 0);   // a vertex shader's fragment form reads the same set (vsf_modules)
+    b[nb++] = (VkDescriptorSetLayoutBinding){0, VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, dst, NULL};
     sh_dyn(s);
-    for (int i = 0; i < s->ncb; i++) b[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)s->cb[i].binding, s->cbdyn[i] != 0xff ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, (VkShaderStageFlags)s->vkstage, NULL};
-    for (int i = 0; i < s->nsb; i++) b[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)s->sb[i].binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, (VkShaderStageFlags)s->vkstage, NULL};
-    for (int i = 0; i < s->ntx; i++) b[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)s->tx[i].binding, tex_dtype(&s->tx[i], 0), (uint32_t)(s->tx[i].array > 1 ? s->tx[i].array : 1), (VkShaderStageFlags)s->vkstage, NULL};
-    for (int i = 0; i < s->nim; i++) b[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)s->im[i].binding, tex_dtype(&s->im[i], 1), (uint32_t)(s->im[i].array > 1 ? s->im[i].array : 1), (VkShaderStageFlags)s->vkstage, NULL};
-    if (s->tgs) b[nb++] = (VkDescriptorSetLayoutBinding){SPV_TGS_BINDING, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, (VkShaderStageFlags)s->vkstage, NULL};   // its shared memory (spv_tgspill)
+    for (int i = 0; i < s->ncb; i++) b[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)s->cb[i].binding, s->cbdyn[i] != 0xff ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, 1, dst, NULL};
+    for (int i = 0; i < s->nsb; i++) b[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)s->sb[i].binding, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, dst, NULL};
+    for (int i = 0; i < s->ntx; i++) b[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)s->tx[i].binding, tex_dtype(&s->tx[i], 0), (uint32_t)(s->tx[i].array > 1 ? s->tx[i].array : 1), dst, NULL};
+    for (int i = 0; i < s->nim; i++) b[nb++] = (VkDescriptorSetLayoutBinding){(uint32_t)s->im[i].binding, tex_dtype(&s->im[i], 1), (uint32_t)(s->im[i].array > 1 ? s->im[i].array : 1), dst, NULL};
+    if (s->tgs) b[nb++] = (VkDescriptorSetLayoutBinding){SPV_TGS_BINDING, VK_DESCRIPTOR_TYPE_STORAGE_BUFFER, 1, dst, NULL};   // its shared memory (spv_tgspill)
     VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO, .bindingCount = nb, .pBindings = b};
     if (vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &s->dsl) != VK_SUCCESS) { LOG("[RED] [vk] descriptor layout of shader %s failed", s->key); return NULL; }
     for (uint32_t i = 0; i < nb; i++) s->ndesc += b[i].descriptorCount > TEX_ARR_MAX ? TEX_ARR_MAX : b[i].descriptorCount;
@@ -1814,7 +1851,7 @@ static VkBlendOp bop(unsigned v) { return v >= 1 && v <= 5 ? (VkBlendOp)(v - 1) 
 static VkCompareOp cmpop(unsigned v, VkCompareOp def) { return v >= 1 && v <= 8 ? (VkCompareOp)(v - 1) : def; }
 static VkStencilOp stop(unsigned v) { return v >= 1 && v <= 8 ? (VkStencilOp)(v - 1) : VK_STENCIL_OP_KEEP; }
 typedef struct {
-    vshader *sh[4]; int z, tf; VkRenderPass rp; rp_key rk; uint32_t ncolor;   // tf: 1 the capture pipeline (the vertex shader's .tf.spv, no rasterization; or its wrapper and modtff, points rasterized), 2 a discarded draw's that writes (its own modules, no rasterization: rd_key); rk: the pass's formats and samples
+    vshader *sh[4]; int z, tf; VkRenderPass rp; rp_key rk; uint32_t ncolor;   // tf: 1 the capture pipeline (the vertex shader's .tf.spv, no rasterization; or its wrapper and modtff, points rasterized), 2 a discarded draw's that writes (its own modules, no rasterization: rd_key), 3 such a draw in the fragment stage (modvsp and modvsf, points rasterized: vsf_on); rk: the pass's formats and samples
     uint32_t attr[16]; vs_st stream[16]; uint8_t topo, restart, depth_clamp, ll;
     color_st color; chmask_st chmask; blend_st blend[8]; ms_st ms; poly_st poly; ds_st ds;
 } pipe_key;
@@ -2060,26 +2097,30 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
     VkSpecializationMapEntry pme[1]; uint32_t psv = 0; const vshader *pspec = NULL;
     for (int i = 0; i < 4; i++) { vshader *s = k->sh[i]; if (!s) continue;
         sets[s->set & 3] = k->tf == 1 ? s->dsl_tf : s->dsl; if ((uint32_t)(s->set & 3) + 1 > nset) nset = (uint32_t)(s->set & 3) + 1;
-        lmod *mod = k->tf == 1 ? s->modtf : (s->stage == SH_VS || s->stage == SH_MS) && k->z && s->modz ? s->modz : s->mod;
+        lmod *mod = k->tf == 1 ? s->modtf : k->tf == 3 && s->stage == SH_VS ? s->modvsp : (s->stage == SH_VS || s->stage == SH_MS) && k->z && s->modz ? s->modz : s->mod;
         if (s->stage == SH_PS) { int alpha = 0; mod = pipe_ps_mod(k, s, &alpha);   // the alpha test (spv_alpha.h) and unwritten inputs (spv_drop_inputs)
             if (alpha) {   // the variant's function, by SpecId (spv_alpha.h decorates it 0); the reference arrives in a push constant
                 pme[0] = (VkSpecializationMapEntry){0, 0, 4}; psv = k->color.alpha_func; psi = (VkSpecializationInfo){1, pme, 4, &psv}; pspec = s; } }
         if (!mod) return VK_ERROR_INITIALIZATION_FAILED;
         lms[ns] = mod; st[ns] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = s->vkstage, .pName = "main"};   // its module: lm_pipeline
         if (s->stage == SH_PS && pspec == s) st[ns].pSpecializationInfo = &psi;
-        if (s->stage == SH_VS && pos_rows_for(s->key)) st[ns].pSpecializationInfo = &g_pr_spec;   // run-time rows in the position (gfx_vk_posrows.inc)
+        if (s->stage == SH_VS && k->tf != 3 && pos_rows_for(s->key)) st[ns].pSpecializationInfo = &g_pr_spec;   // run-time rows in the position (gfx_vk_posrows.inc)
         ns++;
         if (s->pool) { sets[POOL_SET] = g_pool_dsl; nset = POOL_SET + 1; }
         gmnp |= s->gm && g_gm_np; }
     if (gmnp && !gm_np_layout(sets, &nset, g_empty_dsl)) return VK_ERROR_INITIALIZATION_FAILED;   // raw memory through the pools' descriptor array (gfx_vk_gmem_noptr.inc)
     if (k->tf == 1 && k->sh[0] && k->sh[0]->modtff) {   // the fragment-stage capture: its fragment shader takes the vertex shader's set (bindings 100 + buffer)
         lms[ns] = k->sh[0]->modtff; st[ns++] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .pName = "main"}; }
+    if (k->tf == 3) {   // the vertex shader's fragment form: it reads the vertex shader's set (its layout takes the fragment stage too: sh_get)
+        if (!k->sh[0] || !k->sh[0]->modvsf || ns != 1) return VK_ERROR_INITIALIZATION_FAILED;
+        lms[ns] = k->sh[0]->modvsf; st[ns++] = (VkPipelineShaderStageCreateInfo){.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_FRAGMENT_BIT, .pName = "main"}; }
     // a task / mesh pipeline (gfx_vk_mesh.inc): no vertex input, and the draw's first workgroup in a push constant at the bytes the alpha test's reference has in the others
     // (so pipe_ps_mod gives a mesh pipeline no alpha-test variant)
     int mesh = k->sh[0] && k->sh[0]->stage == SH_MS;
     VkPushConstantRange pcr = mesh ? (VkPushConstantRange){VK_SHADER_STAGE_TASK_BIT_EXT | VK_SHADER_STAGE_MESH_BIT_EXT, 0, MESH_PC_BYTES}
+                            : k->tf == 3 ? (VkPushConstantRange){VK_SHADER_STAGE_VERTEX_BIT, 0, SPV_VSF_PC_BYTES}   // where the pass-through vertex shader places each point (spv_vsfrag.h)
                                    : (VkPushConstantRange){VK_SHADER_STAGE_FRAGMENT_BIT, 0, 4};   // the alpha test's reference (spv_alpha.h); unused by shaders that do not declare it
-    VkShaderStageFlags lbpc = mesh ? 0 : (k->sh[0] && k->sh[0]->lbpc ? VK_SHADER_STAGE_VERTEX_BIT : 0) | (k->sh[1] && k->sh[1]->lbpc ? VK_SHADER_STAGE_FRAGMENT_BIT : 0);
+    VkShaderStageFlags lbpc = mesh || k->tf == 3 ? 0 : (k->sh[0] && k->sh[0]->lbpc ? VK_SHADER_STAGE_VERTEX_BIT : 0) | (k->sh[1] && k->sh[1]->lbpc ? VK_SHADER_STAGE_FRAGMENT_BIT : 0);
     VkPushConstantRange pcrs[2] = {pcr, {lbpc, SPV_LBASE_PC, 4}};   // [1]: the layer base the modules of those stages read (spv_fit_lbase); only then
     VkPipelineLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO, .setLayoutCount = nset, .pSetLayouts = sets, .pushConstantRangeCount = lbpc ? 2u : 1u, .pPushConstantRanges = pcrs};
     if (vkCreatePipelineLayout(g_vk.dev, &lc, NULL, &pp->pl) != VK_SUCCESS) return VK_ERROR_INITIALIZATION_FAILED;
@@ -3356,6 +3397,13 @@ static VkRenderPass null_pass(void) {
         if (vkCreateFramebuffer(g_vk.dev, &fc, NULL, &g_null_fb) != VK_SUCCESS) { g_null_fb = VK_NULL_HANDLE; return VK_NULL_HANDLE; } }
     return g_null_rp;
 }
+_Static_assert(SPV_VSF_SHIFT == SPV_TFF_SHIFT, "the two fragment-stage forms share one grid");
+static VkFramebuffer grid_fb(void) {   // the fragment-stage passes' framebuffer (spv_tffrag.h, spv_vsfrag.h): 1024 × 1024 without attachments, in null_pass
+    if (!null_pass()) return VK_NULL_HANDLE;
+    if (!g_grid_fb) { VkFramebufferCreateInfo fc = {.sType = VK_STRUCTURE_TYPE_FRAMEBUFFER_CREATE_INFO, .renderPass = g_null_rp, .width = 1u << SPV_TFF_SHIFT, .height = 1u << SPV_TFF_SHIFT, .layers = 1};
+                      if (vkCreateFramebuffer(g_vk.dev, &fc, NULL, &g_grid_fb) != VK_SUCCESS) g_grid_fb = VK_NULL_HANDLE; }
+    return g_grid_fb;
+}
 static int tf_capture(vshader *vs, const prog_t *pr, int pst, const p_draw *dw, const p_draw_idx *di) {
     if (!D.tf_on || !vs->modtf) { if (D.tf_on) RED_ONCE(114, "transform feedback with vertex shader %s, which has no capture variant: nothing captured", vs->key); return 1; }
     int frag = vs->modtff != NULL;   // captured in the fragment stage (tf_frag)
@@ -3574,18 +3622,20 @@ static void pipe_key_build(pipe_key *k, int prim) {
       if (!k->sh[0]->modz) k->z = 0; }
 }
 // a draw's dynamic state: the viewport (see the file header for the origin), the scissor, stencil, blend constants, depth bias (vk_draw_, gfx_vk_mesh.inc vk_mesh_draw_);
-// *ov / *osc: the viewport and scissor set, for the dump's log; rd: the 1 × 1 pass without attachments of a discarded draw (rd_draw: rasterization is off)
+// *ov / *osc: the viewport and scissor set, for the dump's log; rd: the 1 × 1 pass without attachments of a discarded draw (rd_draw 1: rasterization is off), or
+// its 1024 × 1024 grid (rd_draw 2: the vertex shader's fragment form, spv_vsfrag.h)
 static void draw_dyn_state(VkCommandBuffer c, VkViewport *ov, VkRect2D *osc, int rd) {
     float vx = 0, vy = 0, vw = (float)P.w, vh = (float)P.h; if (D.has_vp) { vx = D.vp[0][0]; vy = D.vp[0][1]; vw = D.vp[0][2]; vh = D.vp[0][3]; }
     float n = D.dr[0] < 0 ? 0 : D.dr[0] > 1 ? 1 : D.dr[0], f = D.dr[1] < 0 ? 0 : D.dr[1] > 1 ? 1 : D.dr[1];
     VkViewport v = g_origin_ll ? (VkViewport){vx, vy, vw, vh, n, f} : (VkViewport){vx, vy + vh, vw, -vh, n, f};
-    if (rd) v = (VkViewport){0, 0, 1, 1, 0, 1};
+    float rs = rd == 2 ? (float)(1u << SPV_VSF_SHIFT) : 1;
+    if (rd) v = (VkViewport){0, 0, rs, rs, 0, 1};
     if (!bf_same(c, BF_VP, &g_bf.vp, &v, sizeof v)) vkCmdSetViewport(c, 0, 1, &v);
     VkRect2D sc = {{0, 0}, {P.w, P.h}};
     if (R.has_sc) { int x0 = R.sc.x < 0 ? 0 : R.sc.x, y0 = R.sc.y < 0 ? 0 : R.sc.y; int64_t x1 = (int64_t)R.sc.x + R.sc.w, y1 = (int64_t)R.sc.y + R.sc.h;
         if (x1 > (int64_t)P.w) x1 = P.w; if (y1 > (int64_t)P.h) y1 = P.h;
         sc = (VkRect2D){{x0, y0}, {(uint32_t)(x1 > x0 ? x1 - x0 : 0), (uint32_t)(y1 > y0 ? y1 - y0 : 0)}}; }
-    if (rd) sc = (VkRect2D){{0, 0}, {1, 1}};
+    if (rd) sc = (VkRect2D){{0, 0}, {(uint32_t)rs, (uint32_t)rs}};
     if (!bf_same(c, BF_SC, &g_bf.sc, &sc, sizeof sc)) vkCmdSetScissor(c, 0, 1, &sc);
     if (!bf_same(c, BF_BC, g_bf.bc, D.blend_color, sizeof g_bf.bc)) vkCmdSetBlendConstants(c, D.blend_color);
     if (!bf_same(c, BF_CM0, &g_bf.cm[0], &D.st_vmask[0], 4)) vkCmdSetStencilCompareMask(c, VK_STENCIL_FACE_FRONT_BIT, D.st_vmask[0]);
@@ -3610,7 +3660,7 @@ static void draw_dyn_state(VkCommandBuffer c, VkViewport *ov, VkRect2D *osc, int
 // The cost is a pass break at each one. A discarded draw that writes nothing still draws nothing. DM_VK_RAST_DISCARD=0 (env.txt): every discarded draw without
 // transform feedback is left out, as before (the A/B of this alone)
 static int rd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_RAST_DISCARD"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_RAST_DISCARD=0: draws under rasterizer discard are left out unless transform feedback captures them"); } return v; }
-static uint64_t g_rd_made, g_rd_none;   // discarded draws made as dispatches; left out (nothing they write)
+static uint64_t g_rd_made, g_rd_none, g_rd_frag, g_rd_frag_pts, g_vsw_rast;   // discarded draws made as dispatches; left out (nothing they write, or no way to); of those made, in the fragment stage, and their points; rasterized draws whose vertex stage writes memory on a GPU without vertex-stage stores
 static int g_rd_open;   // the pass without attachments of the discarded draw being made is open (rd_open; vk_draw__ closes it, whatever the draw's outcome)
 static int rd_writes(const vshader *s) {   // the stage writes memory: a storage buffer (or atomics on one: Ryujinx's BufferUsageFlags.Write), an image (TextureUsageFlags.ImageStore), raw global memory (its write log)
     if (!s) return 0;
@@ -3618,10 +3668,11 @@ static int rd_writes(const vshader *s) {   // the stage writes memory: a storage
     for (int i = 0; i < s->nim; i++) if (s->im[i].flags & 4) return 1;
     return s->gm == 2;
 }
-static int rd_draw(vshader *const sh[4]) {   // under rasterizer discard, without a transform feedback capture: whether the draw runs, as a dispatch
+static int rd_draw(vshader *const sh[4]) {   // under rasterizer discard, without a transform feedback capture: whether the draw runs, as a dispatch (1) or in the fragment stage (2)
     if (D.tf_on || !rd_on()) return 0;
     if (!rd_writes(sh[0]) && !rd_writes(sh[2])) { g_rd_none++; return 0; }
-    if (!g_vk_feat.vertexPipelineStoresAndAtomics) { RED_ONCE(184, "a draw under rasterizer discard writes memory from its vertex stage (shader %s), which this GPU cannot: left out (said once)", sh[0]->key); g_rd_none++; return 0; }
+    if (sh[0]->modvsf && !sh[2]) return 2;   // in the fragment stage (vsf_on)
+    if (!g_vk_feat.vertexPipelineStoresAndAtomics) { RED_ONCE(184, "a draw under rasterizer discard writes memory from its vertex stage (shader %s%s), which this GPU cannot: left out (said once)", sh[0]->key, sh[2] ? ", with a geometry shader" : ""); g_rd_none++; return 0; }
     return 1;
 }
 static void rd_key(pipe_key *k) {   // over the built key: the vertex (and geometry) stage alone, rasterization off, in the pass without attachments; no target state
@@ -3629,10 +3680,12 @@ static void rd_key(pipe_key *k) {   // over the built key: the vertex (and geome
     memset(&k->color, 0, sizeof k->color); k->color.logic_op = NVN_LOGIC_OP_COPY; memset(&k->chmask, 0, sizeof k->chmask); memset(k->blend, 0, sizeof k->blend);
     memset(&k->ms, 0, sizeof k->ms); memset(&k->poly, 0, sizeof k->poly); memset(&k->ds, 0, sizeof k->ds);
 }
-static int rd_open(void) {   // after the draw's bindings (stage_set), in their chunk: the pass without attachments begun, after a full barrier
+static int rd_open(int frag) {   // after the draw's bindings (stage_set), in their chunk: the pass without attachments begun, after a full barrier; frag: on the 1024 × 1024 grid (vsf_on)
     VkCommandBuffer c = cb(); if (!c || !null_pass()) return 0;   // cb: outside the targets' pass
+    VkFramebuffer fb = frag ? grid_fb() : g_null_fb; if (!fb) return 0;
+    uint32_t side = frag ? 1u << SPV_VSF_SHIFT : 1;
     cb_barrier();
-    VkRenderPassBeginInfo rb = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = g_null_rp, .framebuffer = g_null_fb, .renderArea = {{0, 0}, {1, 1}}};
+    VkRenderPassBeginInfo rb = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = g_null_rp, .framebuffer = fb, .renderArea = {{0, 0}, {side, side}}};
     vkCmdBeginRenderPass(c, &rb, VK_SUBPASS_CONTENTS_INLINE); bf_reset();   // its binds are made behind the bind filter's back: it forgets what it knew
     g_rd_open = 1; return 1;
 }
@@ -3684,8 +3737,10 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     resolved:;
     // under rasterizer discard: a transform feedback capture, nothing, or (a stage writes memory) the draw run as a dispatch, its fragment stage dropped and the
     // targets' pass ended before its bindings are made, as vk_dispatch does (an image it writes may be one of the targets)
-    int rd = D.rast_discard && rd_draw(k.sh);
+    int rd = D.rast_discard ? rd_draw(k.sh) : 0;
     if (rd) { k.sh[1] = NULL; g_vdisp = 1; rp_end(); }
+    else if (!D.rast_discard && !g_vk_feat.vertexPipelineStoresAndAtomics && (rd_writes(k.sh[0]) || rd_writes(k.sh[2])) && !g_vsw_rast++)
+        LOG("[RED] [vk] a rasterized draw writes memory from its vertex stage (shader %s), which this GPU has no vertex-stage storage writes for: drawn as it is, its writes may be lost (said once; counted on the draws not made line)", k.sh[0]->key);
     if (dw) { g_vr0 = dw->first; g_vr1 = (int64_t)dw->first + dw->count; }   // the vertices it fetches (stream_rng)
     draw_view(k.sh, di, 1);   // what this draw reads of guest memory: pending GPU writes to it land first
     if (D.rast_discard && !rd) return tf_capture(k.sh[0], pprog[0], pst[0], dw, di);   // the vertex stage only: a capture, or nothing
@@ -3697,7 +3752,9 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     g_drawing = 1;   // from here no chunk is closed (chunk_submit reports one)
     int prim = dw ? dw->prim : di->prim;
     pipe_t *pm = rd ? NULL : pso_memo_find(k.sh, prim), *pp = pm;   // the draw before's pipeline when nothing its key takes has changed (pso_memo_find); NULL: the key is built
-    if (!pm || pso_check()) { pipe_key_build(&k, prim); if (rd) rd_key(&k); pp = pipe_get(&k); if (!pp) { g_drop[2]++; return 0; } if (!rd) pso_memo_note(&k, prim, pp, pm); }   // (the memo keeps the targets' pass's pipelines)
+    if (!pm || pso_check()) { pipe_key_build(&k, prim); if (rd) rd_key(&k);
+        if (rd == 2) { k.tf = 3; k.topo = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; k.restart = 0; }   // each vertex a point on the grid (spv_vsfrag.h)
+        pp = pipe_get(&k); if (!pp) { g_drop[2]++; return 0; } if (!rd) pso_memo_note(&k, prim, pp, pm); }   // (the memo keeps the targets' pass's pipelines)
     uint32_t base_inst = (uint32_t)(dw ? dw->base_instance : di->base_instance);
     VkDescriptorSet sets[4] = {0}; uint32_t dyn[4][18];   // dyn: each stage's dynamic offsets (stage_set)
     for (int t = 0;; t++) {   // t 1: every stage again from the chunk recorded now when a sync inside stage_set closed the one the sets came from (ds_moved)
@@ -3709,10 +3766,10 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
         if (!ds_moved(dseq) || ds_again(t, 0)) { g_drop[3]++; return 0; }
     }
     if (g_bind_bad) { g_drop[4]++; static int nb; if (nb < 10) { nb++; LOG("[RED] [vk] draw skipped: a binding has no valid descriptor (shaders %s %s)", k.sh[0]->key, k.sh[1] ? k.sh[1]->key : "-"); } return 0; }
-    if (rd ? !rd_open() : !rp_start()) { g_drop[5]++; return 0; }   // after the textures: their uploads end a pass begun before (it is begun again on the same targets); it only takes cur(), so the sets' chunk is the one they are bound in below
+    if (rd ? !rd_open(rd == 2) : !rp_start()) { g_drop[5]++; return 0; }   // after the textures: their uploads end a pass begun before (it is begun again on the same targets); it only takes cur(), so the sets' chunk is the one they are bound in below
     VkCommandBuffer c = C->cb;
     if (!rd) occl_begin();
-    else if (!g_rd_made++) LOG("[vk] rasterizer discard: a draw whose vertex stage writes memory runs as a dispatch, in a pass of its own (vertex %s, %u %s; DM_VK_RAST_DISCARD=0 leaves it out)", k.sh[0]->key, dw ? (unsigned)dw->count : (unsigned)di->count, dw ? "vertices" : "indices");
+    else if (!g_rd_made++) LOG("[vk] rasterizer discard: a draw whose vertex stage writes memory runs as a dispatch, in a pass of its own%s (vertex %s, %u %s; DM_VK_RAST_DISCARD=0 leaves it out)", rd == 2 ? ", its vertex shader as a fragment shader over points" : "", k.sh[0]->key, dw ? (unsigned)dw->count : (unsigned)di->count, dw ? "vertices" : "indices");
     bf_pipeline(c, pp->p);   // binds the command buffer already holds are left out (bf_*)
     if (pp->alpha) vkCmdPushConstants(c, pp->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof D.alpha_ref, &D.alpha_ref);   // the alpha test's reference, data rather than a key (spv_alpha.h)
     if (pp->lbpc) { int32_t b0 = 0; vkCmdPushConstants(c, pp->pl, pp->lbpc, SPV_LBASE_PC, 4, &b0); }   // the layer base: none (spv_fit_lbase)
@@ -3780,8 +3837,19 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     if (prim == 2 || prim == 9) RED_ONCE(99, "line loop / polygon drawn as a strip / fan");
     int64_t lo = k.sh[0]->vid || vlo < 0 ? 0 : vlo;   // the bindings start at vertex lo, and the draw counts from there; a shader reading gl_VertexIndex sees its own numbers
     if (!bind_vbufs(c, k.sh[0], lo, vhi, base_inst, inst)) { g_drop[6]++; return 0; }
-    if (ib) { bf_ibuf(c, ib, ioff, i32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16); vkCmdDrawIndexed(c, icount, inst, 0, (int32_t)((di ? di->base_vertex : 0) - lo), base_inst - inst_shift(base_inst)); }
-    else vkCmdDraw(c, count, inst, (uint32_t)(dw->first - lo), base_inst - inst_shift(base_inst));   // inst_shift: the base instance in the streams' offsets instead
+    if (ib) bf_ibuf(c, ib, ioff, i32 ? VK_INDEX_TYPE_UINT32 : VK_INDEX_TYPE_UINT16);
+    // the vertex shader's fragment form: vertex v of instance i on point (i - ibase) × vspan + (v - vbase) of the draw's, the vertex numbers the draw gives gl_VertexIndex
+    // ([vlo, vhi) less lo) and its first instance; 2^20 points a pass, so a draw of more is made again for each further 2^20 (spv_vsfrag.h)
+    uint32_t vsf_pc[5] = {(uint32_t)(vlo - lo), (uint32_t)(vhi - vlo), base_inst - inst_shift(base_inst), 0, 0}; uint64_t vsf_n = (uint64_t)vsf_pc[1] * inst;
+    if (rd == 2 && vsf_n > 16ull * SPV_VSF_MAX) { RED_ONCE(199, "a draw under rasterizer discard of %llu vertices (vertex %s): its fragment form takes %u at most, left out", (unsigned long long)vsf_n, k.sh[0]->key, 16u * SPV_VSF_MAX); return 0; }
+    vsf_pc[3] = (uint32_t)vsf_n;
+    for (uint64_t vsf_b = 0; rd != 2 || vsf_b < vsf_n; vsf_b += SPV_VSF_MAX) {
+        if (rd == 2) { vsf_pc[4] = (uint32_t)vsf_b; vkCmdPushConstants(c, pp->pl, VK_SHADER_STAGE_VERTEX_BIT, 0, sizeof vsf_pc, vsf_pc); g_rd_frag_pts += vsf_n - vsf_b < SPV_VSF_MAX ? vsf_n - vsf_b : SPV_VSF_MAX; }
+        if (ib) vkCmdDrawIndexed(c, icount, inst, 0, (int32_t)((di ? di->base_vertex : 0) - lo), base_inst - inst_shift(base_inst));
+        else vkCmdDraw(c, count, inst, (uint32_t)(dw->first - lo), base_inst - inst_shift(base_inst));   // inst_shift: the base instance in the streams' offsets instead
+        if (rd != 2) break;
+    }
+    if (rd == 2) g_rd_frag++;
     if (!rd && (pp->lbpc & VK_SHADER_STAGE_VERTEX_BIT) && k.sh[0]->lbase && !k.sh[2] && !k.sh[3] && P.layered && P.layers > (uint32_t)g_vs_layers)   // the layers past the vertex shader's reach
         vs_layer_groups(c, pp, ib ? icount : count, inst, ib ? (int32_t)((di ? di->base_vertex : 0) - lo) : (int32_t)(dw->first - lo), base_inst - inst_shift(base_inst), ib != VK_NULL_HANDLE);
     g_draws++; C->ndraw++; crumb((dw ? dw->ind : di->ind) ? 'D' : 'd', k.sh[0]->key, k.sh[1] ? k.sh[1]->key : NULL, ib ? icount : count, inst);
