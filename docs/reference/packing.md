@@ -222,6 +222,13 @@
   - A second build with nothing changed recompiled nothing. After a commit, only `build_stamp.c` recompiled.
 - **Found on:** [droidplay-core#389](https://github.com/enjoyerofslop/droidplay-core/issues/389): logs of four games from a Galaxy S23, on 0.8.3 or 0.8.4.
 
+### An Android shader split made before `oodle_cache` is reused with unreadable packages
+
+- **Symptom:** an earlier build (such as `--no-push`) leaves `shader/` with unreadable Oodle-compressed files (`32 shaders, 44409 file(s) unreadable`); on the next build with a phone connected, `oodle_decode` decodes the streams, but `shader split` reuses the old incomplete result as `inputs unchanged`.
+- **Cause:** `split_shaders` fingerprints the game files and tools, not the contents of `DM_OODLE_CACHE`, so a cache populated later does not invalidate the stale split.
+- **Fix:** `build_android_from_nsp.py` `build_shaders` hashes `DM_OODLE_CACHE` into `shader/oodle_cache.stamp`. When it differs and `shader/pkg.key` recorded `unreadable` files (or is missing), `shader/` and `spv/` are cleared so the split runs again; an existing complete split keeps its files and writes the stamp in place.
+- **Found on:** Stray (`010075101EF84000`, v131072): shader split recovers from 32 to 10,792 shaders.
+
 ## IPA archives
 
 ### AltServer cannot install a file of 2 GiB or more
