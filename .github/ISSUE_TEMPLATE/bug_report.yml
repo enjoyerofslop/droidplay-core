@@ -49,7 +49,7 @@ body:
       label: How it was built and run
       options:
         - Android game app (DroidPlay Build Game App, or build_android_from_nsp.py --game-apk)
-        - Android launcher app (DroidPlay Install on Android, the desktop app, or build_android_from_nsp.py)
+        - Android launcher app (DroidPlay Install on Android, DroidPlay for Windows or Linux, or build_android_from_nsp.py)
         - Mac, the host from a terminal (--platform mac)
         - Mac app (--platform mac-app)
         - iPhone or iPad, unsigned IPA from build_ipa_from_nsp.py
@@ -62,7 +62,7 @@ body:
     id: device
     attributes:
       label: Device and OS
-      description: The Android device, its GPU and Android version (Settings > About, or `adb shell getprop ro.product.model`); or the Mac or iPhone model and its OS for a problem on the Apple side.
+      description: The Android device, its GPU and Android version (Settings > About, or `adb shell getprop ro.product.model`); or the Mac or iPhone model and its OS for a problem on the Apple side. For a build or install that fails, also the computer's system (Windows 11, Ubuntu 24.04 or macOS 26, say).
       placeholder: Ayn Odin 2 (Adreno 740), Android 13
     validations:
       required: true

@@ -17,9 +17,9 @@ natively on the iPhone, the iPad and the Mac, with an Android port that began as
 > Switch, and the app you build is for you only. Do not share APKs packed with a game (they carry its code and files), keys or firmware, and do not ask for them
 > in issues. The project is not affiliated with Nintendo or any game publisher.
 
-**Download [DroidPlay for Windows](https://github.com/enjoyerofslop/droidplay-core/releases/latest)**: **DroidPlay-Setup-&lt;version&gt;.exe** from the latest
-release. Run it, and it walks you through the rest ([Get started](#get-started)). On a Mac, use [DroidPlay](https://github.com/enjoyerofslop/droidplay).
-On Linux, [DroidPlay for Linux](#on-linux-preview) is an AppImage in preview, **DroidPlay-&lt;version&gt;-x86_64.AppImage**, which releases carry beside Setup.
+**Download DroidPlay for Windows or Linux** from the [latest release](https://github.com/enjoyerofslop/droidplay-core/releases/latest): on Windows,
+**DroidPlay-Setup-&lt;version&gt;.exe**; on Linux (x86_64), **DroidPlay-&lt;version&gt;-x86_64.AppImage** ([On Linux](#on-linux)). Open it, and it walks you
+through the rest ([Get started](#get-started)). On a Mac, use [DroidPlay](https://github.com/enjoyerofslop/droidplay).
 
 - **Runs on** arm64 phones and handhelds with Android 10 or later and a Vulkan GPU. Tested on Qualcomm Adreno (the Ayn Odin 2, the Retroid Pocket 5, the
   Galaxy S25 Edge and others), Arm Mali (the Pixel 9 Pro XL) and Samsung Xclipse (the Galaxy Z Flip 7): [Phones and handhelds](#phones-and-handhelds).
@@ -66,9 +66,9 @@ open-source Turnip driver (on a Samsung Xclipse GPU, a build of Mesa's RADV for 
 
 ### What you need
 
-- **A computer to build on:** a Windows 10 (1809 or later) or Windows 11 PC, 64-bit, for DroidPlay for Windows; or a Mac with Apple silicon and macOS 15 or
-  later for [DroidPlay on a Mac](https://github.com/enjoyerofslop/droidplay); or, in preview, an x86_64 Linux with glibc 2.34 or later (Ubuntu 22.04,
-  Debian 12, Fedora 35, SteamOS 3 or newer) for [DroidPlay for Linux](#on-linux-preview). On Windows and Linux, DroidPlay and the tools it installs take about 6 GB, and each game's
+- **A computer to build on:** a Windows 10 (1809 or later) or Windows 11 PC, 64-bit, for DroidPlay for Windows; an x86_64 PC with Linux and glibc 2.34 or
+  later (Ubuntu 22.04, Debian 12, Fedora 35, SteamOS 3 or newer; there is no arm64 build) for [DroidPlay for Linux](#on-linux); or a Mac with Apple silicon
+  and macOS 15 or later for [DroidPlay on a Mac](https://github.com/enjoyerofslop/droidplay). On Windows and Linux, DroidPlay and the tools it installs take about 6 GB, and each game's
   build needs room besides, on the drive with the game's files: about the game's size for its extracted files, plus what its shaders need while they translate,
   up to about 20 GB for most games and 90 GB or more for one with over 100,000 shaders, such as Pokémon Pokopia ([Free space](docs/android.md#free-space)).
 - **An Android phone or handheld** with Android 10 or later ([the devices tested](#phones-and-handhelds)), a USB cable (or wireless debugging), and room for
@@ -96,17 +96,18 @@ On Windows:
 
 Every page of the app, uninstalling, and running it from source: [DroidPlay for Windows](docs/android.md#droidplay-for-windows).
 
-### On Linux (preview)
+<!-- The "on-linux-preview" anchor keeps links made before Linux was an official platform working: the section was "On Linux (preview)" until 0.8.13. -->
+### <a id="on-linux-preview"></a>On Linux
 
-**DroidPlay for Linux** is the same app as an AppImage, `DroidPlay-<version>-x86_64.AppImage`, for x86_64 Linux with glibc 2.34 or later, in preview.
-Download it from the [latest release](https://github.com/enjoyerofslop/droidplay-core/releases/latest), beside Setup, with its `.sha256` (releases from before
-the AppImage have Setup alone); for something newer, testers take the `linux-package` workflow's **DroidPlay-AppImage** artifact, or build it with
-`dm/android/linux/stage.sh`. Make it executable (`chmod +x`) and open it. The first start of a version prepares it in
+**DroidPlay for Linux** is the same app as an AppImage, `DroidPlay-<version>-x86_64.AppImage`, for x86_64 Linux with glibc 2.34 or later. Download it from
+the [latest release](https://github.com/enjoyerofslop/droidplay-core/releases/latest), beside Setup, with its `.sha256` (every release from 0.8.12 on has
+one); for something newer, testers take the `linux-package` workflow's **DroidPlay-AppImage** artifact, or build it with `dm/android/linux/stage.sh`.
+Make it executable (`chmod +x`, or the file manager's Properties) and open it. The first start of a version prepares it in
 `~/.local/share/DroidPlay/<version>` (about 720 MB, a few seconds); later starts are quick. Get started works as on Windows: **Install tools** downloads
 Java, .NET and the Android SDK into `~/.local/share/nxnative/android/tools` (about 1.5 GB, 4 GB on disk), with no `sudo`; a phone that Linux won't let
 DroidPlay use over USB shows as **USB access needed**, and **How to connect a phone** says what to install. **Settings** › **Add to the applications
 menu** gives it a menu entry. Where FUSE is missing, `--appimage-extract-and-run` opens it. More:
-[DroidPlay for Linux](docs/android.md#droidplay-for-linux-preview).
+[DroidPlay for Linux](docs/android.md#droidplay-for-linux).
 
 ### On a Mac or from the command line
 
@@ -120,7 +121,7 @@ menu** gives it a menu entry. Where FUSE is missing, `--appimage-extract-and-run
 - **DroidPlay for Windows** says when a new release is out: press **Update**, or **Update to &lt;version&gt;** under Updates in **Settings**. It downloads
   the new Setup, checks it against the release, installs it and opens again; your games, builds and settings stay. Or close DroidPlay and run the new Setup
   yourself.
-- **DroidPlay for Linux** (preview) says so too, and **Update** downloads the release's AppImage into the old one's folder, checks it against the release,
+- **DroidPlay for Linux** says so too, and **Update** downloads the release's AppImage into the old one's folder, checks it against the release,
   puts it in the old one's place and opens it. Its first start prepares the new version and keeps the previous one; your games, builds and
   settings stay. An AppImage with the name it was downloaded with takes the new version's (the menu entry DroidPlay added follows it); one you renamed keeps
   your name. Where DroidPlay can't write to the AppImage's folder, **Download** opens the release page instead.
@@ -136,8 +137,8 @@ menu** gives it a menu entry. Where FUSE is missing, `--appimage-extract-and-run
   player 1 and hides them.
 - **Pause and back to the list:** the **≡** button at the top pauses the game and opens a small menu: resume, the touch layout, the frame-rate counter, the way to
   export or import the save, and back to the list, where **Play** on the same game resumes it.
-- **Saves** stay in the app's storage, so updating the app keeps them. DroidPlay for Windows backs them up to your computer from its **Phones** page.
-- **Game apps:** **Manage › Build a game app…** in DroidPlay for Windows makes one game into an app of its own, with its own icon and saves, to copy to a
+- **Saves** stay in the app's storage, so updating the app keeps them. DroidPlay for Windows and Linux backs them up to your computer from its **Phones** page.
+- **Game apps:** **Manage › Build a game app…** in DroidPlay for Windows and Linux makes one game into an app of its own, with its own icon and saves, to copy to a
   device and install there. It's for your own devices only: it carries the game, so never share it. A game app has no launcher, so its pause menu has no save
   row and it can't export or import its save yet; uninstalling it deletes the save.
 
@@ -320,7 +321,7 @@ DroidPlay for Mac's build of the game, its Mac host does it instead. Without eit
 
 - **Ask in the [DroidPlay Discord](https://discord.gg/3r92f8wmh7):** #help for a problem, #compatibility for how a game runs on your device. Its rules are
   this README's: no games, keys, firmware or packed APKs.
-- **When a build fails,** DroidPlay for Windows says why in plain words, with the button that fixes it where there is one. Otherwise **Copy report** on the
+- **When a build fails,** DroidPlay for Windows and Linux says why in plain words, with the button that fixes it where there is one. Otherwise **Copy report** on the
   Builds page copies a short report to paste in #help; it leaves out your user folder, the phone's serial and anything that looks like a key.
 - **A useful report** names the device and its GPU (Settings, or `adb shell getprop ro.product.model`), Android version, the game, its title ID and version,
   how it was packed (DroidPlay, the command line, game app or launcher), and attaches the log: `adb logcat -s DroidPlay` (`-s nxnative` for an app older
@@ -330,8 +331,8 @@ DroidPlay for Mac's build of the game, its Mac host does it instead. Without eit
 
 ## Guides
 
-- [DroidPlay for Windows](docs/android.md#droidplay-for-windows): installing, Get started and every page of the app, in detail.
-- [DroidPlay for Linux (preview)](docs/android.md#droidplay-for-linux-preview): the AppImage, what it needs, where it keeps its files.
+- [DroidPlay for Windows](docs/android.md#droidplay-for-windows): installing, Get started and every page of the app (the same on Linux), in detail.
+- [DroidPlay for Linux](docs/android.md#droidplay-for-linux): the AppImage, what it needs, phones over USB, updating, where it keeps its files.
 - [The Android app](docs/android.md#the-android-app): the launcher, a game's settings, the first start, controls, saves, removing a game and the log.
 - [Game apps](docs/android.md#game-apps): a game as an app of its own.
 - [Another Vulkan driver (Turnip)](docs/android.md#another-vulkan-driver-turnip): on an Adreno or Xclipse GPU, a driver you put on the phone.
@@ -462,7 +463,7 @@ For a game without a profile, the script writes a survey and tries a provisional
 
 ## How to play
 
-Switch 2 games are built from one `.nup` file or a folder of their files, not from NSPs, and need no `prod.keys`: see [Switch 2 games](#switch-2-games). On Android they are at an early stage ([Game Status](#game-status)); in DroidPlay for Windows, **+ Build game** picks the folder that holds the `.nup` or the dump.
+Switch 2 games are built from one `.nup` file or a folder of their files, not from NSPs, and need no `prod.keys`: see [Switch 2 games](#switch-2-games). On Android they are at an early stage ([Game Status](#game-status)); in DroidPlay for Windows and Linux, **+ Build game** picks the folder that holds the `.nup` or the dump.
 
 ### Build from the command line
 
