@@ -3,6 +3,8 @@
 // buffers reach the device (no underruns past the start), and that Stop and a second Start work (hle_audio.c's watchdog restarts the unit so).
 // Then the same with 20 ms data callbacks (DM_DBG_AU_FRAMES=960, an AYN Thor Pro's burst): the unit switches to its pacer, which calls the render callback
 // with 5 ms quanta at real time and keeps the data callbacks fed (au_pace.h); with DM_AAUDIO_RING=0 the callbacks stay 960 frames, rendered straight.
+// Last, AAudio's legacy path (DM_DBG_AAUDIO_PERF=none: a 962-frame burst on an Odin 2, as on an AYN Thor Pro) with a data callback 30 ms late every half
+// second (DM_DBG_AAUDIO_STALL): the callbacks back to back after each ask for more than the ring keeps, and take the rest from the render callback, not zeros.
 #include <AudioToolbox/AudioToolbox.h>
 #include <math.h>
 #include <stdio.h>
@@ -13,6 +15,7 @@
 int dm_aaudio_xruns(AudioUnit au);   // coreaudio_aaudio.c
 int dm_aaudio_paced(AudioUnit au);
 uint64_t dm_aaudio_short(AudioUnit au);
+uint64_t dm_aaudio_direct(AudioUnit au);
 static int fails, checks;
 #define EXPECT(what, ok) do { checks++; int ok_ = (ok); printf("%-60s %s\n", what, ok_ ? "✓" : "✗"); if (!ok_) fails++; } while (0)
 static _Atomic long g_frames, g_calls, g_nmin = 1 << 30, g_nmax; static double g_phase;
@@ -60,6 +63,23 @@ static void forced_960(int ring) {
     AudioOutputUnitStop(au); AudioUnitUninitialize(au); AudioComponentInstanceDispose(au);
     unsetenv("DM_DBG_AU_FRAMES"); unsetenv("DM_AAUDIO_RING");
 }
+static void legacy_late(void) {
+    setenv("DM_DBG_AAUDIO_PERF", "none", 1); setenv("DM_DBG_AAUDIO_STALL", "30:500", 1);
+    AudioUnit au = unit(); EXPECT("legacy path, late callbacks: unit made", au != NULL);
+    if (au) {
+        EXPECT("started", !AudioOutputUnitStart(au));
+        usleep(500000); double t1 = now_s(); long fr1 = g_frames;
+        sleep(3); double dt = now_s() - t1; long fr = g_frames - fr1;
+        printf("legacy, 30 ms late every 0.5 s: %.0f frames/s, %llu data callbacks took from the render callback, %llu padded, %d xruns\n", fr / dt,
+               (unsigned long long)dm_aaudio_direct(au), (unsigned long long)dm_aaudio_short(au), dm_aaudio_xruns(au));
+        EXPECT("about real time (48000 frames/s within 10 %)", fabs(fr / dt - 48000) < 4800);
+        EXPECT("switched to the pacer", dm_aaudio_paced(au));
+        EXPECT("the callbacks after a late one took the rest from the render callback", dm_aaudio_direct(au) > 0);
+        EXPECT("no data callback padded with zeros", dm_aaudio_short(au) == 0);
+        AudioOutputUnitStop(au); AudioUnitUninitialize(au); AudioComponentInstanceDispose(au);
+    }
+    unsetenv("DM_DBG_AAUDIO_PERF"); unsetenv("DM_DBG_AAUDIO_STALL");
+}
 int main(void) {
     AudioComponentDescription d = {.componentType = kAudioUnitType_Output};
     AudioComponent c = AudioComponentFindNext(NULL, &d); AudioUnit au = NULL;
@@ -83,6 +103,7 @@ int main(void) {
     AudioOutputUnitStop(au); AudioUnitUninitialize(au); AudioComponentInstanceDispose(au);
     forced_960(1);
     forced_960(0);
+    legacy_late();
     printf("== %d checks, %d failed ==\n", checks, fails);
     return fails != 0;
 }
