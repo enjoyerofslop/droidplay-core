@@ -2699,8 +2699,9 @@ static uint64_t g_ofw_chain, g_ofw_new;   // bindings on a copy of the chunk; co
 // a copy another kind of draw read) keep the old rules (wlok). DM_VK_LIVE=0 (env.txt): each such write takes a copy of its own and waits, and order-free copies start from the identity, as before
 static int wl_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_LIVE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_LIVE=0: draws' storage buffer writes take copies of their own and wait for pending ones, order-free copies start from the identity"); } return v; }
 static int g_wl_draw, g_wl_late; static uint32_t g_did = 1;   // a plain draw is made (vk_draw_); its pass has begun (wl_apply); the draw or dispatch being made
-static uint64_t g_wl_n[9];   // draws' writes on the chunk's copy, order-free writes on a copy holding the bytes, order-free copies from guest memory / from the GPU, draws' copies
-                             // made on the GPU, barriers put in, reads that waited (not a plain draw), reads that needed a barrier once the pass had begun, writes left to wait
+static uint64_t g_wl_n[10];   // draws' writes on the chunk's copy, order-free writes on a copy holding the bytes, order-free copies from guest memory / from the GPU, draws' copies
+                             // made on the GPU, barriers put in, reads that waited (not a plain draw), reads that needed a barrier once the pass had begun, writes left to wait,
+                             // dispatches' copies made on the GPU (wl_cs_copy)
 enum { WL_PEND = 1024 };
 static struct { uint64_t seq; int i; uint64_t kind; } g_wl_pend[WL_PEND]; static int g_wl_npend;   // the draw's accesses, noted once its pass has begun (wl_apply)
 static void wl_barrier(void) { rp_end(); cb_barrier(); g_wl_n[5]++; }
@@ -2732,8 +2733,9 @@ static int wl_fly_find(uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o)
     pthread_mutex_unlock(&g_cmu);
     return r;
 }
-// [addr, addr + n) copied on the GPU from (fb, fo) into the chunk's arena, and again as the snapshot it lands against; an order-free write's (ofw) or a draw's plain write
-static int wl_gpu_copy(uint64_t addr, size_t n, VkBuffer fb, VkDeviceSize fo, uint32_t ofw, uint32_t ofk, uint64_t kind, VkBuffer *b, VkDeviceSize *ao) {
+// [addr, addr + n) copied on the GPU from (fb, fo) into the chunk's arena, and again as the snapshot it lands against; an order-free write's (ofw) or a draw's plain write,
+// noted for the draw (note), or a dispatch's (no note: its own barriers order it)
+static int wl_gpu_copy(uint64_t addr, size_t n, VkBuffer fb, VkDeviceSize fo, uint32_t ofw, uint32_t ofk, uint64_t kind, int note, VkBuffer *b, VkDeviceSize *ao) {
     size_t rn = (n + 15) & ~(size_t)15; VkBuffer sb_; VkDeviceSize so;
     if (!ar_alloc(rn, b, ao)) return 0;
     int blk = C->ar_last; uint8_t *snap = ar_alloc(rn, &sb_, &so); if (!snap) return 0;
@@ -2741,8 +2743,8 @@ static int wl_gpu_copy(uint64_t addr, size_t n, VkBuffer fb, VkDeviceSize fo, ui
     VkBufferCopy r[2] = {{fo, *ao, n}, {fo, so, n}}; vkCmdCopyBuffer(c, fb, *b, 1, &r[0]); vkCmdCopyBuffer(c, fb, sb_, 1, &r[1]); cb_barrier();
     wb_t *w = wb_add(); if (!w) return 0;
     *w = (wb_t){-1 - blk, (size_t)*ao, n, 1, n, n, (uint8_t *)(uintptr_t)addr, snap}; w->gsnap = 1; w->ofw = ofw; w->ofk = ofk; w->og = ofw != 0; w->fwd = 1; C->nfwd++;
-    w->wlok = wl_later(C->nwb - 1, kind);   // (room is kept for it: wl_wplan, ofw_bind)
-    g_wl_n[ofw ? 3 : 4]++; return 1;
+    w->wlok = note ? wl_later(C->nwb - 1, kind) : 1;   // (room is kept for it: wl_wplan, ofw_bind)
+    g_wl_n[ofw ? 3 : note ? 4 : 9]++; return 1;
 }
 // A plain draw's storage buffer write of [addr, addr + n), not order-free: 1 on the chunk's newest copy of the range (*ix), 2 on a copy the GPU makes of a chunk in flight's,
 // 0 neither (it waits for what is pending)
@@ -2758,6 +2760,17 @@ static int wl_wplan(uint64_t addr, uint64_t n, int *ix) {
 }
 enum { WL_PROM = 64 };
 static struct { uint64_t a, n; } g_wl_prom[WL_PROM]; static int g_wl_nprom;   // the draw's writes draw_view made no sync for (wl_wcheck)
+// A dispatch writing a range whose newest copy is a chunk in flight's: its write needs a copy of the chunk being recorded to write in place on (buf_fwd), so it waited for
+// every chunk in flight to land and copied guest memory. Tears of the Kingdom's tile-bounds and light-list dispatches (3c8e9ba061067c07, bc58d5dec860c367, c7830fac6bbcb5b7)
+// at #457's save met their own last frame's copies that way about 2 times a frame, each a drain of the GPU with the replay's thread waiting. That copy is forwardable (a
+// dispatch's, or one that holds the bytes), so the GPU copies it into the chunk being recorded instead, with a second copy as the snapshot it lands against (wl_gpu_copy), and
+// the dispatch writes it in place as it would one of its chunk's. Counted with the draws' copies made on the GPU. DM_VK_LIVE=0: it waits, as before
+static int wl_cs_copy(uint64_t addr, uint64_t n) {   // draw_view, a dispatch's storage buffer write: 1 made (g_fwd_nwb moves past it, so buf_fwd finds it as the dispatch's chunk's)
+    if (!wl_on() || g_vdisp || !C || vk_safe() || !addr || !n || n > g_vk.props.limits.maxStorageBufferRange) return 0;
+    uintptr_t lo = (uintptr_t)addr; VkBuffer fb, b; VkDeviceSize fo, ao;
+    if (!wl_fly_find(lo, lo + (uintptr_t)n, &fb, &fo) || !wl_gpu_copy(addr, (size_t)n, fb, fo, 0, 0, WL_PLAIN, 0, &b, &ao)) return 0;
+    g_fwd_nwb = C->nwb; return 1;
+}
 static int wl_wcheck(uint64_t addr, uint64_t n) {   // draw_view: the barrier first when the write goes on the chunk's copy
     if (g_wl_nprom == WL_PROM) return 0;
     int ix = -1, p = wl_wplan(addr, n, &ix);
@@ -2772,7 +2785,7 @@ static int wl_wbind(uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *ao) {   
         if (!wl_later(ix, WL_PLAIN)) return 0;
         wb_t *w = &C->wb[ix]; *b = C->ar[-1 - w->st].b; *ao = (VkDeviceSize)w->off + (VkDeviceSize)(addr - (uintptr_t)w->dst); if (!w->fwd) { w->fwd = 1; C->nfwd++; }
         g_wl_n[0]++; return 1; }
-    if (p == 2) { VkBuffer fb; VkDeviceSize fo; uintptr_t lo = (uintptr_t)addr; if (wl_fly_find(lo, lo + n, &fb, &fo)) return wl_gpu_copy(addr, n, fb, fo, 0, 0, WL_PLAIN, b, ao); }
+    if (p == 2) { VkBuffer fb; VkDeviceSize fo; uintptr_t lo = (uintptr_t)addr; if (wl_fly_find(lo, lo + n, &fb, &fo)) return wl_gpu_copy(addr, n, fb, fo, 0, 0, WL_PLAIN, 1, b, ao); }
     return 0;
 }
 static int ofw_bind(const rb_sbuf *sb, uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *ao) {
@@ -2799,7 +2812,7 @@ static int ofw_bind(const rb_sbuf *sb, uint64_t addr, size_t n, VkBuffer *b, VkD
                 w->wlok = wl_later(C->nwb - 1, kind);
                 g_wl_n[2]++; g_ofw_new++; return 1; }
             if (!d) return 0;
-        } else if (wl_fly_find(lo, hi, &fb, &fo)) { if (!wl_gpu_copy(addr, n, fb, fo, sb->ofw, sb->ofk, kind, b, ao)) return 0; g_ofw_new++; return 1; }
+        } else if (wl_fly_find(lo, hi, &fb, &fo)) { if (!wl_gpu_copy(addr, n, fb, fo, sb->ofw, sb->ofk, kind, 1, b, ao)) return 0; g_ofw_new++; return 1; }
     }
     uint32_t *d = (uint32_t *)(void *)ar_alloc((n + 15) & ~(size_t)15, b, ao); if (!d) return 0;
     uint32_t id = ofw_identity(sb->ofw, sb->ofk); for (size_t q = 0; q < n / 4; q++) d[q] = id;
@@ -3695,7 +3708,7 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
         if (w_ && g_vdisp && (f) == sb_fwd && rd_home_on()) { uintptr_t hl_ = 0, hh_ = 0; if ((a) && (s)) rd_home_find(&g_rd_homes, (uintptr_t)(a), (uintptr_t)((a) + (s)), &hl_, &hh_); \
             if (hh_ > hl_ && !fwd_find(hl_, hh_, &fb_, &fo_)) RNG(hl_, hh_ - hl_); break; }   /* a discarded draw's write: its home range, found whole on the GPU or landed (rd_bind_w) */ \
         if (!w_ && (a) && (s)) wb_promote((uintptr_t)(a), (uintptr_t)((a) + (s)));   /* a draw's write it reads whole: on the GPU after a barrier */ \
-        if ((w_ && !cs) ? !((f) == sb_fwd && wl_wcheck((a), (s))) : !f((a), (s), w_, &fb_, &fo_)) RNG(a, s); } while (0)   /* a draw's storage buffer write: on a copy holding the bytes (wl_wplan), or it waits */
+        if ((w_ && !cs) ? !((f) == sb_fwd && wl_wcheck((a), (s))) : !f((a), (s), w_, &fb_, &fo_) && !(w_ && (f) == sb_fwd && wl_cs_copy((a), (s)))) RNG(a, s); } while (0)   /* a draw's storage buffer write: on a copy holding the bytes (wl_wplan); a dispatch's: on a copy of the chunk's own (wl_cs_copy); or it waits */
     g_fwd_nwb = C ? C->nwb : 0;   // cs: a dispatch (its stage alone), a draw run as one (g_vdisp), or a task / mesh draw in compute form, whose kernels are dispatches behind full barriers (gfx_vk_meshemu.inc)
     const int cs = (sh[0] && (sh[0]->stage == SH_CS || ((sh[0]->stage == SH_MS || sh[0]->stage == SH_TK) && !g_mesh))) || g_vdisp;
     g_rd_cs = cs;
