@@ -3449,6 +3449,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
 // stream's bytes, no queued copy writes them, and every attribute of the stream is read as it is (a converted one needs the bytes on the CPU)
 // chunk c's newest write to [lo, hi): 1 when one decides (*res: whether it can be read on the GPU, *b / *o where), 0 when the chunk does not write the range
 static int fwd_hit(chunk *c, int nwb, uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o, int *res) {
+    if (wbf_skip(c, lo, hi)) return 0;   // a chunk in flight whose write summary rules the range out (gfx_vk.c, wb_filter.h)
     for (int k = 0; k < c->ncop; k++) if (c->cop[k].dst < hi && lo < c->cop[k].dst + c->cop[k].n) { *res = 0; return 1; }
     for (int i = nwb - 1; i >= 0; i--) { const wb_t *w = &c->wb[i]; if (!wb_hits(w, lo, hi)) continue;
         int ipr = !w->fwd && w->inpl && g_rd_cs && ip_read_on();   // a draw's in-place write, read by a dispatch
@@ -3468,7 +3469,7 @@ static int fwd_find(uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o) {
     if (!C || hi <= lo) return 0;
     int n = g_fwd_nwb >= 0 && g_fwd_nwb <= C->nwb ? g_fwd_nwb : C->nwb, r = 0;
     if (fwd_hit(C, n, lo, hi, b, o, &r)) return r;
-    if (!atomic_load(&g_inflight_wb) && !atomic_load(&g_inflight_cop)) return 0;
+    if ((!atomic_load(&g_inflight_wb) && !atomic_load(&g_inflight_cop)) || wbf_fly_clear(lo, hi)) return 0;   // no chunk in flight writes the range (gfx_vk.c, wb_filter.h)
     pthread_mutex_lock(&g_cmu);
     for (int f = g_fifo_n - 1; f >= 0; f--) { chunk *w = g_fifo[f]; int nw = w->nwb;
         if (fwd_hit(w, nw, lo, hi, b, o, &r)) { if (r && w->hold < C->seq) w->hold = C->seq; break; } }

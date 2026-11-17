@@ -60,6 +60,7 @@
 #include "wb_live.h"   // a pending copy holding its range's bytes, written in place by later draws behind a barrier (gfx_vk_draw.inc wl_*)
 #include "tex_aspect.h"   // which aspect of its image a texture slot reads: stencil mode (gfx_vk_draw.inc tex_aspect)
 #include "tbuf_rows.h"   // a buffer texture read through a 2D slot as rows of 16384 texels (vt_create, vt_upload_, gfx_vk_draw.inc tex_rows_slot)
+#include "wb_filter.h"   // a submitted chunk's summary of the memory its pending writes cover, so lookups that can't meet them skip its lists (chunk_hits, gfx_vk_draw.inc fwd_hit)
 #include "rd_home.h"   // the home ranges of storage buffers draws under rasterizer discard write (gfx_vk_draw.inc rd_bind_w)
 #include "stream_clip.h"   // where an indexed draw's stream is looked up to among forwardable write-backs (gfx_vk_draw.inc stream_clip)
 #include "nvn_fstep.h"   // FSTEP_FIT: the performance hint's target (hint_frame)
@@ -406,6 +407,7 @@ typedef struct chunk {
     ds_list **dl; int ndl, cdl; ds_list **dt; int ndt, cdt; int nds;   // recycled descriptor sets (gfx_vk_draw.inc ds_get): the lists holding sets, those handed out from in this recording, the sets held
     gm_logref *gml; int ngml, cgml, gm_st, ip_wr;   // its raw store write logs; gm_st: a shader with raw stores ran in it (gfx_vk_gmem.inc); ip_wr: one wrote a storage buffer in place
     struct { const char *a, *b; uint32_t n, m; char kind; } cr[CR_MAX]; int ncr;   // what it recorded, the last CR_MAX of ncr (crumb): named when the GPU hangs or is lost in it (gpu_slow)
+    wb_filter wf;   // what its write-backs and queued copies cover, made when it is submitted (wbf_build); not read while it is the chunk being recorded (wbf_skip)
 } chunk;
 // Chunks in use (g_nchunk of NCHUNK_MAX): the one being recorded and those submitted, until the completion thread is done with them. With none free, cur() waits for the
 // oldest (the wait is in the GPU busy line: g_chunk_wait_ns). A submission is cut every 48-64 draws (EARLY_DRAWS, MID_DRAWS), so a game sends many a frame, and with four
@@ -767,6 +769,7 @@ static void gpu_slow(chunk *c, VkResult fr, uint64_t ns, int cut) {
         k += run; }
 }
 static void rb_record(chunk *c), rb_invalidate(chunk *c);   // gfx_vk_readback.inc
+static void wbf_build(chunk *c), wbf_union(void);   // (below, beside chunk_hits)
 // Submit the current chunk (an empty one too: its fence then follows the earlier ones); nvn_fence: the NVN fence it completes. → its sequence number, 0 if none
 static uint64_t chunk_submit(uint64_t nvn_fence) {
     if (!C) return 0;
@@ -781,6 +784,7 @@ static uint64_t chunk_submit(uint64_t nvn_fence) {
     if (rec) { cb_barrier(); rb_record(C); if (C->ts) vkCmdWriteTimestamp(C->cb, VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, g_tsq, 2 * (uint32_t)(C - g_ch) + 1); if (!deferred) vkEndCommandBuffer(C->cb); C->open = 0; }
     C->nvn_fence = nvn_fence;
     chunk *c = C; C = NULL;
+    wbf_build(c);   // its lists are complete: before it is in g_fifo, where the lookups find it
     c->sub_r = VK_SUCCESS; c->rq_ticket = 0;
     if (deferred) c->rq_ticket = rec_submit(rec ? c->cb : VK_NULL_HANDLE, c->fence, &c->sub_r);   // the recorder submits it and keeps what the queue said in sub_r (rq_make R_SUBMIT)
     else c->sub_r = submit_or_fence(rec ? c->cb : VK_NULL_HANDLE, c->fence, "");
@@ -792,6 +796,7 @@ static uint64_t chunk_submit(uint64_t nvn_fence) {
     if (c->nipw) atomic_fetch_add(&g_inflight_ipw, 1);   // and with a draw's in-place write-back (nipw: gm_inplace_w), which a dispatch reads where it lies (fwd_hit)
     if (c->ts && g_fgpu_on > 0) { c->gf = atomic_load(&g_cur_frame); c->gtag = 1; fgpu_begin(c->gf); }
     g_fifo[g_fifo_n++] = c; uint64_t seq = c->seq;
+    wbf_union();
     pthread_cond_broadcast(&g_ccv);
     pthread_mutex_unlock(&g_cmu);
     return seq;
@@ -820,9 +825,70 @@ static void wb_view(void) { view_(0); }
 // submissions; window acquires wait for everything submitted, hle_nvn.c): to tell a regression of these from another cause
 static int vk_safe(void) { static int v = -1; if (v < 0) v = getenv("DM_VK_SAFE") != NULL; return v; }
 static uint64_t g_view_cur, g_view_fly, g_view_free;   // draws that waited for the current chunk / for chunks in flight / that needed no wait
-static int wb_hits(const wb_t *w, uintptr_t lo, uintptr_t hi) { uintptr_t a = (uintptr_t)w->dst, e = a + w->dst_pitch * (w->rows ? w->rows - 1 : 0) + w->row_bytes; return a < hi && lo < e; }
+static uintptr_t wb_end(const wb_t *w) { return (uintptr_t)w->dst + w->dst_pitch * (w->rows ? w->rows - 1 : 0) + w->row_bytes; }
+static int wb_hits(const wb_t *w, uintptr_t lo, uintptr_t hi) { uintptr_t a = (uintptr_t)w->dst, e = wb_end(w); return a < hi && lo < e; }
+// A submitted chunk's summary (wb_filter.h): a lookup it rules out skips the chunk's lists. DM_VK_WB_FILTER=0 (env.txt): every lookup scans them, as before.
+// DM_VK_WB_FILTER_CHECK=1 (a diagnostic): a chunk the summary rules out is scanned anyway, and an overlap found there is counted, logged (the first 8) and scanned for as before
+static int wbf_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_WB_FILTER"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_WB_FILTER=0: every lookup of a pending write scans every chunk's lists"); } return v; }
+static int wbf_check(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_WB_FILTER_CHECK"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_WB_FILTER_CHECK=1: chunks the write summary rules out are scanned anyway"); } return v; }
+static uint64_t g_wbf_built, g_wbf_none, g_wbf_skip, g_wbf_scan, g_wbf_fly, g_wbf_bad;   // summaries made / chunks with none (too many wide ranges, raw stores); lookups that skipped a chunk / scanned it /
+                                                                                       // skipped every chunk in flight (wbf_fly_clear); DM_VK_WB_FILTER_CHECK's misses
+// The chunks in flight together (every summary in g_fifo merged), so most lookups skip them all without the lock. Written under g_cmu whenever g_fifo changes (a submission
+// on the replay thread, a completion on the completion thread), read without it by the replay thread (wbf_fly_clear) as a sequence lock: an odd count, or one that moved
+// during the read, means scan as before. A completion only takes ranges out, so a summary read before one lands still covers everything pending
+static wb_filter g_wfu; static _Atomic uint32_t g_wfu_seq;
+static void wbf_union(void) {   // under g_cmu, once g_fifo changed
+    if (!wbf_on()) return;
+    wb_filter u; wbf_reset(&u, WBF_UWIDE);
+    for (int f = 0; f < g_fifo_n; f++) wbf_merge(&u, &g_fifo[f]->wf);
+    uint32_t q = atomic_load_explicit(&g_wfu_seq, memory_order_relaxed);
+    atomic_store_explicit(&g_wfu_seq, q + 1, memory_order_relaxed); atomic_thread_fence(memory_order_release);
+    g_wfu = u;
+    atomic_store_explicit(&g_wfu_seq, q + 2, memory_order_release);
+}
+// 1: no chunk in flight writes [lo, hi) (nor reads it in a queued copy): the caller needn't take g_cmu and scan them (ranges_view_, wr_pending, fwd_find, the upload's check)
+static int wbf_fly_clear(uintptr_t lo, uintptr_t hi) {
+    if (!wbf_on()) return 0;
+    uint32_t q = atomic_load_explicit(&g_wfu_seq, memory_order_acquire);
+    if (q & 1) return 0;
+    int may = wbf_may(&g_wfu, lo, hi);
+    atomic_thread_fence(memory_order_acquire);
+    if (may || atomic_load_explicit(&g_wfu_seq, memory_order_relaxed) != q) return 0;
+    g_wbf_fly++;
+    if (wbf_check()) {   // every chunk in flight scanned anyway: an overlap is a miss of the summary (then each chunk goes through wbf_skip, which checks its own)
+        int hit = -1; pthread_mutex_lock(&g_cmu);
+        for (int f = 0; f < g_fifo_n && hit < 0; f++) { const chunk *c = g_fifo[f];
+            for (int i = 0; i < c->nwb && hit < 0; i++) if (wb_hits(&c->wb[i], lo, hi)) hit = f;
+            for (int i = 0; i < c->ncop && hit < 0; i++) { const cop_t *o = &c->cop[i]; if ((o->dst < hi && lo < o->dst + o->n) || (!o->fill && o->src < hi && lo < o->src + o->n)) hit = f; } }
+        pthread_mutex_unlock(&g_cmu);
+        if (hit >= 0 && g_wbf_bad++ < 8) LOG("[RED] [vk] DM_VK_WB_FILTER_CHECK: the chunks in flight's write summary ruled out %#lx+%#lx, which a write of the chunk %d in flight covers", (unsigned long)lo, (unsigned long)(hi - lo), hit);
+        return 0;
+    }
+    return 1;
+}
+static void wbf_build(chunk *c) {
+    wbf_reset(&c->wf, WBF_WIDE);
+    if (!wbf_on() || (c->gm_st && gm_store_wait())) { c->wf.ok = 0; return; }   // raw stores: a write anywhere (chunk_hits)
+    for (int i = 0; i < c->nwb && c->wf.ok; i++) wbf_add(&c->wf, (uintptr_t)c->wb[i].dst, wb_end(&c->wb[i]));
+    for (int i = 0; i < c->ncop && c->wf.ok; i++) { const cop_t *o = &c->cop[i]; wbf_add(&c->wf, (uintptr_t)o->dst, (uintptr_t)(o->dst + o->n)); if (!o->fill) wbf_add(&c->wf, (uintptr_t)o->src, (uintptr_t)(o->src + o->n)); }
+    if (c->wf.ok) g_wbf_built++; else g_wbf_none++;
+}
+// 1: chunk c, submitted, writes nothing of [lo, hi) (nor reads it in a queued copy): its lists need no scan. The chunk being recorded is always scanned (its lists grow)
+static int wbf_skip(const chunk *c, uintptr_t lo, uintptr_t hi) {
+    if (c == C || !c->wf.ok) return 0;
+    if (wbf_may(&c->wf, lo, hi)) { g_wbf_scan++; return 0; }
+    g_wbf_skip++;
+    if (wbf_check()) {
+        int hit = 0; for (int i = 0; i < c->nwb && !hit; i++) hit = wb_hits(&c->wb[i], lo, hi);
+        for (int i = 0; i < c->ncop && !hit; i++) { const cop_t *o = &c->cop[i]; hit = (o->dst < hi && lo < o->dst + o->n) || (!o->fill && o->src < hi && lo < o->src + o->n); }
+        if (hit) { if (g_wbf_bad++ < 8) LOG("[RED] [vk] DM_VK_WB_FILTER_CHECK: chunk %d's write summary ruled out %#lx+%#lx, which one of its %d write-backs or %d copies covers", (int)(c - g_ch),
+                                            (unsigned long)lo, (unsigned long)(hi - lo), c->nwb, c->ncop); return 0; }
+    }
+    return 1;
+}
 static int chunk_hits(const chunk *c, uintptr_t lo, uintptr_t hi, int write) {   // write: the CPU writes the range (a queued copy's source counts too: it is read when the copy runs)
     if (c->gm_st && gm_store_wait()) { g_gm_store_hits++; return 1; }   // raw stores ran in it: where they landed is known only from its write log, read when it completes
+    if (wbf_skip(c, lo, hi)) return 0;
     for (int i = 0; i < c->nwb; i++) if (wb_hits(&c->wb[i], lo, hi)) return 1;
     for (int i = 0; i < c->ncop; i++) { const cop_t *o = &c->cop[i]; if ((o->dst < hi && lo < o->dst + o->n) || (write && !o->fill && o->src < hi && lo < o->src + o->n)) return 1; }
     return 0;
@@ -835,9 +901,10 @@ static void ranges_view_(const rd_rng *r, int n, int write) {
     if (C) for (int i = 0; i < n && !cur_hit; i++) if (r[i].hi > r[i].lo && chunk_hits(C, r[i].lo, r[i].hi, write)) cur_hit = 1;
     if (cur_hit) { g_view_cur++; submit_wait(); return; }
     if (atomic_load(&g_inflight_wb) || atomic_load(&g_inflight_cop)) {
-        pthread_mutex_lock(&g_cmu);
-        for (int f = 0; f < g_fifo_n && !fly_hit; f++) for (int i = 0; i < n && !fly_hit; i++) if (r[i].hi > r[i].lo && chunk_hits(g_fifo[f], r[i].lo, r[i].hi, write)) fly_hit = 1;
-        pthread_mutex_unlock(&g_cmu);
+        int any = 0; for (int i = 0; i < n && !any; i++) any = r[i].hi > r[i].lo && !wbf_fly_clear(r[i].lo, r[i].hi);   // none: no chunk in flight writes any of them
+        if (any) { pthread_mutex_lock(&g_cmu);
+            for (int f = 0; f < g_fifo_n && !fly_hit; f++) for (int i = 0; i < n && !fly_hit; i++) if (r[i].hi > r[i].lo && chunk_hits(g_fifo[f], r[i].lo, r[i].hi, write)) fly_hit = 1;
+            pthread_mutex_unlock(&g_cmu); }
     }
     if (fly_hit) { g_view_fly++; g_vs = 1; cpu_view(); return; }
     g_view_free++;
@@ -846,7 +913,7 @@ static void ranges_view(const rd_rng *r, int n) { ranges_view_(r, n, 0); }
 // whether a write-back or a queued copy not landed yet (in the current chunk or one in flight) writes into [lo, hi): no wait, no count (gfx_vk_draw.inc lsnap_take)
 static int wr_pending(uintptr_t lo, uintptr_t hi) {
     if (C && chunk_hits(C, lo, hi, 0)) return 1;
-    if (!atomic_load(&g_inflight_wb) && !atomic_load(&g_inflight_cop)) return 0;
+    if ((!atomic_load(&g_inflight_wb) && !atomic_load(&g_inflight_cop)) || wbf_fly_clear(lo, hi)) return 0;
     int hit = 0; pthread_mutex_lock(&g_cmu);
     for (int f = 0; f < g_fifo_n && !hit; f++) hit = chunk_hits(g_fifo[f], lo, hi, 0);
     pthread_mutex_unlock(&g_cmu);
@@ -1176,6 +1243,7 @@ static void *chunk_thread(void *arg) {
         qr_done(c, fr == VK_SUCCESS, ts, nq, ntq, npq);   // after every read of them, after the NVN fence (the game waits on it), before busy = 0
         pthread_mutex_lock(&g_cmu);
         memmove(g_fifo, g_fifo + 1, --g_fifo_n * sizeof *g_fifo);
+        wbf_union();
         if (had_wb) atomic_fetch_sub(&g_inflight_wb, 1);
         if (had_cop) atomic_fetch_sub(&g_inflight_cop, 1);
         if (had_fwd) atomic_fetch_sub(&g_inflight_fwd, 1);   // after its write-backs landed (chunk_done), as g_inflight_wb
@@ -1674,7 +1742,7 @@ static void up_view(const vtex *v, const tex_t *t) {
         size_t e = (size_t)(v->layers - 1) * t->L.layer_size + srow * (rows ? rows - 1 : 0) + pitch; if (srow >= pitch && e > n) n = e; }   // a shorter stride reads within the storage (vt_upload_)
     uintptr_t lo = (uintptr_t)t->mem, hi = lo + n; uint64_t seq = 0;
     if (C && chunk_hits(C, lo, hi, 0)) { g_vsite[2][0]++; submit_wait(); return; }
-    if (atomic_load(&g_inflight_wb) || atomic_load(&g_inflight_cop)) {
+    if ((atomic_load(&g_inflight_wb) || atomic_load(&g_inflight_cop)) && !wbf_fly_clear(lo, hi)) {
         pthread_mutex_lock(&g_cmu); for (int f = 0; f < g_fifo_n; f++) if (chunk_hits(g_fifo[f], lo, hi, 0)) seq = g_fifo[f]->seq; pthread_mutex_unlock(&g_cmu); }
     if (seq) { g_vsite[2][1]++; seq_wait(seq); return; }
     g_up_free++;
@@ -2841,6 +2909,9 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
         LOG("[vk] arena write-backs (storage buffers, buffer images, transform feedback), frames %llu to %llu: %.1f a frame, %.0f KB a frame, %.0f%% read through the GPU's cached copy (%s); landing every write-back took the completion thread %.2f ms a frame",
             f0, frame, (double)(n - n0) / fr, (double)(b - b0) / 1024 / fr, n > n0 ? 100.0 * (double)(r - r0) / (double)(n - n0) : 0.0, rb_state(), (double)(t - t0) / 1e6 / fr);
         f0 = frame; n0 = n; b0 = b; r0 = r; t0 = t; }
+    LOG("[vk] pending-write lookups: %llu skipped every chunk in flight, %llu chunks skipped by their own write summary, %llu scanned; %llu summaries made, %llu chunks without one%s (cumulative; wb_filter.h)",
+        (unsigned long long)g_wbf_fly, (unsigned long long)g_wbf_skip, (unsigned long long)g_wbf_scan, (unsigned long long)g_wbf_built, (unsigned long long)g_wbf_none, !wbf_on() ? "; DM_VK_WB_FILTER=0" : "");
+    if (wbf_check()) LOG("[vk] DM_VK_WB_FILTER_CHECK: %llu lookups the summary ruled out met a write (cumulative)", (unsigned long long)g_wbf_bad);
     LOG("[vk] guest reads of draws: waited for the current submission %llu, for submissions in flight %llu, no wait %llu (%llu of them after a barrier that made a draw's write readable on the GPU: wb_promote); uniform updates and small copies: %llu / %llu / %llu; submissions %llu (cumulative)",
         (unsigned long long)g_view_cur, (unsigned long long)g_view_fly, (unsigned long long)g_view_free, (unsigned long long)g_wb_promote, (unsigned long long)g_mem_cur, (unsigned long long)g_mem_fly, (unsigned long long)g_mem_free,
         (unsigned long long)g_flushes);
