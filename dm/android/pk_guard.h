@@ -66,3 +66,43 @@ static int pkg_strikes(const char *path, int crashed) {
 
 // The list set aside under another name (an earlier one there is replaced), so the session starts from an empty list: 1 when it was moved
 static int pkg_set_aside(const char *list, const char *aside) { return rename(list, aside) == 0; }
+
+// ---- The play guard: pipelines built during play ----
+// A pipeline a game needs during play goes through the same compiler, and one it crashes on ends every start at the same scene: on a Retroid Pocket G2 (Adreno 735, driver
+// V@0762) Qualcomm's compiler crashed building Ocarina of Time's first compute pipeline (a039399e6336de1b) as the first 3D scene began, at every start (droidplay-core#512).
+// Nothing is written while builds run: only the crash hook writes, on the crashing thread, one record of the build it was in (pgd_note: one pwrite, async-signal-safe) to the
+// marker <cache>.pcrash1. The next start moves it to the skip list <cache>.pskip1, and pipelines of those shaders are not built from then on (their draws or dispatches are
+// skipped, with a red line). A kill or a hang inside a build writes nothing: lmkd kills at a scene's load while several threads build, and none of those builds is to blame.
+// A record keeps the driver's version and the host's build, and records of another are not used: an updated driver may compile the shader, and a new host may hand it other
+// code (the SPIR-V rewrites made at load), so each update gives it one more try rather than leaving a fixed shader out for good.
+typedef struct { char magic[4]; char kind; uint8_t z; uint8_t pad[2]; uint32_t drv, host; char sh[4][17]; uint8_t pad2[12]; } pgd_rec;   // kind: 'g' graphics, 'c' compute, 'k' a task / mesh kernel in compute form; z: the vertex .z variant (said, not matched)
+
+// A host build's number in the records: FNV-1a of its commit line
+static uint32_t pgd_host(const char *build) { uint32_t h = 2166136261u; for (; build && *build; build++) h = (h ^ (uint8_t)*build) * 16777619u; return h; }
+
+// The record of a build of these shaders (keys of up to 16 characters; NULL for an empty slot). Plain stores only, as the crash hook makes it
+static void pgd_make(pgd_rec *r, char kind, uint32_t drv, uint32_t host, const char *const sh[4], int z) {
+    memset(r, 0, sizeof *r); memcpy(r->magic, "PGD1", 4); r->kind = kind; r->drv = drv; r->host = host; r->z = (uint8_t)(z != 0);
+    for (int i = 0; i < 4; i++) if (sh[i]) memcpy(r->sh[i], sh[i], strnlen(sh[i], 16));
+}
+
+// From the crash handler, on the crashing thread
+static void pgd_note(int fd, const pgd_rec *r) { if (fd >= 0) (void)!pwrite(fd, r, sizeof *r, 0); }
+
+// What the last start's crash left in the marker: 1 with the record in r. The marker is removed either way, so a record is taken once
+static int pgd_take(const char *path, pgd_rec *r) {
+    int fd = open(path, O_RDONLY | O_CLOEXEC); if (fd < 0) return 0;
+    ssize_t got = pread(fd, r, sizeof *r, 0); close(fd); unlink(path);
+    return got == (ssize_t)sizeof *r && !memcmp(r->magic, "PGD1", 4);
+}
+
+// The skip list's records made under driver version drv and host build host, in a buffer the caller frees: their count. The file keeps only those
+static size_t pgd_skip_load(const char *path, uint32_t drv, uint32_t host, pgd_rec **out) {
+    uint8_t *all; size_t n = pkg_skip_load(path, sizeof(pgd_rec), &all), k = 0;
+    *out = (pgd_rec *)all;
+    for (size_t i = 0; i < n; i++) { pgd_rec r; memcpy(&r, all + i * sizeof r, sizeof r); if (!memcmp(r.magic, "PGD1", 4) && r.drv == drv && r.host == host) memcpy(all + k++ * sizeof r, &r, sizeof r); }
+    if (k < n) {   // records of other drivers or host builds are dropped from the file, so it does not grow with every update
+        int fd = open(path, O_WRONLY | O_TRUNC | O_CLOEXEC); if (fd >= 0) { (void)!write(fd, all, k * sizeof(pgd_rec)); close(fd); } }
+    if (!k) { free(all); *out = NULL; }
+    return k;
+}

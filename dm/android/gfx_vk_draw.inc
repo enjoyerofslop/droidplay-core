@@ -1893,8 +1893,49 @@ static int g_pkg_fd = -1;
 static _Atomic int g_pkg_tid;   // the prewarm thread while it compiles a list entry, so the crash dump flags the marker (pb_dump)
 static nvn_hmap g_pk_skip;
 static pthread_once_t g_pkg_once = PTHREAD_ONCE_INIT;
+// The play guard (pk_guard.h pgd_*): the marker <cache>.pcrash1, which only the crash hook writes (pb_mark), and the skip list <cache>.pskip1, read once here and read-only after.
+// A skipped pipeline is matched by its kind and shaders alone, so one crash leaves out every variant of them (state, the vertex .z), not one crash per variant
+static int g_pgd_fd = -1; static uint32_t g_pgd_host;   // the marker; this host's build (pgd_host)
+static nvn_hmap g_pgd_skip;
+static const char *pgd_kind(char k) { return k == 'c' ? "compute" : k == 'k' ? "task / mesh compute-form kernel" : "graphics"; }
+static void pgd_init(const char *c) {
+    const char *e = getenv("DM_VK_PLAY_GUARD"); if (e && *e == '0') { LOG("[vk] DM_VK_PLAY_GUARD=0: pipelines whose build crashed an earlier start are built again, and a crash in a build is not recorded"); return; }
+    char mk[700], sk[700]; snprintf(mk, sizeof mk, "%s.pcrash1", c); snprintf(sk, sizeof sk, "%s.pskip1", c);
+    const char *dm_build_commit(void); g_pgd_host = pgd_host(dm_build_commit());
+    uint32_t drv = g_vk.props.driverVersion; pgd_rec r;
+    if (pgd_take(mk, &r) && r.drv == drv && r.host == g_pgd_host) {
+        pkg_skip_add(sk, (const uint8_t *)&r, sizeof r);
+        LOG("[RED] [vk] the %s pipeline of shaders %s %s %s %s%s crashed the last start while it was built (in the driver's shader compiler, or making its modules), so it is not "
+            "built from now on and its %s are skipped (%s; DM_VK_PLAY_GUARD=0 builds it again)", pgd_kind(r.kind), r.sh[0][0] ? r.sh[0] : "-", r.sh[1][0] ? r.sh[1] : "-",
+            r.sh[2][0] ? r.sh[2] : "-", r.sh[3][0] ? r.sh[3] : "-", r.z ? " (vertex .z variant)" : "", r.kind == 'g' ? "draws" : "dispatches", sk);
+    }
+    pgd_rec *all; size_t n = pgd_skip_load(sk, drv, g_pgd_host, &all);
+    g_pgd_skip.klen = sizeof(pgd_rec); for (size_t i = 0; i < n; i++) { all[i].z = 0; nvn_hm_put(&g_pgd_skip, &all[i], (void *)1); }
+    if (n) LOG("[RED] [vk] %zu pipeline(s) are not built this session, as their build crashed an earlier start of this host under this driver (%s): the first is %s %s", n, sk, pgd_kind(all[0].kind), all[0].sh[0]);
+    free(all);
+    g_pgd_fd = pkg_open(mk);
+}
+// A pipeline of these shaders crashed an earlier start's build (pgd_init): not built, with a red line (at most 16 a session)
+static int pgd_skipped(char kind, const char *const sh[4]) {
+    if (!g_pgd_skip.n) return 0;
+    pgd_rec r; pgd_make(&r, kind, g_vk.props.driverVersion, g_pgd_host, sh, 0);
+    if (!nvn_hm_get(&g_pgd_skip, &r)) return 0;
+    static _Atomic int nl; if (atomic_fetch_add(&nl, 1) < 16)
+        LOG("[RED] [vk] the %s pipeline of shaders %s %s %s %s is not built: a build of it crashed an earlier start, so its %s are skipped (DM_VK_PLAY_GUARD=0 builds it)", pgd_kind(kind),
+            sh[0] ? sh[0] : "-", sh[1] ? sh[1] : "-", sh[2] ? sh[2] : "-", sh[3] ? sh[3] : "-", kind == 'g' ? "draws" : "dispatches");
+    return 1;
+}
+// DM_VK_PIPE_CRASH=<shader key> (env.txt, a test): a build of a pipeline with that shader crashes on purpose inside its slot (a store to address 0x48, as the compiler's fault in
+// droidplay-core#512), so the play guard and the start-up list's guard can be tried on a phone whose driver compiles everything. Called between pb_begin and the compile
+static void pgd_test_crash(char kind, const char *const sh[4]) {
+    const char *want = getenv("DM_VK_PIPE_CRASH"); if (!want || !*want) return;
+    for (int i = 0; i < 4; i++) if (sh[i] && !strncmp(sh[i], want, 16)) {
+        LOG("[vk] DM_VK_PIPE_CRASH=%s: this %s pipeline's build crashes now, as a test of the crash guards", want, pgd_kind(kind));
+        *(volatile int *)(uintptr_t)0x48 = 1; }
+}
 static void pk_guard_init(void) {
     const char *c = getenv("DM_PIPELINE_CACHE"); if (!c) return;
+    pgd_init(c);
     char mk[700], sk[700]; snprintf(mk, sizeof mk, "%s.making4", c); snprintf(sk, sizeof sk, "%s.skip4", c);
     uint8_t r[PK_REC]; int crashed; pk_head h;
     int took = pkg_take(mk, r, PK_REC, &crashed) && (memcpy(&h, r, sizeof h), h.magic == PK_MAGIC && h.size == PK_TAIL);
@@ -2031,14 +2072,21 @@ static int pb_begin(char kind, const char *const sh[4], uint8_t topo, uint8_t nc
     return -1;
 }
 static void pb_end(int i) { if (i >= 0) atomic_store(&g_pb[i].tid, 0); }
+// crash.c, on the crashing thread, before the dump (crash_set_mark_hook), which can wait a second on the stderr lock and exit, or fault: what the guards record, one pwrite.
+// The start-up list's entry crashed its compile (pk_guard_init says so at the next start and skips it); else the build this thread was in during play (pgd_init)
+static void pb_mark(void) {
+    int me = gettid();
+    if (atomic_load(&g_pkg_tid) == me) { pkg_crashed(g_pkg_fd, PK_REC); return; }
+    for (int i = 0; i < PB_MAX && g_pgd_fd >= 0; i++) if (atomic_load(&g_pb[i].tid) == me) {
+        pgd_rec r; pgd_make(&r, g_pb[i].kind, g_vk.props.driverVersion, g_pgd_host, g_pb[i].sh, g_pb[i].z); pgd_note(g_pgd_fd, &r); break; }
+}
 static void pb_dump(void) {   // crash.c, on the crashing thread, after its backtrace
     int me = gettid();
-    if (atomic_load(&g_pkg_tid) == me) pkg_crashed(g_pkg_fd, PK_REC);   // the start-up list's entry crashed its compile: the next start says so and skips it (pk_guard_init)
     for (int i = 0; i < PB_MAX; i++) { int t = atomic_load(&g_pb[i].tid); if (t <= 0) continue;
         char tn[32] = ""; char path[64]; snprintf(path, sizeof path, "/proc/self/task/%d/comm", t);
         int fd = open(path, O_RDONLY); if (fd >= 0) { ssize_t n = read(fd, tn, sizeof tn - 1); close(fd); if (n > 0) tn[n - (tn[n - 1] == '\n')] = 0; }
         fprintf(stderr, "[dm] pipeline being built%s: thread %d \"%s\", %s, shaders %s %s %s %s%s, topology %u, %u colour targets%s\n", t == me ? " by the crashing thread" : "", t, tn,
-                g_pb[i].kind == 'c' ? "compute" : "graphics", g_pb[i].sh[0] ? g_pb[i].sh[0] : "-", g_pb[i].sh[1] ? g_pb[i].sh[1] : "-", g_pb[i].sh[2] ? g_pb[i].sh[2] : "-",
+                pgd_kind(g_pb[i].kind), g_pb[i].sh[0] ? g_pb[i].sh[0] : "-", g_pb[i].sh[1] ? g_pb[i].sh[1] : "-", g_pb[i].sh[2] ? g_pb[i].sh[2] : "-",
                 g_pb[i].sh[3] ? g_pb[i].sh[3] : "-", g_pb[i].z ? " (vertex .z variant)" : "", g_pb[i].topo, g_pb[i].ncolor, g_pb[i].miss ? " (fragment variant without some inputs)" : ""); }
 }
 // The pipeline of key k into pp (its layout and pipeline). Under the replay's lock from pipe_get; the start-up list (prewarm_thread) calls it without the lock after pipe_prep,
@@ -2054,6 +2102,7 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
         if (nvn_hm_get(&g_pk_skip, r)) { static _Atomic int nl; if (atomic_fetch_add(&nl, 1) < 8)
             LOG("[RED] [vk] a pipeline the start-up list skips (an earlier start ended during its compile) is compiled now for a draw: shaders %s %s; if the app ends here, the driver "
                 "cannot compile it", k->sh[0] ? k->sh[0]->key : "-", k->sh[1] ? k->sh[1]->key : "-"); } }
+    { const char *pk_[4]; for (int i = 0; i < 4; i++) pk_[i] = k->sh[i] ? k->sh[i]->key : NULL; if (pgd_skipped('g', pk_)) return VK_ERROR_INITIALIZATION_FAILED; }   // its build crashed an earlier start
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo lc = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; vkCreateDescriptorSetLayout(g_vk.dev, &lc, NULL, &g_empty_dsl); }
     VkDescriptorSetLayout sets[SPV_NOPTR_SET + 1] = {g_empty_dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl}; uint32_t nset = 1; int gmnp = 0;
     VkPipelineShaderStageCreateInfo st[4]; lmod *lms[4]; uint32_t ns = 0; VkSpecializationInfo psi; memset(&psi, 0, sizeof psi);
@@ -2142,7 +2191,7 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC);
     const char *pbk[4]; uint32_t miss = 0; for (int i = 0; i < 4; i++) { pbk[i] = k->sh[i] ? k->sh[i]->key : NULL;
         if (k->sh[i] && k->sh[i]->stage == SH_PS) { const vshader *pv = pipe_ps_prev(k); miss = pv ? k->sh[i]->io_in & ~pv->io_out : 0; } }
-    int pb = pb_begin('g', pbk, (uint8_t)tp, (uint8_t)k->ncolor, (uint8_t)(k->z != 0), miss);
+    int pb = pb_begin('g', pbk, (uint8_t)tp, (uint8_t)k->ncolor, (uint8_t)(k->z != 0), miss); pgd_test_crash('g', pbk);
     VkResult pr = lm_pipeline(&pc, NULL, st, lms, ns, &pp->p);
     pb_end(pb);
     atomic_fetch_add(&g_pso_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0); atomic_fetch_add(&g_pso_made, 1);
@@ -3825,6 +3874,8 @@ static cpipe_t *cpipe_e5(vshader *s, uint64_t mask) {
     return cpipe_make(s, cp, &m);
 }
 static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod) {
+    const char *pbk[4] = {s->key, NULL, NULL, NULL};
+    pk_guard(); if (pgd_skipped('c', pbk)) return NULL;   // its build crashed an earlier start (kept with no pipeline: not tried again)
     if (!g_empty_dsl) { VkDescriptorSetLayoutCreateInfo ec = {.sType = VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO}; vkCreateDescriptorSetLayout(g_vk.dev, &ec, NULL, &g_empty_dsl); }
     VkDescriptorSetLayout sl[SPV_NOPTR_SET + 1] = {s->dsl, g_empty_dsl, g_empty_dsl, g_empty_dsl, s->pool ? g_pool_dsl : g_empty_dsl, g_empty_dsl};   // the pool set after empty ones (gfx_vk_pool.inc)
     uint32_t nsl = s->pool ? POOL_SET + 1 : 1;
@@ -3833,7 +3884,7 @@ static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod) {
     if (vkCreatePipelineLayout(g_vk.dev, &lc, NULL, &cp->pl) != VK_SUCCESS) return NULL;
     VkComputePipelineCreateInfo pc = {.sType = VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO, .layout = cp->pl,
         .stage = {.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO, .stage = VK_SHADER_STAGE_COMPUTE_BIT, .pName = "main"}};   // its module: lm_pipeline
-    const char *pbk[4] = {s->key, NULL, NULL, NULL}; int pb = pb_begin('c', pbk, 0, 0, 0, 0);
+    int pb = pb_begin('c', pbk, 0, 0, 0, 0); pgd_test_crash('c', pbk);
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); VkResult pr = lm_pipeline(NULL, &pc, &pc.stage, mod, 1, &cp->p);
     pb_end(pb);
     atomic_fetch_add(&g_cpso_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0); atomic_fetch_add(&g_cpso_made, 1);

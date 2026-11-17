@@ -1,5 +1,5 @@
 """dm/android/pk_guard.h (the start-up list's marker and skip list: an entry whose compile never finishes is left out from the next start on, and the whole list is set
-aside after two starts in a row crashed in it), built for the PC with the
+aside after two starts in a row crashed in it; the play guard's: a pipeline whose build crashed a start is not built at the next ones), built for the PC with the
 system's clang and driven through ctypes on records like the list's. POSIX only: skipped on Windows, and without a C compiler."""
 import ctypes
 import os
@@ -26,6 +26,12 @@ X int g_add(const char *p, const uint8_t *r, size_t n) { return pkg_skip_add(p, 
 X void g_free(void *q) { free(q); }
 X int g_strikes(const char *p, int crashed) { return pkg_strikes(p, crashed); }
 X int g_aside(const char *l, const char *a) { return pkg_set_aside(l, a); }
+X size_t g_prec(void) { return sizeof(pgd_rec); }
+X void g_pmake(pgd_rec *r, char kind, uint32_t drv, uint32_t host, const char *a, const char *b, int z) { const char *sh[4] = {a, b, NULL, NULL}; pgd_make(r, kind, drv, host, sh, z); }
+X void g_pnote(int fd, const pgd_rec *r) { pgd_note(fd, r); }
+X int g_ptake(const char *p, pgd_rec *r) { return pgd_take(p, r); }
+X size_t g_pload(const char *p, uint32_t drv, uint32_t host, pgd_rec **out) { return pgd_skip_load(p, drv, host, out); }
+X uint32_t g_phost(const char *b) { return pgd_host(b); }
 '''
 
 
@@ -51,6 +57,14 @@ class PkGuard(unittest.TestCase):
         L.g_free.argtypes = [ctypes.c_void_p]
         L.g_strikes.argtypes = [ctypes.c_char_p, ctypes.c_int]
         L.g_aside.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        L.g_prec.restype = ctypes.c_size_t
+        L.g_pmake.argtypes = [ctypes.c_char_p, ctypes.c_char, ctypes.c_uint32, ctypes.c_uint32, ctypes.c_char_p, ctypes.c_char_p, ctypes.c_int]
+        L.g_phost.restype = ctypes.c_uint32
+        L.g_phost.argtypes = [ctypes.c_char_p]
+        L.g_pnote.argtypes = [ctypes.c_int, ctypes.c_char_p]
+        L.g_ptake.argtypes = [ctypes.c_char_p, ctypes.c_char_p]
+        L.g_pload.restype = ctypes.c_size_t
+        L.g_pload.argtypes = [ctypes.c_char_p, ctypes.c_uint32, ctypes.c_uint32, ctypes.POINTER(ctypes.c_void_p)]
 
     @classmethod
     def tearDownClass(cls): shutil.rmtree(cls.tmp, ignore_errors=True)
@@ -140,6 +154,46 @@ class PkGuard(unittest.TestCase):
         self.aside.write_bytes(b'old'); self.ls.write_bytes(rec(5))
         self.assertEqual(self.lib.g_aside(str(self.ls).encode(), str(self.aside).encode()), 1)
         self.assertEqual(self.aside.read_bytes(), rec(5)); self.assertFalse(self.ls.exists())
+
+
+    # The play guard (pgd_*): only the crash hook writes; the next start takes the record into the skip list, kept per driver version and host build
+    def prec(self, kind, drv, a, b=None, z=0, host=5):
+        n = self.lib.g_prec(); buf = ctypes.create_string_buffer(n)
+        self.lib.g_pmake(buf, kind, drv, host, a, b, z); return buf.raw
+
+    def ptake(self, path):
+        buf = ctypes.create_string_buffer(self.lib.g_prec()); return buf.raw if self.lib.g_ptake(path, buf) else None
+
+    def pload(self, path, drv, host=5):
+        n = self.lib.g_prec(); p = ctypes.c_void_p(); k = self.lib.g_pload(path, drv, host, ctypes.byref(p))
+        out = [ctypes.string_at(p.value + i * n, n) for i in range(k)]
+        self.lib.g_free(p); return out
+
+    def test_the_play_guards_record(self):
+        self.assertEqual(self.lib.g_prec(), 96)
+        r = self.prec(b'c', 0x802fa01f, b'a039399e6336de1b')
+        self.assertEqual(r[:4], b'PGD1'); self.assertEqual(r[4:5], b'c'); self.assertEqual(r[16:33], b'a039399e6336de1b\0')
+        self.assertEqual(r[33:], bytes(96 - 33))   # the other slots and the padding zero, so records compare whole
+        self.assertEqual(self.lib.g_phost(b''), 2166136261); self.assertNotEqual(self.lib.g_phost(b'2a376a350475 (v0.8.12)'), self.lib.g_phost(b'2a376a350476 (v0.8.12)'))
+        self.assertNotEqual(self.prec(b'g', 1, b'aaaaaaaaaaaaaaaa', b'bbbbbbbbbbbbbbbb', 1), self.prec(b'g', 1, b'aaaaaaaaaaaaaaaa', b'bbbbbbbbbbbbbbbb', 0))
+
+    def test_a_crash_in_a_build_is_taken_once_at_the_next_start(self):
+        mk = str(self.d / 'c.pcrash1').encode()
+        fd = self.lib.g_open(mk); os.close(fd); self.assertIsNone(self.ptake(mk))   # a session with no crash leaves an empty marker
+        fd = self.lib.g_open(mk); r = self.prec(b'c', 7, b'a039399e6336de1b'); self.lib.g_pnote(fd, r); os.close(fd)
+        self.assertEqual(self.ptake(mk), r); self.assertFalse(os.path.exists(mk)); self.assertIsNone(self.ptake(mk))
+        Path(mk.decode()).write_bytes(r[:50]); self.assertIsNone(self.ptake(mk))   # a part record
+        Path(mk.decode()).write_bytes(b'X' + r[1:]); self.assertIsNone(self.ptake(mk))   # not a record
+
+    def test_the_play_skip_list_is_kept_per_driver_version_and_host_build(self):
+        sk = str(self.d / 'c.pskip1').encode(); n = self.lib.g_prec()
+        a, b, c = self.prec(b'c', 7, b'a039399e6336de1b'), self.prec(b'g', 7, b'1111111111111111', b'2222222222222222'), self.prec(b'k', 8, b'3333333333333333')
+        d = self.prec(b'c', 7, b'4444444444444444', host=6)
+        for r in (a, b, a, c, d): self.lib.g_add(sk, r, n)
+        self.assertEqual(self.pload(sk, 7), [a, b]); self.assertEqual(Path(sk.decode()).read_bytes(), a + b)   # the other drivers' and builds' records dropped from the file
+        for r in (c, d): self.lib.g_add(sk, r, n)
+        self.assertEqual(self.pload(sk, 7, host=6), [d]); self.assertEqual(self.pload(sk, 9), []); self.assertEqual(Path(sk.decode()).read_bytes(), b'')
+        self.assertEqual(self.pload(str(self.d / 'none').encode(), 7), [])
 
 
 if __name__ == '__main__':
