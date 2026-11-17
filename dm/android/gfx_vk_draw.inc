@@ -542,6 +542,21 @@ static size_t spv_fit_inarr(const uint32_t *code, size_t nw, const char *what, u
 }
 // The module with each raw global memory helper keeping its last pool table entry's range and delta in private words (spv_gmcache.h), in *out (to free); 0 when it
 // has no such helper, or one not in the translator's form (said once). DM_SPV_GMCACHE=0 (env.txt): helpers as translated, reading the entry's six words on every access
+static int gm_on(void);   // gfx_vk_gmem.inc: raw global memory is on for this game and device
+// With raw global memory off, a module that goes through physical pointers (the translator's raw global memory helpers) gets its loads through them made null
+// constants and its stores dropped (spv_nophys.h), so its raw loads read 0 without the driver ever reading a pointer: Arm's Mali lost the GPU on those pointers
+// with the table empty. DM_SPV_NOPHYS=0 (env.txt): made as translated, as before
+static size_t spv_fit_nophys(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_NOPHYS"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_SPV_NOPHYS=0: with raw global memory off, physical pointer accesses stay as translated"); }
+    *out = NULL;
+    if (!on || gm_on() || nw < 5 || !spv_gmcache_wanted(code, nw)) return 0;
+    size_t cap = nw + 4 * SPV_NOPHYS_TYPES; uint32_t *s = malloc(2 * (size_t)code[3] * 4), *o = malloc(cap * 4); int ch = 0;
+    size_t k = s && o ? spv_nophys(code, nw, s, o, cap, &ch) : 0; free(s);
+    if (!k) { free(o); return 0; }
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1)) LOG("[vk] raw global memory off: shaders' loads through physical pointers read 0 and their stores are dropped (DM_SPV_NOPHYS=0: as translated). First: %s, %d accesses", what, ch);
+    *out = o; return k;
+}
 static size_t spv_fit_gmcache(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_GMCACHE"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_SPV_GMCACHE=0: raw global memory helpers read their last entry's range from the table on every access"); }
     *out = NULL;

@@ -27,7 +27,8 @@
 // on Qualcomm's Adreno (its own driver and Turnip), Samsung's Xclipse (its driver compiles the physical pointers, and the AHardwareBuffer route's pages read cached:
 // Frostpunk's meshes on a Galaxy Z Flip 7) and Arm's Mali (the AHardwareBuffer route too: Ocarina of Time's Kokiri Forest lit on a Pixel 9 Pro XL's Mali-G715). Mali had
 // it off, and there the off path lost the GPU: the shaders that bind the table read through a pointer the driver faulted on (TRANSLATION_FAULT in the load/store cache)
-// at Kokiri's first frame, so the game stayed black. Why the off path faults is open (docs/reference/rendering.md). Another GPU stays off unless DM_VK_RAW_GMEM_ANYGPU=1.
+// at Kokiri's first frame, so the game stayed black: the driver read the pointer whatever the lookup said. With raw global memory off, modules now go without their
+// physical pointer accesses (spv_nophys.h, gfx_vk_draw.inc spv_fit_nophys), so raw loads read 0 on any GPU. Another GPU stays off unless DM_VK_RAW_GMEM_ANYGPU=1.
 // A driver that refuses OpConvertUToPtr (the Ayn Odin 2's Adreno 740, the Razr's 730) reaches the pieces through a descriptor array instead (gfx_vk_gmem_noptr.inc, spv_noptr.h).
 #ifndef VK_EXT_map_memory_placed   // Vulkan 1.3.290; the NDK r28 headers are 1.3.275
 #define VK_EXT_map_memory_placed 1
