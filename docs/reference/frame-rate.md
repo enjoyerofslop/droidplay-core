@@ -155,6 +155,12 @@ Frame pacing: the host's frame step, engine frame limiters, present intervals an
   - on: 45.2 and 52.4 fps, the world at 960×540 and 896×504;
   - off: 37.9 and 35.6 fps, at 1024×576.
   - Half of the game's timestamp reports open a submission (4,487 of 8,998).
+- **Checked on the other games on that phone** (q369, launches in turn with `DM_VK_TS_FIRST=0`; the count line and a diagnostic log of what each read):
+  - Super Mario Odyssey (`dl_metro`), Skyward Sword HD (`skyloft`) and Pokémon Shield (`postwick`) report a timestamp that opens a submission too.
+  - Odyssey: 36.4–37.6 fps against 36.7–37.4, GPU 13.8 ms both ways, the same draws and picture. Its opening report had read 2.7 ms after the GPU-written report that follows it, time running backwards; the two now read the same instant.
+  - Skyward Sword HD: the span it reads became a steady 3.6–3.8 ms instead of alternating 2.7 and 5.1. Its frame rate swings with its interval drop either way: 40.7–56.5 fps (mean 49.7, six runs) against 32.9–54.5 (mean 47.1, five), GPU 8.7–9.0 ms both ways, the same picture.
+  - Shield: 29.9 fps in every run, GPU 24.8 ms both ways, the same picture.
+  - Smash and Brilliant Diamond report no timestamps, so they are untouched.
 
 ### Raw NVN timestamp units
 
