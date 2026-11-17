@@ -248,8 +248,15 @@ Both in handheld mode, driven over adb with `DM_CTL`.
   - **Frame rate:** 30 fps in every one of 276 ten-second windows, the battles included. GPU median 11.5 ms a frame, the clock at 680 MHz throughout.
   - **Other:** one red line (`0b8bcbe86791ef65`, as above); PSS 2.9–3.3 GB, little swap; no crash; no underruns (not listened to).
 
+- **2026-11-17, the Google Pixel 9 Pro XL (Mali-G715, Android 17; q358):** the game app from the branch that runs vertex-stage storage writes in the fragment stage ([Vertex-stage storage writes run in the fragment stage](../../../docs/reference/rendering.md#vertex-stage-storage-writes-run-in-the-fragment-stage-android)), a new game on Normal into the first battle.
+  - **With `DM_VK_VS_FRAG=0`:** the opening's cutscenes draw their characters, but in the battle's intro and the battle Noah's party and the Agnian soldiers are missing (Mali has no vertex-stage stores, so the skinning draws under rasterizer discard are left out).
+  - **By default:** all are drawn, in the battle too. 30 fps in the opening (GPU p50 24–25 ms); 24.5 fps over the battle intro's first minute, while the characters' pipelines were built.
+  - **Red lines:** the transform-feedback line above, and `pipeline creation failed: VkResult -3` for two pipelines with a geometry shader (`b5f17d227ab8ecd0` / `9250108618485c07` and `f5d9900f9a887bad` / `abdad6e24b16e263`), both ways, so not from that change. Not investigated.
+  - **Not tried:** past the auto-attack tutorial, save and Continue.
+
 ## Found on this game
 
+- [Vertex-stage storage writes run in the fragment stage](../../../docs/reference/rendering.md#vertex-stage-storage-writes-run-in-the-fragment-stage-android): the battle's characters on Mali; see [Android](#android).
 - [Same-pass feedback through a read-only image](../../../docs/reference/rendering.md#same-pass-feedback-read-through-a-snapshot): lighting shader `15816d836842bfb5` reads its R32Uint zone mask between barriers. Reading the previous frame’s mask made the Colony Sigma cutscene alternate in brightness. Resolved ([#1009](https://github.com/seedds/nxnative/issues/1009)): measured on an Apple M2 in Events Theater chapter 1's Colony Sigma battle, 8 of 10 bursts flipped brightness every frame before (sign-flip fraction 0.83–1.00), at most 0.28 of 11 after. The extra snapshots cost GPU time there: p50 50.4 → 53.0 ms, 18.3 → 17.2 fps. Open: if the shader loads the mask at its own pixel, a tile read (as sampled textures have) would avoid that cost; it needs the translator to record image loads' coordinates.
 - [Monolith ARH1, XBC1 and HCPS/SLCT shader containers](../../../docs/reference/shaders.md#monolith-arh1-xbc1-and-hcpsslct-shader-containers).
 - [Subgroup operations rewritten for a one-lane subgroup](../../../docs/reference/shaders.md#subgroup-operations-rewritten-for-a-one-lane-subgroup).
