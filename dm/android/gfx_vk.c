@@ -2475,9 +2475,11 @@ static int rt_keep(const p_set_rt *a, const p_set_rt *b) {
 // A timestamp report that comes before anything else in a submission found no chunk open, and went to the completion thread's clock when the chunk after it completed, not to the
 // GPU's at that point of the commands. Link's Awakening reports one at the start and one at the end of each frame's commands and sizes its dynamic resolution by the difference:
 // the start read when the first chunk (64 draws of its shadow map) had already run, 1-2 ms late, so the game took its frame for that much cheaper than it was, raised its
-// resolution, and on a Retroid Pocket 5 missed its vsync about half the time. Such a report now opens the chunk and is written by the GPU like any other.
-// DM_VK_TS_FIRST=0 (env.txt): the completion's time, as before
-static int ts_first_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TS_FIRST"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_TS_FIRST=0: a timestamp report before a submission's first chunk takes that chunk's completion time"); } return v; }
+// resolution, and on a Retroid Pocket 5 missed its vsync about half the time. With the switch on, such a report opens the chunk and is written by the GPU like any other.
+// Off by default: on a Galaxy S25 Edge the same game then took its frames for longer than they were, switched between 2 and 4 refreshes twice as often and fell from
+// 49 to 35 fps (the 0.8.13 release smoke), while the Retroid Pocket 5 gained; the span a GPU-written first report opens can take in the replay's gaps between chunks.
+// DM_VK_TS_FIRST=1 (env.txt): such a report opens the chunk and the GPU writes it
+static int ts_first_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TS_FIRST"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_TS_FIRST=1: a timestamp report before a submission's first chunk opens it and is written by the GPU"); } return v; }
 static uint64_t g_ts_first;   // such reports written by the GPU
 static uint64_t g_op_warned;   // ops this replay does not handle, logged once each
 static uint64_t g_mesh_skipped;   // task / mesh draws skipped (OP_DRAW with DM_PRIM_MESH_TASKS)
