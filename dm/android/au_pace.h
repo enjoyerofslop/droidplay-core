@@ -34,13 +34,15 @@ static uint32_t aup_target(uint32_t callback_max, uint32_t quantum, uint32_t cap
     return t > cap - quantum ? cap - quantum : (uint32_t)t;
 }
 // Quanta to render on a tick: up to the target, as many as the time that passed (due frames, one quantum on time), so the game gets one buffer back every
-// 5 ms as from the console's mixer, not a whole device callback's worth at once. Below the ring's low point (target less the largest callback: where a
-// callback on time leaves it) one more, which fills the ring at the start and makes up a device clock running faster than the pacer's
+// 5 ms as from the console's mixer, not a whole device callback's worth at once. Below the ring's low point one more, which fills the ring at the start and
+// makes up a device clock running faster than the pacer's. The low point is where a callback on time leaves the ring, less the quantum a callback that
+// comes just before a tick takes early: with it at the target less the callback, 960-frame callbacks out of phase with the ticks made one tick in ten
+// render two quanta and the next none, and a game that keeps three buffers (CRIWARE) found its queue empty at the second about every 30 s
 static uint32_t aup_quanta(uint64_t fill, uint32_t target, uint32_t callback_max, uint32_t quantum, uint64_t due) {
     if (fill >= target) return 0;
     uint64_t need = (target - fill + quantum - 1) / quantum, most = (due + quantum / 2) / quantum;
     if (!most) most = 1;
-    if (fill + callback_max < target) most++;
+    if (fill + callback_max + quantum < target) most++;
     return (uint32_t)(need < most ? need : most);
 }
 // The pacer's next quantum to render into, then commit it once rendered
