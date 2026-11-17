@@ -1,0 +1,8 @@
+# Switches this game gets on Android (build_android_from_nsp.py puts them in the game's defaults.txt; env.txt and the settings screen still win)
+# DM_VK_RECORDER=1: the replay's vkCmd* calls, descriptor set writes and submissions on a thread of their own (gfx_vk_rec.inc), as Breath of the Wild and Ocarina of Time
+# have them. At droidplay-core#457's save (Thyphlo Ruins by night, about 4,200 draws a frame) on a Galaxy S25 Edge (Adreno 830) vkUpdateDescriptorSets alone was 8.9 ms of
+# the replay thread's 40 ms a frame. With the live copies, the dispatch copies and the passes kept over the same render targets (docs/reference/rendering.md), the
+# recorder takes the replay thread from 38.7 to about 20.5 ms and its wall time under the frame step's two vsyncs: 29.9 fps in three runs (frame p50 33.5 ms, the GPU
+# governor at 525 MHz), against 20.2 without it (three vsyncs, 342 MHz); the opening cave 30 fps against 20. Before the live copies it made the save slower (a recorder
+# drain at each of the then 16 waits a frame, droidplay-core#504). The process takes more CPU a second with it (about 64 ms a frame at 30 fps against 69 at 20)
+DM_VK_RECORDER=1

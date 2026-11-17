@@ -159,6 +159,18 @@ Packed for Android as its own game app (`--game-apk`, the 21.9 GB RomFS as the d
 
   - **Memory is tight either way:** the tablet's MemAvailable fell to 0.21–0.32 GB at some point in every launch with it on and to 0.29–0.31 GB with it off, with 5.8–8.0 GB of swap free. Nothing was killed, and raw global memory logged no red line.
   - **The picture** is the race as before: the kart, the other racers, the scenery, the track's surface untextured.
+- **Keep the GPU clock up, on by default, 2026-11-17** (Galaxy Z Fold 8, Adreno 840, warm). The profile's [`android_defaults.txt`](android_defaults.txt) turns on `DM_VK_GPU_FLOOR=100` for phones with Qualcomm's KGSL driver; the settings screen still turns it off.
+
+  | Three 10.5-minute Mushroom Cup launches in turn | Off | On | Off |
+  |---|---|---|---|
+  | Race median (worst minute) | 24.2 fps (19.5) | 29.1 fps (23.8) | 24.4 fps (20.0) |
+  | GPU clock median | 342 MHz | 646 MHz | 342 MHz |
+  | Lowest thermal cap | 578 MHz | 461 MHz from minute 4 | 578 MHz |
+  | Skin temperature | 39.1 → 41.2 °C | 41.1 → 43.7 °C | 39.2 → 41.4 °C |
+
+  - The race needs only about 18 ms of GPU a frame, so it holds 27–30 fps every minute even at the 461 MHz cap. Without the floor the governor keeps the GPU near 342 MHz.
+  - The cost is about 2 °C more and thermal status 2. One launch on, and it started 2 °C warmer than the others.
+  - PSS grew from about 9 to 10 GB and swap from 3.5 to 4.9 GB over 10 minutes either way, with no kill. One launch with it off stopped on a black loading screen before a race, as on the Pad 3.
 - **Frame times on Turnip:** menus and the movie 28–41 ms a frame; 3D scenes, the race included, 300–500 ms, of which the GPU is 21–45 ms and the replay's submit and present the rest. The track's surface is untextured (15 sparse images over the image limit), roadside bushes are missing (mesh draws skipped), and "virtual pool remap … failed" is logged several thousand times a run (Android cannot alias the private memory a virtual pool maps).
 
 ## Open

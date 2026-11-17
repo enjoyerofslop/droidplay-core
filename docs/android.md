@@ -1,7 +1,7 @@
 # DroidPlay on Android
 
-The [README](../README.md#droidplay-core) has the short path: install DroidPlay for Windows, build a game, play it. This page has the rest: every page of
-the desktop app, the app on the phone, game apps, another Vulkan driver, games that compile their shaders while they run, the command line and the files that
+The [README](../README.md#droidplay-core) has the short path: install DroidPlay for Windows or Linux, build a game, play it. This page has the rest: every
+page of the desktop app, the app on the phone, game apps, another Vulkan driver, games that compile their shaders while they run, the command line and the files that
 ask a running game for diagnostics.
 
 > [!IMPORTANT]
@@ -9,7 +9,8 @@ ask a running game for diagnostics.
 > Switch, and the app you build is for you only. Do not share APKs packed with a game, keys or firmware.
 
 - [DroidPlay for Windows](#droidplay-for-windows): [installing](#installing), [Get started](#get-started), [the pages](#the-pages), [from source](#from-source)
-- [DroidPlay for Linux (preview)](#droidplay-for-linux-preview)
+  (Get started and the pages are the same on Linux)
+- [DroidPlay for Linux](#droidplay-for-linux): [phones on Linux](#phones-on-linux)
 - [DroidPlay on a Mac](#droidplay-on-a-mac)
 - [The Android app](#the-android-app)
 - [Game apps](#game-apps)
@@ -21,8 +22,8 @@ ask a running game for diagnostics.
 ## DroidPlay for Windows
 
 DroidPlay for Windows is the desktop app in this repository, `scripts/nxnative_android.py`: it drives the packing script and adb for you. The same app runs on
-Linux as an AppImage ([DroidPlay for Linux](#droidplay-for-linux-preview), in preview), and on Linux and a Mac [from source](#from-source). It has
-DroidPlay's name and icon, but it is a separate app from [DroidPlay on a Mac](#droidplay-on-a-mac).
+x86_64 Linux as an AppImage, [DroidPlay for Linux](#droidplay-for-linux), where Get started and the pages below work the same way; and on Linux and a Mac
+[from source](#from-source). It has DroidPlay's name and icon, but it is a separate app from [DroidPlay on a Mac](#droidplay-on-a-mac).
 
 ### Installing
 
@@ -48,7 +49,7 @@ DroidPlay opens on **Get started**: four steps, each saying what it needs and wh
   to download, 5 GB installed), with one bar and the time left. Installing the Android SDK means accepting its
   [license](https://developer.android.com/studio/terms), which the app asks first; its usage metrics stay off. What the computer already has is kept.
   From a console: `build_android_from_nsp.py --setup --accept-android-licenses` (Windows, and x86_64 Linux, where it installs into
-  `~/.local/share/nxnative/android/tools`: [DroidPlay for Linux](#droidplay-for-linux-preview)).
+  `~/.local/share/nxnative/android/tools`: [DroidPlay for Linux](#droidplay-for-linux)).
 - **Your phone:** plug it in with USB debugging on; the step says when the phone is waiting for you to tap **Allow**.
 - **Your first game:** add the folder with its NSP or XCI files, or the folder that holds a Switch 2 game's `.nup` or dump (no keys needed), then **Build and install**. The build works beside the game's files, so their drive needs room:
   a lot of it for a game with many shaders ([Free space](#free-space)).
@@ -128,19 +129,20 @@ DroidPlay Core (`git clone https://github.com/enjoyerofslop/droidplay-core`) and
 
 The command line's requirements are in [What the command line needs](#what-the-command-line-needs); the app's **Settings** page checks them.
 
-## DroidPlay for Linux (preview)
+<!-- The "droidplay-for-linux-preview" anchor keeps links made before Linux was an official platform working: the section was "DroidPlay for Linux (preview)" until 0.8.13. -->
+## <a id="droidplay-for-linux-preview"></a>DroidPlay for Linux
 
 DroidPlay for Linux is the app of [DroidPlay for Windows](#droidplay-for-windows) packed as one AppImage, `DroidPlay-<version>-x86_64.AppImage` (about
-130 MB), built the same way: its own Python with the app's modules and Qt, and DroidPlay Core. It's in preview.
+130 MB), built the same way: its own Python with the app's modules and Qt, and DroidPlay Core.
 
 - **Getting it:** `DroidPlay-<version>-x86_64.AppImage` from the [latest release](https://github.com/enjoyerofslop/droidplay-core/releases/latest), beside
   Windows' Setup, with its `.sha256` (`sha256sum -c DroidPlay-<version>-x86_64.AppImage.sha256`; the release page lists each file's SHA-256 too). Each
-  release gets it a few minutes after it's published, once it has started on five distributions (`release-assets.yml`); releases from before the AppImage
+  release gets it a few minutes after it's published, once it has started on five distributions (`release-assets.yml`); releases before 0.8.12
   have Setup alone. Something newer than the latest release: the **DroidPlay-AppImage** artifact of a `linux-package` workflow run (kept for 7 days; a test
   build, which doesn't look for updates), or build it from a checkout with `dm/android/linux/stage.sh --out <folder>` (x86_64 Linux with uv, git, curl and
   binutils' readelf).
-- **What it runs on:** x86_64 Linux with glibc 2.34 or later: Ubuntu 22.04, Debian 12, Fedora 35, RHEL 9, Linux Mint 21, SteamOS 3 or newer, and current
-  Arch, openSUSE Tumbleweed and their relatives. There is no arm64 build, since Google publishes the Android SDK for Linux on x86_64 alone. It draws its
+- **What it runs on:** x86_64 Linux with glibc 2.34 or later: Ubuntu 22.04, Debian 12, Fedora 35, RHEL 9, Linux Mint 21, and current
+  SteamOS, Arch, openSUSE Tumbleweed and their relatives. There is no arm64 build, since Google publishes the Android SDK for Linux on x86_64 alone. It draws its
   window with X11 or Wayland, whichever the desktop runs (`QT_QPA_PLATFORM=xcb` forces X11), and needs the libraries every desktop has: OpenGL/EGL,
   X11 and Wayland's client libraries, fontconfig, FreeType, GLib (on openSUSE also `libgthread-2_0-0`) and D-Bus. Qt's X11 helpers that a fresh install may lack (`libxcb-cursor` and the rest)
   come with it.
@@ -264,9 +266,10 @@ At the bottom of a game's screen in the app, under **Save**:
   computer, then import the folder.
 - **Earlier saves** puts back a save kept before an import, or one from **Back up saves** on the games list.
 
-From a computer, **DroidPlay for Windows** does the same over adb, for a phone that's connected:
-- **Library › Manage › Import a save to the phone…** sends a save folder or archive for that game. Unlike the phone, the computer unpacks RAR and 7z archives too
-  (with Windows' own `tar`); a Deflate64 zip still needs unpacking first (Explorer's **Extract all** reads it).
+From a computer, **DroidPlay for Windows and Linux** does the same over adb, for a phone that's connected:
+- **Library › Manage › Import a save to the phone…** sends a save folder or archive for that game. Unlike the phone, the computer unpacks RAR and 7z archives too:
+  on Windows with its own `tar`, on Linux with libarchive's `bsdtar` where it's installed (Arch has it; `libarchive-tools` on Debian and Ubuntu, `bsdtar` on
+  Fedora and openSUSE), since GNU tar reads neither. A Deflate64 zip still needs unpacking first (Explorer's **Extract all** reads it, and `unzip` on Linux).
 - **Manage › Restore its save from a backup…**, and **Phones › Restore a backup…** for every game in one, send saves back from what **Back up saves to this computer**
   copied (pick its folder, or one of the dated folders inside it; the newest backup of each game is taken).
 - The command line's `--import-save` and `--restore-backup` do the same ([Packing from the command line](#packing-from-the-command-line)).
@@ -274,8 +277,8 @@ From a computer, **DroidPlay for Windows** does the same over adb, for a phone t
 The save goes to `files/import/<title ID>/` on the phone, which adb can write; the app's own save folder it can't. DroidPlay on the phone then shows what it found and
 asks, as for an import from the phone: at once when the app is open or opens, or after the game, when it's being played.
 
-Before an import or a restore, the game's save is kept in `Android/data/org.nxnative.android/files/backups/<time>-<title ID>/`, which DroidPlay for Windows' **Back up
-saves to this computer** copies too. The game must not be running; the app offers to close it, and progress it hasn't saved is lost. Uninstalling the app deletes
+Before an import or a restore, the game's save is kept in `Android/data/org.nxnative.android/files/backups/<time>-<title ID>/`, which **Back up saves to this computer**
+in DroidPlay for Windows and Linux copies too. The game must not be running; the app offers to close it, and progress it hasn't saved is lost. Uninstalling the app deletes
 those backups along with the saves, so export the saves you care about first.
 
 - **Play the game once before importing**, until it saves. The import then checks the new files against that save, and finds the save's folder by its file names
@@ -288,7 +291,7 @@ those backups along with the saves, so export the saves you care about first.
 A game can also be built as an app of its own, with its name, icon and saves, opening straight into the game. It installs on any arm64 device with Vulkan
 without the DroidPlay app or a connection to your computer: copy the file over and open it. Several install side by side, apart from the DroidPlay app.
 
-- **DroidPlay for Windows:** **Manage › Build a game app…**, then APK or XAPK. No phone needs to be connected; the file goes in the game's folder. For an APK, **Keep the game data for an SD card** is `--romfs-beside`.
+- **DroidPlay for Windows and Linux:** **Manage › Build a game app…**, then APK or XAPK. No phone needs to be connected; the file goes in the game's folder. For an APK, **Keep the game data for an SD card** is `--romfs-beside`.
 - **DroidPlay on a Mac:** **Build Game App**.
 - **The command line:** `--game-apk`, or `--game-apk --xapk` ([Packing from the command line](#packing-from-the-command-line)).
 
@@ -319,7 +322,7 @@ the system's driver. On a phone with neither an Adreno nor an Xclipse GPU (a Mal
 code, loses the GPU, or ends in its first 30 seconds (a hang you closed, say), the next start runs on the system's driver once, and the start screen and the log say why;
 the start after that tries your driver again. A crash outside the driver's code is noted but doesn't count against it, and a hang after the first 30 seconds isn't
 caught. The app keeps each driver's last start in `files/vk_driver_state/<driver file>.json` and each game's in
-`files/games/<title ID>/vk_driver_result.txt`, which DroidPlay for Windows can read. Every start, on any driver, also writes
+`files/games/<title ID>/vk_driver_result.txt`, which DroidPlay for Windows and Linux can read. Every start, on any driver, also writes
 `files/games/<title ID>/vk_start.txt`: the driver and GPU it ran on, how many pipelines the driver refused (their draws are missing from the picture) with the first
 shaders' keys, and a lost GPU. Remove the line from `env.txt`
 (or start it with `#`) to go back. Each driver keeps its own pipeline cache, so the first start on a new driver compiles the game's pipelines again (it can take a
@@ -374,7 +377,7 @@ with no storage permission. The rest of the game (code, shaders) stays on the ph
 - **Copying it yourself:** `--romfs-dir sd --no-romfs` copies no data, sets the path, and prints it. Copy the extraction's image there, for example with
   `adb push "<NSP folder>/<title ID>_build/extract/<version>/RomFS.img" /storage/<card ID>/Android/data/org.nxnative.android/files/romfs/<title ID>/RomFS.img`, or with
   a card reader.
-- **In DroidPlay for Windows:** a game's **Options** has **Game data**, Phone storage (the default) or SD card, saved per game. SD card is offered only when the picked
+- **In DroidPlay for Windows and Linux:** a game's **Options** has **Game data**, Phone storage (the default) or SD card, saved per game. SD card is offered only when the picked
   phone has exactly one card (the script's own reading of `sm list-volumes`, else `/storage`); an install with it chosen passes `--romfs-dir sd`, and **Build a game app**
   passes `--romfs-beside` for an APK. If the card is out when you install, DroidPlay says so and doesn't start. Going back to Phone storage copies the data back, as above.
 - **When the image isn't there** (the card taken out, or the image not copied yet), the game doesn't start, and the log says so: `[RED] the game's RomFS … is missing`.
@@ -421,7 +424,7 @@ of them has no shaders at all (`[RED] the game is packed without shaders`). It r
 
 The build says so before its long steps, once it has read the game's files (its `main` holds GLSL sources and calls `glslcCompile`):
 `[RED] <game> compiles some of its shaders while it runs, so its first install may draw some things black. Play it to its first scene, then bring them in with --update-shaders`.
-DroidPlay for Windows shows the same notice on the Builds page. On the game's page it then points at **Manage › Update shaders from the phone**, which is in bold in the
+DroidPlay for Windows and Linux shows the same notice on the Builds page. On the game's page it then points at **Manage › Update shaders from the phone**, which is in bold in the
 Manage menu. A game app can't take them in later, so build it after the steps below. The app captures them on the phone by itself:
 
 1. Play the game for a while: each shader is saved the first time the game compiles it (in the game's folder on the phone, `glslc_capture/`).
@@ -437,7 +440,7 @@ profile; a registered profile's shader tables name the captures they were made f
 Portal, Portal 2, Hyrule Warriors: Definitive Edition and Catherine: Full Body. Only a build on a Mac captures them (it boots the game in the Mac host), so on Windows and
 Linux these games can't be built yet ([droidplay-core#441](https://github.com/enjoyerofslop/droidplay-core/issues/441)). The build stops at once, before it extracts
 the game: `<game> compiles <N> of its shaders while it runs, with its own shader compiler (GLSLC), and game profile <id>'s shader tables need them. Only a build on a
-Mac can capture them so far`. DroidPlay for Windows shows such a game as **Builds on a Mac only for now** and leaves its Play button off. On a Mac, build the game for
+Mac can capture them so far`. DroidPlay for Windows and Linux shows such a game as **Builds on a Mac only for now** and leaves its Play button off. On a Mac, build the game for
 the Mac first: DroidPlay for Mac, or `build_ipa_from_nsp.py` on the same folder. The Android build then takes the captures from that build's
 `<title ID>_build/extract/<version>/glslc_capture` ([why](reference/packing.md#an-android-build-of-a-game-that-compiles-shaders-while-it-runs-stops-at-the-split-off-a-mac)).
 
