@@ -141,8 +141,8 @@ DroidPlay for Linux is the app of [DroidPlay for Windows](#droidplay-for-windows
   have Setup alone. Something newer than the latest release: the **DroidPlay-AppImage** artifact of a `linux-package` workflow run (kept for 7 days; a test
   build, which doesn't look for updates), or build it from a checkout with `dm/android/linux/stage.sh --out <folder>` (x86_64 Linux with uv, git, curl and
   binutils' readelf).
-- **What it runs on:** x86_64 Linux with glibc 2.34 or later: Ubuntu 22.04, Debian 12, Fedora 35, RHEL 9, Linux Mint 21, SteamOS 3 or newer, and current
-  Arch, openSUSE Tumbleweed and their relatives. There is no arm64 build, since Google publishes the Android SDK for Linux on x86_64 alone. It draws its
+- **What it runs on:** x86_64 Linux with glibc 2.34 or later: Ubuntu 22.04, Debian 12, Fedora 35, RHEL 9, Linux Mint 21, and current
+  SteamOS, Arch, openSUSE Tumbleweed and their relatives. There is no arm64 build, since Google publishes the Android SDK for Linux on x86_64 alone. It draws its
   window with X11 or Wayland, whichever the desktop runs (`QT_QPA_PLATFORM=xcb` forces X11), and needs the libraries every desktop has: OpenGL/EGL,
   X11 and Wayland's client libraries, fontconfig, FreeType, GLib (on openSUSE also `libgthread-2_0-0`) and D-Bus. Qt's X11 helpers that a fresh install may lack (`libxcb-cursor` and the rest)
   come with it.
