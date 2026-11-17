@@ -232,6 +232,7 @@ static int memu_draw(memu_t *m, vshader *fs, const prog_t *fpr, int fpst, const 
     if (!rp_start()) { g_drop[5]++; return 0; }
     VkCommandBuffer c = C->cb;
     occl_begin();
+    pp->last = atomic_load(&g_presents); pp->seq = C->seq;   // (gfx_vk_pheavy.inc)
     bf_pipeline(c, pp->p);
     if (pp->alpha) vkCmdPushConstants(c, pp->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof D.alpha_ref, &D.alpha_ref);   // the alpha test's reference, as vk_draw_
     if (pp->lbpc) { int32_t b0 = 0; vkCmdPushConstants(c, pp->pl, pp->lbpc, SPV_LBASE_PC, 4, &b0); }   // the layer base: none, as vk_draw_ (spv_fit_lbase)

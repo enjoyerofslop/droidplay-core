@@ -72,6 +72,7 @@ Build with `scripts/build_ipa_from_nsp.py <NSP folder> -k <prod.keys> --platform
 
 ## Found on this game
 
+- [Pipelines whose shaders need scratch memory hold a block each on Qualcomm's driver](../../../docs/reference/rendering.md#pipelines-whose-shaders-need-scratch-memory-hold-a-block-each-on-qualcomms-driver-android): Android, on an Ayn Odin 2 the language menu's 8 pipelines with fragment shader `d53a6ecaaf047b3f` (8 bytes of spills) held 24 MiB each, 192 of 214 MB of pipeline memory; destroyed once unbound, the process's KGSL memory 474 → 280 MB.
 - SDK 11.4.3's instance of [the SDK's address-region node area](../../../docs/reference/memory.md#the-sdks-address-region-node-area), with the cut keyed by the shared SDK build ID.
 - Legacy kernels held directly in [Unity ComputeShader objects](../../../docs/reference/shaders.md#unity-computeshader-objects).
 - [VP8 decoding through libvpx](../../../docs/reference/movies.md#vp8-uses-the-same-libvpx-worker-and-output-paths).

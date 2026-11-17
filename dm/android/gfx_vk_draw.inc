@@ -1891,8 +1891,12 @@ static const struct { const char *n; size_t o, s; } PK_F[] = {{"z", offsetof(pip
     {"topo", offsetof(pipe_key, topo), 1}, {"restart", offsetof(pipe_key, restart), 1}, {"depth_clamp", offsetof(pipe_key, depth_clamp), 1}, {"ll", offsetof(pipe_key, ll), 1},
     {"color", offsetof(pipe_key, color), sizeof(color_st)}, {"chmask", offsetof(pipe_key, chmask), sizeof(chmask_st)}, {"blend", offsetof(pipe_key, blend), sizeof(((pipe_key *)0)->blend)},
     {"ms", offsetof(pipe_key, ms), sizeof(ms_st)}, {"poly", offsetof(pipe_key, poly), sizeof(poly_st)}, {"ds", offsetof(pipe_key, ds), sizeof(ds_st)}};
-typedef struct { VkPipeline p; VkPipelineLayout pl; int alpha; VkShaderStageFlags lbpc; } pipe_t;   // alpha: the fragment module is spv_alpha.h's, and the draw sets its reference (a push
-                                                                                              // constant); lbpc: the stages whose modules read the layer base (spv_fit_lbase), which the draw sets
+typedef struct { VkPipeline p; VkPipelineLayout pl; int alpha; VkShaderStageFlags lbpc; uint64_t heavy, last, seq; int ev; } pipe_t;   // alpha: the fragment module is spv_alpha.h's, and the draw sets its reference (a push
+                                                                                              // constant); lbpc: the stages whose modules read the layer base (spv_fit_lbase), which the draw sets;
+                                                                                              // heavy: its scratch block's bytes, last, seq: the present and the chunk of its last bind, ev: destroyed unbound (gfx_vk_pheavy.inc)
+static uint64_t g_ph_back[2], g_ph_list, g_ph_list_bytes;   // pipelines with scratch blocks made again after being destroyed unbound (graphics, compute); the start-up list's not kept, their blocks (gfx_vk_pheavy.inc)
+static pthread_mutex_t g_ph_mu = PTHREAD_MUTEX_INITIALIZER;
+static uint64_t ph_note(int kind, const char *a, const char *b);   // gfx_vk_pheavy.inc: the pipeline just made holds a scratch block → its bytes
 static nvn_hmap g_pipes = {.klen = sizeof(pipe_key)};
 static int is_int_fmt(VkFormat f);   // below: an integer colour format, which takes no alpha test (as in OpenGL)
 // Whether this draw runs NVN's alpha test: a fragment shader, a function other than ALWAYS, and no integer colour 0. A depth-only pass runs it too (shadow maps of
@@ -2110,7 +2114,11 @@ static void *prewarm_thread(void *arg) {
         pkg_end(g_pkg_fd); atomic_store(&g_pkg_tid, 0);
         if (!mk) continue;
         pthread_mutex_lock(&g_bk);
-        if (pr == VK_SUCCESS && !nvn_hm_get(&g_pipes, &k)) { nvn_hm_put(&g_pipes, &k, pp); made++; pp = NULL; }
+        if (pr == VK_SUCCESS && !nvn_hm_get(&g_pipes, &k)) {
+            if (pp->heavy) {   // compiled into the driver's cache, its scratch block not kept: the first draw that needs it makes it again (gfx_vk_pheavy.inc). Never bound, so no chunk holds it
+                vkDestroyPipeline(g_vk.dev, pp->p, NULL); vkDestroyPipelineLayout(g_vk.dev, pp->pl, NULL); pp->p = VK_NULL_HANDLE; pp->pl = VK_NULL_HANDLE; pp->ev = 1;
+                g_ph_list++; g_ph_list_bytes += pp->heavy; }
+            nvn_hm_put(&g_pipes, &k, pp); made++; pp = NULL; }
         else if (pr == VK_SUCCESS) had++;   // the game made it meanwhile
         else bad++;
         pthread_mutex_unlock(&g_bk);
@@ -2120,6 +2128,8 @@ static void *prewarm_thread(void *arg) {
     free(all);
     LOG("[vk] pipelines made again from the list: %d made, %d there already, %d failed, %d left out (a shader in the wrong slot), of the first %zu of %d records (%d repeats "
         "and %d skipped dropped: an earlier start ended in their compile), in %.1f s", made, had, bad, wrong, cnt, n, rep, skip, (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e9);
+    if (g_ph_list) LOG("[vk] start-up list: %llu of those hold scratch blocks (%.0f MiB of the driver's memory): compiled into its cache but not kept, made again at their first draw (DM_VK_PIPE_HEAVY)",
+                       (unsigned long long)g_ph_list, g_ph_list_bytes / 1048576.0);
     // the cache was written only when the app paused: a session that ended otherwise (killed for an update or by the system) lost what the list compiled, and the next start
     // compiled it all again (Super Mario Bros. Wonder on the Adreno 619: about 23 ms a pipeline from the stale cache, 7 from a saved one)
     if (made) vkb_pipeline_cache_save();
@@ -2268,6 +2278,7 @@ static VkResult pipe_make(const pipe_key *k, pipe_t *pp, uint32_t *ons, uint32_t
     int pb = pb_begin('g', pbk, (uint8_t)tp, (uint8_t)k->ncolor, (uint8_t)(k->z != 0), miss); pgd_test_crash('g', pbk);
     VkResult pr = lm_pipeline(&pc, NULL, st, lms, ns, &pp->p);
     pb_end(pb);
+    pp->heavy = pr == VK_SUCCESS ? ph_note(0, pbk[0], pbk[1]) : 0;   // its scratch block (gfx_vk_pheavy.inc)
     atomic_fetch_add(&g_pso_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0); atomic_fetch_add(&g_pso_made, 1);
     *ons = ns; *onva = nva; *otp = tp;
     return pr;
@@ -2306,7 +2317,7 @@ static void *apipe_thread(void *arg) {
         VkResult pr = pipe_make(&q.k, &tmp, &ns, &nva, &tp);
         double ms = (clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0) / 1e6;
         pthread_mutex_lock(&g_bk);
-        if (pr == VK_SUCCESS) { *q.pp = tmp; pk_record(&q.k); pcache_made(); g_apq_built++; } else { q.pp->pl = VK_NULL_HANDLE; g_apq_failed++; vk_start_pipe_failed(q.k.sh[0] ? q.k.sh[0]->key : NULL, q.k.sh[1] ? q.k.sh[1]->key : "-"); }   // (failed: never made again, as at once)
+        if (pr == VK_SUCCESS) { tmp.last = atomic_load(&g_presents); *q.pp = tmp; pk_record(&q.k); pcache_made(); g_apq_built++; } else { q.pp->pl = VK_NULL_HANDLE; g_apq_failed++; vk_start_pipe_failed(q.k.sh[0] ? q.k.sh[0]->key : NULL, q.k.sh[1] ? q.k.sh[1]->key : "-"); }   // (failed: never made again, as at once)
         uint64_t built = g_apq_built, queued = g_apq_queued, left = g_apq_left;
         pthread_mutex_unlock(&g_bk);
         if (pr != VK_SUCCESS) { static int n; if (n++ < 16) LOG("[RED] [vk] pipeline creation failed in the background: VkResult %d (shaders %s %s; %u stages, %u vertex attributes, %u colour targets, topology %d)",
@@ -2343,7 +2354,12 @@ static int apipe_queue(const pipe_key *k, pipe_t *pp, vshader *kern) {   // unde
     return ok;
 }
 static pipe_t *pipe_get(const pipe_key *k) {
-    pipe_t *pp = nvn_hm_get(&g_pipes, k); if (pp) { if (!pp->p && pp->pl == (VkPipelineLayout)APQ_PENDING) g_apq_left++; return pp->p ? pp : NULL; }
+    pipe_t *pp = nvn_hm_get(&g_pipes, k);
+    if (pp && !pp->p && pp->ev) {   // destroyed unbound (gfx_vk_pheavy.inc): made again now from the driver's cache (2 ms on the Odin 2), not in the background, so no draw is left out
+        uint32_t ns, nva; VkPrimitiveTopology tp; pp->ev = 0; g_ph_back[0]++;
+        if (pipe_make(k, pp, &ns, &nva, &tp) != VK_SUCCESS) { pp->p = VK_NULL_HANDLE; pp->pl = VK_NULL_HANDLE; return NULL; }
+        pp->last = atomic_load(&g_presents); return pp; }
+    if (pp) { if (!pp->p && pp->pl == (VkPipelineLayout)APQ_PENDING) g_apq_left++; return pp->p ? pp : NULL; }
     pp = calloc(1, sizeof *pp); nvn_hm_put(&g_pipes, k, pp);
     if (apipe_ok(k)) { pipe_prep(k); pp->pl = (VkPipelineLayout)APQ_PENDING; if (apipe_queue(k, pp, NULL)) { g_apq_left++; return NULL; } pp->pl = VK_NULL_HANDLE; }
     uint32_t ns, nva; VkPrimitiveTopology tp; VkResult pr = pipe_make(k, pp, &ns, &nva, &tp);
@@ -3685,6 +3701,7 @@ static int tf_capture(vshader *vs, const prog_t *pr, int pst, const p_draw *dw, 
     VkCommandBuffer c = cb(); if (!c) return 0;   // ends the targets' pass
     VkRenderPassBeginInfo rb = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = g_null_rp, .framebuffer = *fbp, .renderArea = area};
     vkCmdBeginRenderPass(c, &rb, VK_SUBPASS_CONTENTS_INLINE); bf_reset();   // its pipeline, viewport and scissor are set behind the bind filter (bf_*): unknown to it
+    pp->last = atomic_load(&g_presents); pp->seq = C->seq;   // (gfx_vk_pheavy.inc)
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->p);
     if (pp->lbpc) { int32_t b0 = 0; vkCmdPushConstants(c, pp->pl, pp->lbpc, SPV_LBASE_PC, 4, &b0); }   // the layer base: none (spv_fit_lbase)
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_GRAPHICS, pp->pl, 0, 1, &set, vs->ndyn, dyn);
@@ -4040,6 +4057,7 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     VkCommandBuffer c = C->cb;
     if (!rd) occl_begin();
     else if (!g_vsw_pre && !g_rd_made++) LOG("[vk] rasterizer discard: a draw whose vertex stage writes memory runs as a dispatch, in a pass of its own%s (vertex %s, %u %s; DM_VK_RAST_DISCARD=0 leaves it out)", rd == 2 ? ", its vertex shader as a fragment shader over points" : "", k.sh[0]->key, dw ? (unsigned)dw->count : (unsigned)di->count, dw ? "vertices" : "indices");
+    pp->last = atomic_load(&g_presents); pp->seq = C->seq;   // (gfx_vk_pheavy.inc)
     bf_pipeline(c, pp->p);   // binds the command buffer already holds are left out (bf_*)
     if (pp->alpha) vkCmdPushConstants(c, pp->pl, VK_SHADER_STAGE_FRAGMENT_BIT, 0, sizeof D.alpha_ref, &D.alpha_ref);   // the alpha test's reference, data rather than a key (spv_alpha.h)
     if (pp->lbpc) { int32_t b0 = 0; vkCmdPushConstants(c, pp->pl, pp->lbpc, SPV_LBASE_PC, 4, &b0); }   // the layer base: none (spv_fit_lbase)
@@ -4140,12 +4158,14 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
 }
 
 // ---------------- Compute ----------------
-typedef struct { VkPipeline p; VkPipelineLayout pl; } cpipe_t;
+typedef struct { VkPipeline p; VkPipelineLayout pl; uint64_t heavy, last, seq; int ev; } cpipe_t;   // heavy, last, seq, ev: as pipe_t's (gfx_vk_pheavy.inc)
 static nvn_hmap g_cpipes = {.klen = 8};
 static uint64_t g_dispatches;
 static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod);
 static cpipe_t *cpipe_get(vshader *s) {
-    cpipe_t *cp = nvn_hm_get(&g_cpipes, &s); if (cp) return cp->p ? cp : NULL;
+    cpipe_t *cp = nvn_hm_get(&g_cpipes, &s);
+    if (cp && !cp->p && cp->ev) { cp->ev = 0; g_ph_back[1]++; cp = cpipe_make(s, cp, &s->mod); if (cp) cp->last = atomic_load(&g_presents); return cp; }   // destroyed unbound: made again (gfx_vk_pheavy.inc)
+    if (cp) return cp->p ? cp : NULL;
     cp = calloc(1, sizeof *cp); nvn_hm_put(&g_cpipes, &s, cp);
     return cpipe_make(s, cp, &s->mod);
 }
@@ -4176,6 +4196,7 @@ static cpipe_t *cpipe_make(vshader *s, cpipe_t *cp, lmod **mod) {
     int pb = pb_begin('c', pbk, 0, 0, 0, 0); pgd_test_crash('c', pbk);
     uint64_t t0 = clock_gettime_nsec_np(CLOCK_MONOTONIC); VkResult pr = lm_pipeline(NULL, &pc, &pc.stage, mod, 1, &cp->p);
     pb_end(pb);
+    cp->heavy = pr == VK_SUCCESS ? ph_note(1, s->key, NULL) : 0;   // its scratch block (gfx_vk_pheavy.inc)
     atomic_fetch_add(&g_cpso_ns, clock_gettime_nsec_np(CLOCK_MONOTONIC) - t0); atomic_fetch_add(&g_cpso_made, 1);
     if (pr != VK_SUCCESS) { static int n; if (n++ < 16) LOG("[RED] [vk] compute pipeline of shader %s failed", s->key); vk_start_pipe_failed(s->key, NULL); cp->p = VK_NULL_HANDLE; return NULL; }
     if (vk_debug()) LOG("[vk] compute pipeline for shader %s", s->key);
@@ -4250,6 +4271,7 @@ static int vk_dispatch(const p_dispatch *dp) {
     g_cs_gbar = 0;
     if (gpu_args) { VkBufferCopy cpy[2] = {{io, g_c0_off + DMSH_C0_DISPATCH, 12}, {io, g_c0_off + DMSH_C0_DISPATCH_NVN2, 12}};   // the group counts into the bank, where the shader reads them (bank_c0)
         vkCmdCopyBuffer(c, ib, g_c0_b, dm_sdk_ounce() ? 2u : 1u, cpy); cb_barrier(); }
+    cp->last = atomic_load(&g_presents); cp->seq = C->seq;   // (gfx_vk_pheavy.inc)
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p);
     vkCmdBindDescriptorSets(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pl, 0, 1, &set, s->ndyn, dyn);
     if (s->pool && !pool_bind(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->pl)) return 0;

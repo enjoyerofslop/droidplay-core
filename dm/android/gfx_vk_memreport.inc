@@ -2,7 +2,8 @@
 // the driver reports every memory object it allocates or frees, with the Vulkan object it belongs to (an image, a pipeline, a command buffer, a descriptor pool...). A line goes
 // out each time the live total passes another 256 MB up, and at an allocation 10 s or more after the last line, with the live bytes and counts by object type. Why: Ocarina of
 // Time's Kokiri Forest took the Galaxy Z Fold 8's graphics memory (dumpsys meminfo) from 0.6 to 4.6 GB, and the replay's own allocations were about 2 GB of it; the reports
-// showed 1.75 GB in descriptor pools no set was made from (gfx_vk_draw.inc ds_fits)
+// showed 1.75 GB in descriptor pools no set was made from (gfx_vk_draw.inc ds_fits). Without DM_VK_MEMREPORT=1 the reports are asked for on Qualcomm's own driver anyway, and
+// the callback only counts what each pipeline's creation made on its thread (t_mr_pipe_big): the heavy pipelines' scratch blocks (gfx_vk_pheavy.inc)
 #include <time.h>
 
 enum { MR_TYPES = 27, MR_CAP = 1 << 18 };   // VkObjectType 0-25, then everything else; slots for live memory objects (a power of two)
@@ -13,6 +14,8 @@ static int64_t g_mr_bytes[MR_TYPES], g_mr_count[MR_TYPES], g_mr_total, g_mr_next
 static uint64_t g_mr_failed, g_mr_imported;
 static struct timespec g_mr_last;
 static pthread_mutex_t g_mr_mu = PTHREAD_MUTEX_INITIALIZER;
+static __thread uint64_t t_mr_pipe, t_mr_pipe_big;   // pipeline memory the driver made on this thread since the caller zeroed them, and the largest object (gfx_vk_pheavy.inc)
+static int g_mr_all;   // DM_VK_MEMREPORT=1: every object kept and the lines logged; 0: only the pipelines' counts above
 
 static const char *const g_mr_names[MR_TYPES] = {"unknown", "instance", "physical device", "device", "queue", "semaphore", "command buffer", "fence", "device memory", "buffer",
     "image", "event", "query pool", "buffer view", "image view", "shader module", "pipeline cache", "pipeline layout", "render pass", "pipeline", "set layout", "sampler",
@@ -29,6 +32,9 @@ static void mr_log(const char *why) {   // under g_mr_mu
 }
 static void VKAPI_PTR mr_cb(const VkDeviceMemoryReportCallbackDataEXT *d, void *user) {
     (void)user;
+    if (d->objectType == VK_OBJECT_TYPE_PIPELINE && (d->type == VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATE_EXT || d->type == VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_IMPORT_EXT)) {
+        t_mr_pipe += d->size; if (d->size > t_mr_pipe_big) t_mr_pipe_big = d->size; }
+    if (!g_mr_all) return;
     uint64_t id = d->memoryObjectId ? d->memoryObjectId : 1;   // 0 marks a free slot
     pthread_mutex_lock(&g_mr_mu);
     if (d->type == VK_DEVICE_MEMORY_REPORT_EVENT_TYPE_ALLOCATION_FAILED_EXT) { g_mr_failed++; mr_log("an allocation failed"); }
@@ -61,14 +67,16 @@ static void VKAPI_PTR mr_cb(const VkDeviceMemoryReportCallbackDataEXT *d, void *
 }
 static VkDeviceDeviceMemoryReportCreateInfoEXT g_mr_ci = {.sType = VK_STRUCTURE_TYPE_DEVICE_DEVICE_MEMORY_REPORT_CREATE_INFO_EXT, .pfnUserCallback = mr_cb};
 static VkPhysicalDeviceDeviceMemoryReportFeaturesEXT g_mr_feat = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_MEMORY_REPORT_FEATURES_EXT};
-// vk_create: whether to ask for the reports (the extension and its feature), and the create infos that do, chained in front of next
-static int mr_want(const VkExtensionProperties *de, uint32_t nd) {
-    const char *e = getenv("DM_VK_MEMREPORT");
-    if (!e || *e != '1') return 0;
+// vk_create: whether to ask for the reports (the extension and its feature), and the create infos that do, chained in front of next. light: wanted without
+// DM_VK_MEMREPORT=1 too (gfx_vk_pheavy.inc ph_want: the pipelines' counts only)
+static int mr_want(const VkExtensionProperties *de, uint32_t nd, int light) {
+    const char *e = getenv("DM_VK_MEMREPORT"); int full = e && *e == '1';
+    if (!full && !light) return 0;
     VkPhysicalDeviceFeatures2 f2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_FEATURES_2, .pNext = &g_mr_feat};
     if (has_ext(de, nd, "VK_EXT_device_memory_report")) vkGetPhysicalDeviceFeatures2(g_vk.pd, &f2);
-    if (!g_mr_feat.deviceMemoryReport) { LOG("[vk] DM_VK_MEMREPORT=1, but the driver has no VK_EXT_device_memory_report"); return 0; }
+    if (!g_mr_feat.deviceMemoryReport) { if (full) LOG("[vk] DM_VK_MEMREPORT=1, but the driver has no VK_EXT_device_memory_report"); return 0; }
     g_mr_feat.pNext = NULL;
-    return (g_mr_tab = calloc(MR_CAP, sizeof *g_mr_tab)) != NULL;
+    if (full && !(g_mr_tab = calloc(MR_CAP, sizeof *g_mr_tab))) return light;
+    g_mr_all = full; return 1;
 }
 static void *mr_chain(void *next) { g_mr_ci.pNext = next; g_mr_feat.pNext = &g_mr_ci; return &g_mr_feat; }
