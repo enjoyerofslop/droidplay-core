@@ -2405,6 +2405,13 @@ static void mid_poll(uint64_t presents) {
     int v = 0; if (fscanf(f, "%d", &v) == 1 && v > 0 && v != g_mid_draws) { LOG("[vk] chunks sent in the middle of a pass after %d draws (was %d)", v, g_mid_draws); g_mid_draws = v; }
     fclose(f);
 }
+// A timestamp report that comes before anything else in a submission found no chunk open, and went to the completion thread's clock when the chunk after it completed, not to the
+// GPU's at that point of the commands. Link's Awakening reports one at the start and one at the end of each frame's commands and sizes its dynamic resolution by the difference:
+// the start read when the first chunk (64 draws of its shadow map) had already run, 1-2 ms late, so the game took its frame for that much cheaper than it was, raised its
+// resolution, and on a Retroid Pocket 5 missed its vsync about half the time. Such a report now opens the chunk and is written by the GPU like any other.
+// DM_VK_TS_FIRST=0 (env.txt): the completion's time, as before
+static int ts_first_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TS_FIRST"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_TS_FIRST=0: a timestamp report before a submission's first chunk takes that chunk's completion time"); } return v; }
+static uint64_t g_ts_first;   // such reports written by the GPU
 static uint64_t g_op_warned;   // ops this replay does not handle, logged once each
 static uint64_t g_mesh_skipped;   // task / mesh draws skipped (OP_DRAW with DM_PRIM_MESH_TASKS)
 void mtl_exec(const uint8_t *p) {
@@ -2426,8 +2433,10 @@ void mtl_exec(const uint8_t *p) {
             case OP_REPORT_COUNTER: { uint64_t t, ad; memcpy(&t, a, 8); memcpy(&ad, a + 8, 8);
                 if (DM_GAME_RENDER_COND) rc_note(ad, t == 0 || t == 0x10 ? 1 : t == NVN_COUNTER_TYPE_SAMPLES_PASSED ? 3 : 2);
                 if (t == NVN_COUNTER_TYPE_SAMPLES_PASSED) { occl_end(); g_q_reports++; post((post_op){3, NULL, 0, 0, ad, (uint32_t)t, g_q_on ? g_q_win : g_qslot, g_qslot}); }
+                else if ((t == 0 || t == 0x10) && ts_first_on() && !C && cur()) { g_ts_first++; goto ts_gpu; }   // the first command of a submission: opens its chunk (below)
                 else if (C && C->tq && C->ntq < 256 && (t == 0 || t == 0x10)) {   // a timestamp: written by the GPU at this point of the commands, so two of them time the GPU work between
                     // (Super Mario Bros. Wonder times its frame's GPU work for its dynamic resolution; the host used to write every report of a chunk with one time, its completion)
+                    ts_gpu:; if (!C->tq || C->ntq >= 256) { mtl_sub_counter(ad, (uint32_t)t); break; }
                     VkCommandBuffer cbuf = C->open ? C->cb : cb(); if (!cbuf) break;
                     g_ts_reports++; int q = C->ntq++; vkCmdWriteTimestamp(cbuf, t == 0x10 ? VK_PIPELINE_STAGE_TOP_OF_PIPE_BIT : VK_PIPELINE_STAGE_BOTTOM_OF_PIPE_BIT, C->tq, (uint32_t)q);
                     post((post_op){4, NULL, 0, 0, ad, (uint32_t)t, (uint64_t)q, 0}); }
@@ -2803,9 +2812,9 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
       if (frame > f0) LOG("[vk] GPU busy %.2f ms per frame over the last %llu frames (%llu command buffers in all); the replay waited %.2f ms per frame for a free one of %d", (double)(g - g0) / 1e6 / (double)(frame - f0), frame - f0,
                           (unsigned long long)atomic_load(&g_gpu_chunks), (double)(w - w0) / 1e6 / (double)(frame - f0), g_nchunk);
       f0 = frame; g0 = g; w0 = w; }
-    LOG("[vk] occlusion queries %llu (%s; %llu stretches counted with none), samples-passed reports %llu (%llu to an address a condition had read, %llu to one none had), counter resets %llu, timestamp reports %llu, queries reset on the host %llu / in command buffers %llu, graphics pipelines made %llu (%.0f ms), compute pipelines %llu (%.0f ms), shader modules %llu (%.0f ms); pipelines the driver's cache gave for module identifiers %llu, that needed the modules after all %llu, modules known by identifier %llu; shaders with binding numbers made dense %llu (%llu bindings; spv_bind.h) (cumulative)",
+    LOG("[vk] occlusion queries %llu (%s; %llu stretches counted with none), samples-passed reports %llu (%llu to an address a condition had read, %llu to one none had), counter resets %llu, timestamp reports %llu (%llu of them opening a submission), queries reset on the host %llu / in command buffers %llu, graphics pipelines made %llu (%.0f ms), compute pipelines %llu (%.0f ms), shader modules %llu (%.0f ms); pipelines the driver's cache gave for module identifiers %llu, that needed the modules after all %llu, modules known by identifier %llu; shaders with binding numbers made dense %llu (%llu bindings; spv_bind.h) (cumulative)",
         (unsigned long long)g_q_queries, occl_mode() == 2 ? "precise" : occl_mode() ? "any count" : "none", (unsigned long long)g_q_noq, (unsigned long long)g_q_reports, (unsigned long long)g_q_rep_read, (unsigned long long)g_q_rep_new, (unsigned long long)g_q_resets,
-        (unsigned long long)g_ts_reports, (unsigned long long)atomic_load(&g_qr_host), (unsigned long long)g_qr_cmd,
+        (unsigned long long)g_ts_reports, (unsigned long long)g_ts_first, (unsigned long long)atomic_load(&g_qr_host), (unsigned long long)g_qr_cmd,
         (unsigned long long)atomic_load(&g_pso_made), atomic_load(&g_pso_ns) / 1e6, (unsigned long long)atomic_load(&g_cpso_made), atomic_load(&g_cpso_ns) / 1e6, (unsigned long long)atomic_load(&g_mod_made), atomic_load(&g_mod_ns) / 1e6,
         (unsigned long long)atomic_load(&g_lm_hit), (unsigned long long)atomic_load(&g_lm_miss), (unsigned long long)atomic_load(&g_lm_ids), (unsigned long long)g_bind_shaders, (unsigned long long)g_bind_entries);
     fl_stats();
