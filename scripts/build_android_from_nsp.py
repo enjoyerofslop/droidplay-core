@@ -431,6 +431,7 @@ def oodle_phone(serial, sdk, g, game, pkg_ver, nsp_dir, patched, work, logs, env
                                        'display': bi.nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
     install(serial, make_apk(sdk, logs, env), logs)
     dst = f'{REMOTE}/games/{g.id}'; adb(serial, 'shell', 'mkdir', '-p', dst); adb(serial, 'shell', 'rm', '-rf', f'{dst}/code')
+    adb(serial, 'shell', f'[ -e {sh_quote(dst + "/RomFS.img")} ] || mkdir -p {sh_quote(dst + "/RomFS")}')
     push_dir(serial, patched, dst, 'code', logs / 'adb_push_code_oodle.log'); open_tree(serial, dst)
     return android_oodle.Phone(adb, serial, g.id, REMOTE, PKG, work, logs, say)
 
