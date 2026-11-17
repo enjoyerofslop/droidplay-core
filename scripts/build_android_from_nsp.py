@@ -356,19 +356,6 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derive
     def promote(reason):   # the split calls it only after its strict DLC-only or additive-compute comparison passed, and only when derive was given
         assert derive is not None
         got['g'] = derive(reason); return got['g']
-    # PATCH: a split made before the phone's Oodle cache was complete (every package "unreadable", 32 shaders for Stray) was reused as "inputs unchanged", as the cache's content
-    # is not among the split's inputs. The cache's identity is kept beside the split: when it differs, the old split is deleted and made again.
-    stamp = sh / 'oodle_cache.stamp'; ident = ''
-    if env.get('DM_OODLE_CACHE'):
-        cd = Path(env['DM_OODLE_CACHE'])
-        try: ident = hashlib.sha256(repr(sorted((f.name, f.stat().st_size) for f in cd.iterdir() if f.is_file())).encode()).hexdigest()[:16]
-        except OSError: ident = ''
-        try: old_ident = stamp.read_text().strip()
-        except OSError: old_ident = ''
-        if ident and old_ident != ident:
-            say('the shader split predates the phone\'s Oodle cache: splitting again')
-            bi.rmtree(sh); bi.rmtree(work / 'spv')   # the translations of the few shaders it found are made again with the rest
-        env['DM_OODLE_CACHE_ID'] = ident   # also changes the split's environment
     dd = (lambda: promote('the installed DLC shader content differs from the registered tables')) if derive and not own else None
     dc = (lambda: promote('the reader decoded additional compute kernels from this registered build')) if derive and not own else None
     try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own,   # its own stage (a DLC's shaders too)
@@ -384,9 +371,6 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derive
             'then run this build again with --update-shaders (DroidPlay for Windows: Manage › Update shaders from the phone) to bring them in: '
             'docs/android.md, "Games that compile their shaders while they run"'); return None, g   # a provisional profile: shaders compiled at run time, captured later
     g = got.get('g', g)
-    if ident:
-        try: sh.mkdir(parents=True, exist_ok=True); stamp.write_text(ident)
-        except OSError: pass
     bi.PROG.stage('shaders for Vulkan', step='translating')
     out = work / 'spv'
     def counted(ln):   # spv_build.py's 'progress: <done>/<total>': the shaders left to translate in this run (droidplay-core#307, a translation of hours showed no count)
@@ -447,7 +431,6 @@ def oodle_phone(serial, sdk, g, game, pkg_ver, nsp_dir, patched, work, logs, env
                                        'display': bi.nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
     install(serial, make_apk(sdk, logs, env), logs)
     dst = f'{REMOTE}/games/{g.id}'; adb(serial, 'shell', 'mkdir', '-p', dst); adb(serial, 'shell', 'rm', '-rf', f'{dst}/code')
-    adb(serial, 'shell', f'[ -e {sh_quote(dst + "/RomFS.img")} ] || mkdir -p {sh_quote(dst + "/RomFS")}')
     push_dir(serial, patched, dst, 'code', logs / 'adb_push_code_oodle.log'); open_tree(serial, dst)
     return android_oodle.Phone(adb, serial, g.id, REMOTE, PKG, work, logs, say)
 
@@ -1832,7 +1815,7 @@ def main(argv):
         if sv and bi.pg.build_sources(game / 'ExeFS', bi.rfs.source(game), g.words('modules') or ['main'])['ue_decode'][0]:   # Unreal's Oodle-compressed shaders (ue_decode)
             with phone(serial, f'build_android_from_nsp.py: decoding {g.id}\'s Unreal shaders') if serial else contextlib.nullcontext():
                 ue_decode(sdirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, game)
-        if sv and (src['oodle_packs'][0] or src['ue_legacy'][0]) and not mac_oodle:   # the archives' Oodle streams, decoded on the phone before the split
+        if sv and (src['oodle_packs'][0] or src.get('ue_legacy_oodle', (False,))[0]) and not mac_oodle:   # the archives' Oodle streams, decoded on the phone before the split
             env['DM_OODLE_CACHE'] = str(oodle_decode([bi.rfs.source(sdirs[v]) for v in sv], [sdirs[v] / 'ExeFS/main' for v in sv], dlc_roms, game, pkg_ver, nsp_dir, patched,
                                                      work, logs, env, g, serial, sdk))
         def derive_shader_tables(reason):   # build_ipa_from_nsp.py main's: the registered profile with the split's shader tables, everything else as registered
