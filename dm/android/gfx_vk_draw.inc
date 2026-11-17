@@ -158,6 +158,8 @@ typedef struct {
     const spv_bmap *bmap;   // its set's binding numbers compacted (spv_bind.h): NULL when none is at SPV_BIND_FROM or past it; its modules and its layout take it
     struct memu_t *memu;   // a task or mesh shader's compute form, on a GPU without VK_EXT_mesh_shader (gfx_vk_meshemu.inc: its facts, pipeline and pass-through vertex shader)
     uint8_t tbrows;   // a texture slot of it read a buffer texture as rows (tex_rows_slot, stage_textures): draw_view lands pending writes to those first
+    struct { uint32_t miss; int alpha; uint64_t bl; struct lmod *m; } blv[4]; int nblv;   // fragment shaders: variants filtering textures the GPU can't (ps_bl_mod, gfx_vk_bilin.inc); a NULL module: not made
+    uint16_t blno;   // texture slots of the first 16 it never samples (only fetches or queries): bl_entry leaves them out (ps_bl_mod)
 } vshader;
 static int memu_on(void); static int memu_facts(vshader *s, const jv *e); static int memu_ready(vshader *s); static vshader *memu_pvs_get(const char *key);   // gfx_vk_meshemu.inc
 // DM_VK_OFW=0 (env.txt): a storage buffer a draw writes in an order-free way takes a copy of its own, as other written storage buffers do (ofw_bind)
@@ -1867,12 +1869,12 @@ static VkBlendOp bop(unsigned v) { return v >= 1 && v <= 5 ? (VkBlendOp)(v - 1) 
 static VkCompareOp cmpop(unsigned v, VkCompareOp def) { return v >= 1 && v <= 8 ? (VkCompareOp)(v - 1) : def; }
 static VkStencilOp stop(unsigned v) { return v >= 1 && v <= 8 ? (VkStencilOp)(v - 1) : VK_STENCIL_OP_KEEP; }
 typedef struct {
-    vshader *sh[4]; int z, tf; VkRenderPass rp; rp_key rk; uint32_t ncolor;   // tf: 1 the capture pipeline (the vertex shader's .tf.spv, no rasterization; or its wrapper and modtff, points rasterized), 2 a discarded draw's that writes (its own modules, no rasterization: rd_key), 3 such a draw in the fragment stage (modvsp and modvsf, points rasterized: vsf_on); rk: the pass's formats and samples
+    vshader *sh[4]; int z, tf; uint64_t bl; VkRenderPass rp; rp_key rk; uint32_t ncolor;   // bl: the fragment shader's slots it filters itself (gfx_vk_bilin.inc; not in the start-up list); tf: 1 the capture pipeline (the vertex shader's .tf.spv, no rasterization; or its wrapper and modtff, points rasterized), 2 a discarded draw's that writes (its own modules, no rasterization: rd_key), 3 such a draw in the fragment stage (modvsp and modvsf, points rasterized: vsf_on); rk: the pass's formats and samples
     uint32_t attr[16]; vs_st stream[16]; uint8_t topo, restart, depth_clamp, ll;
     color_st color; chmask_st chmask; blend_st blend[8]; ms_st ms; poly_st poly; ds_st ds;
 } pipe_key;
 // the key's fields by name, for the logs that say which fields set two keys apart (pipe_get, pso_memo_note); the shaders and the pass are compared apart
-static const struct { const char *n; size_t o, s; } PK_F[] = {{"z", offsetof(pipe_key, z), sizeof(int)}, {"tf", offsetof(pipe_key, tf), sizeof(int)}, {"rk", offsetof(pipe_key, rk), sizeof(rp_key)},
+static const struct { const char *n; size_t o, s; } PK_F[] = {{"z", offsetof(pipe_key, z), sizeof(int)}, {"tf", offsetof(pipe_key, tf), sizeof(int)}, {"bl", offsetof(pipe_key, bl), sizeof(uint64_t)}, {"rk", offsetof(pipe_key, rk), sizeof(rp_key)},
     {"ncolor", offsetof(pipe_key, ncolor), 4}, {"attr", offsetof(pipe_key, attr), sizeof(((pipe_key *)0)->attr)}, {"stream", offsetof(pipe_key, stream), sizeof(((pipe_key *)0)->stream)},
     {"topo", offsetof(pipe_key, topo), 1}, {"restart", offsetof(pipe_key, restart), 1}, {"depth_clamp", offsetof(pipe_key, depth_clamp), 1}, {"ll", offsetof(pipe_key, ll), 1},
     {"color", offsetof(pipe_key, color), sizeof(color_st)}, {"chmask", offsetof(pipe_key, chmask), sizeof(chmask_st)}, {"blend", offsetof(pipe_key, blend), sizeof(((pipe_key *)0)->blend)},
@@ -1908,6 +1910,7 @@ static lmod *ps_alpha_mod(vshader *s, uint32_t miss) {   // the cache and the mo
 // The fragment shader's module: the alpha-test variant (spv_alpha.h), and a variant when the earlier stage leaves inputs unwritten (spv_drop_inputs). *alpha is 1
 // when the alpha variant is the one returned; the caller sets the function's specialization then
 static lmod *ps_variant_prim(vshader *s, uint32_t miss, uint32_t prim);   // gfx_vk_mesh.inc
+static lmod *ps_bl_mod(vshader *s, uint32_t miss, int alpha, uint64_t bl);   // gfx_vk_bilin.inc
 // the stage before the fragment shader: the geometry shader (a task shader in slot 2 comes before the mesh shader), else the vertex or mesh shader
 static const vshader *pipe_ps_prev(const pipe_key *k) { return k->sh[2] && k->sh[2]->stage == SH_GS ? k->sh[2] : k->sh[0]; }
 static lmod *pipe_ps_mod(const pipe_key *k, vshader *s, int *alpha) {
@@ -1916,6 +1919,8 @@ static lmod *pipe_ps_mod(const pipe_key *k, vshader *s, int *alpha) {
     if (pv && pv->stage == SH_MS) {   // after a mesh shader: the inputs it writes per primitive (ps_variant_prim), and no alpha test: a mesh pipeline's push constant holds the draw's first workgroup (pipe_make)
         if (alpha_test_on(k)) RED_ONCE(165, "fragment shader %s after mesh shader %s: the game's alpha test (function %u) is not run in a task / mesh pipeline", s->key, pv->key, (unsigned)k->color.alpha_func);
         uint32_t prim = s->io_in & pv->io_prim & ~miss; return prim ? ps_variant_prim(s, miss, prim) : miss ? ps_variant(s, miss) : s->mod; }
+    if (k->bl) {   // textures it filters itself (gfx_vk_bilin.inc), with the alpha test where it applies; NULL: as below, read nearest
+        int a = alpha_test_on(k) && ps_alpha_mod(s, miss) != NULL; lmod *m = ps_bl_mod(s, miss, a, k->bl); if (m) { *alpha = a; return m; } }
     if (alpha_test_on(k)) { lmod *m = ps_alpha_mod(s, miss); if (m) { *alpha = 1; return m; } }
     return miss ? ps_variant(s, miss) : s->mod;
 }
@@ -2876,12 +2881,13 @@ static VkImageView dummy_ms(int depth) {
 // registration (g_scache, emptied by reg_samp under g_reg_mu; VkSamplers are never destroyed). The kept entries go with the draw or dispatch (tc_clear).
 // DM_VK_TEX_ONCE=0 (env.txt): every lookup again in stage_set, the lock per element, samp_get and vkb() for every texture, as before
 static int tex_once(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_TEX_ONCE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_TEX_ONCE=0: stage_set resolves every texture again"); } return v; }
-typedef struct { int tid; treg_t r; vtex *v; uint8_t rows; } tc_ent;   // r: the registry entry when stage_textures read it (r.ok 0: none), v its image (vt_get); rows: a texture slot that reads a buffer texture as rows (tex_rows_slot)
-typedef struct { const vshader *s; uint64_t gen, tok; int n, cap; tc_ent *e; } tc_stage;   // gen, tok: g_vt_gen and nvn_dirty_now() when stage_textures began
+typedef struct { int tid; treg_t r; vtex *v; uint8_t rows, lin; int8_t slot; } tc_ent;   // r: the registry entry when stage_textures read it (r.ok 0: none), v its image (vt_get); rows: a texture slot that reads a buffer texture as rows (tex_rows_slot); slot, lin: one of the first 16 texture slots, one texture, and its sampler filters linearly (gfx_vk_bilin.inc)
+typedef struct { const vshader *s; uint64_t gen, tok, bl; int n, cap; tc_ent *e; } tc_stage;   // gen, tok: g_vt_gen and nvn_dirty_now() when stage_textures began; bl: the slots the shader must filter itself (gfx_vk_bilin.inc)
 static tc_stage g_tc[5];   // by stage slot (tc_slot); s NULL: nothing kept
 static uint64_t g_tc_hit, g_tc_again, g_sc_hit, g_sc_made;   // elements stage_set took from stage_textures / resolved again; samplers found per ID / made or looked up
 static int tc_slot(int stage) { return stage == SH_VS || stage == SH_MS ? 0 : stage == SH_PS ? 1 : stage == SH_GS || stage == SH_TK ? 2 : stage == SH_CS ? 4 : 3; }   // a mesh draw has no vertex or geometry shader
 static void tc_clear(void) { for (int i = 0; i < 5; i++) g_tc[i].s = NULL; }
+#include "gfx_vk_bilin.inc"   // bilinear filtering made by the fragment shader for formats the GPU can't filter linearly (bl_entry, ps_bl_mod)
 static const tc_ent *tc_el(const tc_stage *c, int ci, int tid) {   // stage_set's element ci (the stage's texture then image elements, buffer textures left out) as kept, or NULL
     if (!c || ci >= c->n || c->e[ci].tid != tid || (c->e[ci].r.ok && !c->e[ci].v) || c->gen != g_vt_gen || c->tok != nvn_dirty_now()) { g_tc_again++; return NULL; }   // no image made: asked again
     g_tc_hit++; return &c->e[ci];
@@ -2901,8 +2907,13 @@ static void stage_textures(vshader *s) {
         for (int pass = 0; pass < 2; pass++) for (int i = 0; i < (pass ? s->nim : s->ntx); i++) {
             const rb_tex *t = pass ? &s->im[i] : &s->tx[i]; if ((t->type & 0xff) == 2) continue;
             int cnt = t->array > 1 ? (t->array > TEX_ARR_MAX ? TEX_ARR_MAX : t->array) : 1; uint32_t w0 = (uint32_t)t->handle & 0x3fff;
-            for (int e = 0; e < cnt; e++, n++) { int tid = (int)(bank_word(nst, c2p, t->cbuf_slot, (w0 + 2u * e) * 4) & 0xfffff); if (tid && t->cbuf_slot >= 3) tid += D.tex_base;
+            for (int e = 0; e < cnt; e++, n++) { uint32_t hw = bank_word(nst, c2p, t->cbuf_slot, (w0 + 2u * e) * 4); int tid = (int)(hw & 0xfffff); if (tid && t->cbuf_slot >= 3) tid += D.tex_base;
                 tc_ent *x = &c->e[n]; x->tid = tid; x->rows = !pass && tex_rows_slot(t); if (tid > 0 && tid < g_ntreg && g_treg[tid].ok) x->r = g_treg[tid]; else x->r.ok = 0;
+                x->slot = -1; x->lin = 0;
+                if (!pass && cnt == 1 && i < 16 && bl_on()) {   // its sampler, as stage_set finds it: does it filter linearly (gfx_vk_bilin.inc)?
+                    uint32_t w1 = ((uint32_t)t->handle >> 14) & 0x3fff, ty = (uint32_t)t->handle >> 28, sw = ty == 1 ? bank_word(nst, c2p, t->samp_slot, w1 * 4) : hw;
+                    int sid = ty == 2 ? (int)w1 : (int)(sw >> 20); if (sid && (ty == 1 ? t->samp_slot : t->cbuf_slot) >= 3 && ty != 2) sid += D.samp_base;
+                    x->slot = (int8_t)i; x->lin = (uint8_t)bl_samp_lin(sid > 0 && sid < g_nsreg && g_sreg_ok[sid] ? &g_sreg[sid] : NULL); }
                 if (x->rows && x->r.ok && x->r.t.d.target == NVN_TEXTURE_TARGET_BUFFER) s->tbrows = 1; }
         }
         pthread_mutex_unlock(&g_reg_mu);
@@ -2910,6 +2921,10 @@ static void stage_textures(vshader *s) {
             // an image adopted from its own write-back (gfx_vk.c ab_take) comes back with seen at the note's stamp, not the clock: an edge page a neighbour unprotected
             // after the note can still be written with no stamp, so the clock is no landing token for it (vt_get looks at its pages again, and so does stage_set then)
             c->e[j].v = v && v->pkg && v->seen != nvn_dirty_now() ? NULL : v; }
+        c->bl = 0;
+        for (int j = 0; j < n; j++) if (c->e[j].slot >= 0 && c->e[j].lin && c->e[j].v) c->bl |= bl_entry(s, &c->e[j]);
+        if (c->bl && s->stage != SH_PS) RED_ONCE(201, "%s shader %s samples textures this GPU doesn't filter linearly through linear samplers (slots %#llx): read nearest (only fragment shaders filter them themselves; said once)",
+                                               sh_stage_name(s->stage), s->key, (unsigned long long)(c->bl & 0xffff));
         c->n = n; c->gen = gen; c->tok = tok; c->s = s;
         return;
     }
@@ -3634,11 +3649,11 @@ static int vk_draw(const p_draw *dw, const p_draw_idx *di) {
 // memo's is a [RED] line (the first 16) naming the fields that differ, and the counts are in the periodic statistics (DM_VK_MEMO_LOG=1)
 static int pso_memo_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PSO_MEMO"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_PSO_MEMO=0: every draw builds its pipeline key"); } return v; }
 static int pso_check(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_PSO_CHECK"); v = e && *e && *e != '0'; if (v) LOG("[vk] DM_VK_PSO_CHECK=1: the pipeline memo's answers are checked against full keys"); } return v; }
-static struct { uint64_t gen; vshader *sh[4]; VkRenderPass rp; rp_key rk; int prim, z; uint8_t ll; pipe_t *pp; pipe_key k; } g_pso_m;   // k: kept for DM_VK_PSO_CHECK only
+static struct { uint64_t gen, bl; vshader *sh[4]; VkRenderPass rp; rp_key rk; int prim, z; uint8_t ll; pipe_t *pp; pipe_key k; } g_pso_m;   // k: kept for DM_VK_PSO_CHECK only; bl: pipe_key.bl
 static uint64_t g_pso_hit, g_pso_miss, g_pso_checked, g_pso_bad;
-static pipe_t *pso_memo_find(vshader *const sh[4], int prim) {
+static pipe_t *pso_memo_find(vshader *const sh[4], int prim, uint64_t bl) {
     if (!pso_memo_on() || dump_on() || !g_pso_m.pp || g_pso_m.gen != g_pso_gen || memcmp(g_pso_m.sh, sh, sizeof g_pso_m.sh) || g_pso_m.rp != P.rp || memcmp(&g_pso_m.rk, &P.key, sizeof P.key)
-        || g_pso_m.prim != prim || g_pso_m.z != !g_depth_zero || g_pso_m.ll != (uint8_t)g_queue_ll) return NULL;
+        || g_pso_m.prim != prim || g_pso_m.z != !g_depth_zero || g_pso_m.ll != (uint8_t)g_queue_ll || g_pso_m.bl != bl) return NULL;   // bl: the textures bound, which no state generation follows
     g_pso_hit++; return g_pso_m.pp;
 }
 static void pso_memo_note(const pipe_key *k, int prim, pipe_t *pp, pipe_t *pm) {   // the key built, its pipeline pp; pm: the memo's answer (DM_VK_PSO_CHECK), compared
@@ -3648,7 +3663,7 @@ static void pso_memo_note(const pipe_key *k, int prim, pipe_t *pp, pipe_t *pm) {
             LOG("[RED] [vk] pipeline memo check: shaders %s %s, the memo's key differs in:%s%s", k->sh[0] ? k->sh[0]->key : "-", k->sh[1] ? k->sh[1]->key : "-", d[0] ? d : " (padding only)", pp != pm ? " (another pipeline)" : ""); } }
     else g_pso_miss++;
     g_pso_m.gen = g_pso_gen; memcpy(g_pso_m.sh, k->sh, sizeof g_pso_m.sh); g_pso_m.rp = P.rp; g_pso_m.rk = P.key; g_pso_m.prim = prim; g_pso_m.z = !g_depth_zero;
-    g_pso_m.ll = (uint8_t)g_queue_ll; g_pso_m.pp = pp;
+    g_pso_m.ll = (uint8_t)g_queue_ll; g_pso_m.bl = k->bl; g_pso_m.pp = pp;
     if (pso_check()) g_pso_m.k = *k;
 }
 // the pipeline key of the draw being made, over k's zeroed bits with its shaders set: the bound state (D), the pass (P), the primitive and the origin
@@ -3816,8 +3831,9 @@ static int vk_draw_(const p_draw *dw, const p_draw_idx *di) {
     if (!rd && g_dup_mask) dup_check();
     g_drawing = 1;   // from here no chunk is closed (chunk_submit reports one)
     int prim = dw ? dw->prim : di->prim;
-    pipe_t *pm = rd ? NULL : pso_memo_find(k.sh, prim), *pp = pm;   // the draw before's pipeline when nothing its key takes has changed (pso_memo_find); NULL: the key is built
-    if (!pm || pso_check()) { pipe_key_build(&k, prim); if (rd) rd_key(&k);
+    uint64_t bl = !rd && k.sh[1] && g_tc[1].s == k.sh[1] ? g_tc[1].bl : 0;   // the fragment shader's slots it filters itself (stage_textures, gfx_vk_bilin.inc)
+    pipe_t *pm = rd ? NULL : pso_memo_find(k.sh, prim, bl), *pp = pm;   // the draw before's pipeline when nothing its key takes has changed (pso_memo_find); NULL: the key is built
+    if (!pm || pso_check()) { pipe_key_build(&k, prim); if (rd) rd_key(&k); else k.bl = bl;
         if (rd == 2) { k.tf = 3; k.topo = VK_PRIMITIVE_TOPOLOGY_POINT_LIST; k.restart = 0; }   // each vertex a point on the grid (spv_vsfrag.h)
         pp = pipe_get(&k); if (!pp) { g_drop[2]++; return 0; } if (!rd) pso_memo_note(&k, prim, pp, pm); }   // (the memo keeps the targets' pass's pipelines)
     uint32_t base_inst = (uint32_t)(dw ? dw->base_instance : di->base_instance);
