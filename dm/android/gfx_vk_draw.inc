@@ -2481,6 +2481,19 @@ static uint32_t g_cdim[3];   // the current dispatch's group counts (c0 + 0x200 
 static int ind_fwd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_IND_FWD"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_IND_FWD=1: an indirect dispatch whose arguments a dispatch wrote runs on the GPU's copy of them"); } return v; }
 static VkBuffer g_c0_b; static VkDeviceSize g_c0_off;   // where stage_set put the compute c0 bank (the arena): the GPU writes the counts into it
 static uint64_t g_ind_gpu, g_ind_cpu, g_ind_cpu_wait, g_ind_seq, g_ind_inpl;   // g_ind_inpl: of g_ind_gpu, read in place in a placed pool   // indirect dispatches run on the GPU's copy of their arguments / with the arguments read on the CPU / of them, after a wait
+// The GPU's copy of the arguments is good only in the chunk they were looked up from: fwd_find keeps the writer's chunk (its arena holds the copy) from being recorded again
+// until that chunk completes (hold), and a writer in the chunk being recorded is kept by nothing. A sync between the lookup and the dispatch's record submits that chunk and
+// waits for it: a texture the dispatch uses first, uploaded from its storage (stage_textures, vt_upload_, cpu_view), draw_view's, or a set taken again (ds_moved). The
+// dispatch then went into the next chunk with the old buffer and offset, and once the writer's chunk was free its next recording wrote over the arguments; after a full
+// wait the next recording is the first free chunk, often that very one, whose own banks then covered them, and the GPU ran the dispatch with whatever counts lay there.
+// Ocarina of Time lost the GPU so (VK_ERROR_DEVICE_LOST after a 2 s hang, no fault address) in 2 of 18 Kokiri loads at a lower Render scale: the submission began with
+// indirect dispatch d17eefaff4f0bc23, right after the level's new textures were made. So the arguments are looked up again in the chunk recorded now (ind_again): still
+// pending, they are read on the GPU there (held for it); landed, they are read on the CPU. DM_VK_IND_FWD_AGAIN=0 (env.txt): not looked up again, as before (the moves are
+// still counted and logged). DM_VK_IND_FWD_SYNC=1 (a test): a sync follows every lookup that finds them on the GPU, as the first frame at a new level can have one
+static uint64_t g_ind_moved, g_ind_moved_ar, g_ind_again[3];   // lookups whose chunk a sync submitted before the dispatch was recorded (g_ind_moved_ar: their copy in the chunk's arena, not in place); of them, found again on the GPU / in place / read on the CPU
+static int g_ind_inpl_copy;   // the arguments' copy found by the dispatch's first lookup lies in its placed pool (fwd_hit's g_fwd_inpl): the chunk's completion frees nothing of it
+static int ind_again_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_IND_FWD_AGAIN"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_IND_FWD_AGAIN=0: an indirect dispatch's arguments are not looked up again when a sync submitted the chunk they were found from"); } return v; }
+static int ind_sync_test(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_IND_FWD_SYNC"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_IND_FWD_SYNC=1 (a test): a sync follows every lookup that finds an indirect dispatch's arguments on the GPU"); } return v; }
 static VkBuffer g_tgs_b; static VkDeviceSize g_tgs_off;   // where the dispatch's spilled shared memory lies when it is not the chunk's arena (stage_set; gfx_vk_meshemu.inc memu_kernel sets it for a kernel)
 static void bank_c0(int nst, uint8_t *b, uint32_t base_inst) {
     memset(b, 0, 0x800);
@@ -2585,6 +2598,7 @@ static int fwd_hit(chunk *c, int nwb, uintptr_t lo, uintptr_t hi, VkBuffer *b, V
 static int ip_read_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_IP_READ"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_IP_READ=0: a dispatch reading a draw's in-place storage buffer write waits for the chunk"); } return v; }
 static int g_rd_cs; static uint64_t g_ip_read;   // reads bound so
 static int g_fwd_nwb = -1; static uint64_t g_fwd;   // the chunk's write-backs counted when the draw began (its own come after); streams bound so
+static int g_fwd_inpl;   // the last write-back fwd_hit found readable is an in-place one (its copy the placed pool's own memory, not the chunk's arena)
 // A draw under rasterizer discard whose vertex or geometry stage writes memory runs as a dispatch does (rd_writes, vk_draw_): outside the targets' pass, with a full barrier
 // before and after it, so it may write in place and its write-backs are read on the GPU by later shaders, as a dispatch's are. Set for the one draw (vk_draw__ clears it)
 static int g_vdisp;
@@ -3266,7 +3280,7 @@ static int fwd_hit(chunk *c, int nwb, uintptr_t lo, uintptr_t hi, VkBuffer *b, V
     for (int i = nwb - 1; i >= 0; i--) { const wb_t *w = &c->wb[i]; if (!wb_hits(w, lo, hi)) continue;
         int ipr = !w->fwd && w->inpl && g_rd_cs && ip_read_on();   // a draw's in-place write, read by a dispatch
         *res = (w->fwd || ipr) && (w->st < 0 || w->inpl) && w->rows == 1 && lo >= (uintptr_t)w->dst && hi <= (uintptr_t)w->dst + w->row_bytes;   // (in place: read where it was written)
-        if (*res) { *b = w->inpl ? w->ipb : c->ar[-1 - w->st].b; *o = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst); if (ipr) g_ip_read++; }
+        if (*res) { *b = w->inpl ? w->ipb : c->ar[-1 - w->st].b; *o = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst); if (ipr) g_ip_read++; g_fwd_inpl = w->inpl; }
         else if (w->vd && w->rows == 1) {   // a discarded draw's write that the read is not inside: the two as one home range (rd_home.h)
             uintptr_t wl = (uintptr_t)w->dst, wh = wl + w->row_bytes, hl = lo < wl ? lo : wl, hh = hi > wh ? hi : wh;
             if (rd_home_learn(&g_rd_homes, hl, hh, RD_HOME_MAX) && g_rd_learned++ < 8)
@@ -3548,6 +3562,24 @@ static void rd_close(void);
 static int ind_read(uint64_t addr, void *out, size_t n) {   // indirect arguments (and multi-draw counts), read on the CPU once the GPU's writes have landed
     if (!addr || !mtl_addr(addr, n, NULL, NULL)) { RED_ONCE(105, "indirect arguments at %#llx are in no memory pool: the draw is skipped", (unsigned long long)addr); return 0; }
     memcpy(out, (const void *)(uintptr_t)addr, n); return 1;
+}
+// An indirect dispatch's arguments looked up again in the chunk recorded now (C, taken), after a sync submitted the chunk they were found from on the GPU (*aseq; above
+// ind_again_on): 1 still pending, read on the GPU from (ib, io), held for this chunk; 2 in place in a placed pool; 0 landed, read on the CPU into g; -1 in no pool;
+// 3 not looked up (DM_VK_IND_FWD_AGAIN=0): the old copy is read. *aseq becomes the chunk they are good in now
+static int ind_again(const vshader *s, uint64_t ind, VkBuffer *ib, VkDeviceSize *io, uint64_t *aseq, uint32_t g[3]) {
+    uint64_t was = *aseq; int r = 3;
+    if (ind_again_on()) { VkDeviceSize rng_; int nwb = g_fwd_nwb; g_fwd_nwb = -1;   // every write-back of the chunk, as the first lookup; draw_view's count kept for stage_set
+        int f = fwd_find((uintptr_t)ind, (uintptr_t)ind + 12, ib, io) && !(*io % 4); g_fwd_nwb = nwb;
+        if (f) r = 1;
+        else if (gm_inplace_al(ind, 12, 4, ib, io, &rng_)) r = 2;
+        else { rd_rng q[1] = {{(uintptr_t)ind, (uintptr_t)ind + 12}}; ranges_view(q, 1); r = ind_read(ind, g, 12) ? 0 : -1; } }
+    if (r >= 0 && r < 3) g_ind_again[r]++;
+    if (!g_ind_inpl_copy) g_ind_moved_ar++;
+    if (g_ind_moved++ < 8) LOG("[vk] indirect dispatch %s: a sync submitted chunk %llu, which its arguments were found from on the GPU (%s), before it was recorded (in chunk %llu): %s, %u x %u x %u groups",
+                               s->key, (unsigned long long)was, g_ind_inpl_copy ? "in place in a placed pool" : "a copy in that chunk's arena", (unsigned long long)(C ? C->seq : 0), r == 1 ? "still pending, read on the GPU in this chunk" : r == 2 ? "read in place" : r == 0 ? "landed, read on the CPU" :
+                               r < 0 ? "in no pool" : "not looked up again (DM_VK_IND_FWD_AGAIN=0)", r == 0 ? g[0] : 0, r == 0 ? g[1] : 0, r == 0 ? g[2] : 0);
+    if (C) *aseq = C->seq;
+    return r;
 }
 static int vk_draw__(const p_draw *dw, const p_draw_idx *di) { int r = vk_draw_(dw, di); rd_close(); g_vdisp = 0; g_vr0 = g_vr1 = 0; g_drawing = 0; g_fwd_nwb = -1; g_c1d_on = 0; tc_clear(); return r; }
 // DM_VK_TBUF_RANGE=0 (env.txt): a shader with a buffer texture or image syncs its draw on anything pending, as before draw_view looked their memory up (the A/B of that alone)
@@ -4025,6 +4057,9 @@ static int vk_dispatch(const p_dispatch *dp) {
         // no pending write-back holds them (the writer stored them through the raw pool table, or the game wrote them): in a placed pool they are read where they lie, which a
         // raw store or the CPU wrote and the dispatch's barrier orders (gfx_vk_gmem_inplace.inc); on the Galaxy S25 Edge 18,600 of 25,600 indirect dispatches a run took the CPU path
         VkDeviceSize rng_; if (!gpu_args && gm_inplace_al(dp->ind, 12, 4, &ib, &io, &rng_)) { gpu_args = 2; g_ind_inpl++; } }
+    uint64_t aseq = gpu_args == 1 ? C->seq : 0;   // the chunk the GPU's copy of the arguments is good in (ind_again)
+    g_ind_inpl_copy = gpu_args == 1 && g_fwd_inpl;
+    if (gpu_args == 1 && ind_sync_test()) submit_wait();
     { vshader *sh[4] = {s, NULL, NULL, NULL}; rd_rng r[1] = {{(uintptr_t)dp->ind, (uintptr_t)dp->ind + 12}};   // what the dispatch reads of guest memory lands first (draw_view), not everything pending
       if (dp->ind && !gpu_args) { uint64_t w0 = g_view_cur + g_view_fly; ranges_view(r, 1); g_ind_cpu++; g_ind_cpu_wait += g_view_cur + g_view_fly != w0; } draw_view(sh, NULL, 0); }
     if (dp->ind && !gpu_args && !ind_read(dp->ind, g, 12)) return 0;
@@ -4037,7 +4072,14 @@ static int vk_dispatch(const p_dispatch *dp) {
     VkDescriptorSet set; int ok; uint32_t dyn[18];
     for (int t = 0;; t++) {   // t 1: the set taken again from the chunk recorded now when a sync inside stage_set closed the one it came from (ds_moved)
         g_upsq_src = g_upsq_dst = NULL; g_upsq_src_iv = VK_NULL_HANDLE;
-        g_bind_bad = 0; g_e5_need = 0; if (!cur()) return 0; uint64_t dseq = C->seq; int got = stage_set(s, 0, &set, dyn, pr, pst, 0, dseq); ok = got && !g_bind_bad;
+        g_bind_bad = 0; g_e5_need = 0; if (!cur()) return 0;
+        if (gpu_args == 1 && C->seq != aseq) {   // a sync since the lookup submitted the chunk their copy was good in: looked up again before the c0 bank is made from the counts
+            int r = ind_again(s, dp->ind, &ib, &io, &aseq, g); if (r < 0) return 0;
+            if (r == 2) { gpu_args = 2; g_ind_inpl++; }
+            else if (!r) { gpu_args = 0; g_ind_gpu--; g_ind_cpu++; if (!g[0] || !g[1] || !g[2]) return 1; memcpy(g_cdim, g, sizeof g_cdim); }
+            if (!cur()) return 0; }
+        uint64_t dseq = C->seq; int got = stage_set(s, 0, &set, dyn, pr, pst, 0, dseq); ok = got && !g_bind_bad;
+        if (got && gpu_args == 1 && C && C->seq != aseq && ind_again_on() && t < 4) continue;   // stage_set's sync moved the chunk and it bound anyway (no set recycling): the arguments again, then the set
         if (got || !ds_moved(dseq)) break;
         if (ds_again(t, 2)) return 0;
     }
@@ -4045,6 +4087,7 @@ static int vk_dispatch(const p_dispatch *dp) {
     if (s->upsq && upsq_run(s)) { g_dispatches++; C->ndraw++; return 1; }   // a game's upscaler network replaced (gfx_vk_upsq.inc)
     if (g_e5_need) { cpipe_t *ce = cpipe_e5(s, g_e5_need); if (!ce) return 0; cp = ce; }   // E5B9G9R9 storage images: the pipeline that packs RGB9E5 into their R32_UINT views
     g_cs_in_disp = 1; VkCommandBuffer c = cb(); g_cs_in_disp = 0; if (!c) return 0;
+    if (gpu_args == 1 && C->seq != aseq && ind_again_on()) { RED_ONCE(202, "indirect dispatch %s: its chunk moved again after its arguments were looked up again: dropped", s->key); return 0; }
     int chain = cs_game() && g_cs_chain && C->seq == g_cs_chain_seq && !gpu_args;   // the command before this one in the command buffer is a dispatch with its barrier deferred (gfx_vk.c cs_chain_close); the copy of the counts below reads the writer's output: a barrier first
     if (!chain) { cb_barrier(); g_cs_first++; g_cs_chain = 0; } else if (g_cs_gbar) { cb_barrier(); g_cs_gbarred++; g_cs_chain = 0; } else g_cs_free++;   // a run left open stays open: a return before the dispatch below leaves its barrier to the next
     g_cs_gbar = 0;
