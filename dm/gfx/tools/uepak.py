@@ -762,21 +762,24 @@ if __name__ == '__main__':
     except ValueError as e: sys.exit(f'[RED] {e}')   # a damaged main (nso.Error), pak or archive
 
 
-def inline_needs_decoder(romfs: str | os.PathLike, mains=()) -> bool:
+def inline_needs_decoder(romfs, mains=()):  # type: ignore
     """Whether any inline-shader pak under romfs uses Oodle compression (which Python cannot decode locally)."""
-    keys = Keys(list(mains) if mains else [])
-    for p in unreal_paks(str(romfs), inline=True, mains=list(mains) if mains else []):
-        try:
-            with open(p, 'rb') as f: _, _, _, methods, ver = footer(f)
-        except (OSError, ValueError, struct.error): continue
-        if ver == 4:
+    try:
+        keys = Keys(list(mains) if mains else [])
+        for p in unreal_paks(str(romfs), inline=True, mains=list(mains) if mains else []):
             try:
-                pk = Pak(p, keys(p) if mains else None)
-                if any('Oodle' in str(pk.entry(name).get('method', '')) for name in pk.files): return True
-            except (OSError, ValueError, struct.error): pass
-        elif any(m and 'Oodle' in str(m) for m in methods): return True
-        if inline_in_containers(p):
-            folder = os.path.dirname(os.path.abspath(p))
-            for t in io_tocs(folder):
-                if os.path.dirname(t.path) == folder and any(m and 'Oodle' in str(m) for m in t.methods): return True
+                with open(p, 'rb') as f: _, _, _, methods, ver = footer(f)
+            except (OSError, ValueError, struct.error): continue
+            if ver == 4:
+                try:
+                    pk = Pak(p, keys(p) if mains else None)
+                    if any('Oodle' in str(pk.entry(name).get('method', '')) for name in pk.files): return True
+                except (OSError, ValueError, struct.error): pass
+            elif any(m and 'Oodle' in str(m) for m in methods): return True
+            if inline_in_containers(p):
+                folder = os.path.dirname(os.path.abspath(p))
+                for t in io_tocs(folder):
+                    if os.path.dirname(t.path) == folder and any(m and 'Oodle' in str(m) for m in t.methods): return True
+    except Exception:
+        pass
     return False
