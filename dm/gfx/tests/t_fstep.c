@@ -456,6 +456,56 @@ int main(void) {
         check(f.s.k == 3 && f.s.downs == 3 && f.s.failed == 3 && f.s.gfail == 3, b);
         unsigned long long l0 = f.s.late; run(&f, 3000, 2.7, 1, 3, 0); check(f.s.downs == 3 && f.s.late == l0, "    and 3,000 more such frames bring no trial and no late frame");
     }
+    {   // The long trial grace (nvn_fstep.h tgrace): a governor that keeps a low clock at hold 3 and raises it only after 90 frames of the GPU busy at hold 2. Ocarina of Time on a
+        // Galaxy Z Fold 8: hold 2 held at a GPU of 1.6 vsyncs (826 MHz), a heavy moment sent it to 3, where the clock fell (2.2), and every 30-frame trial back to 2 failed
+        int end_k[2]; unsigned long long end_failed[2], tg[2];
+        for (int on = 0; on < 2; on++) {
+            sim m = {0}; m.s.tgrace = on ? FSTEP_TGRACE : 0; run(&m, 60, 0.5, 1, 3, 0);
+            m.gpu = 1.6; run(&m, 400, 1.6, 1, 3, 0);   // the scene at hold 2, clock up: hold 2 holds (kheld)
+            run(&m, 3, 3.5, 1, 3, 0);                   // one heavy moment: hold 3
+            int busy2 = 0, at3 = 0;                       // frames in a row at hold 2 / at hold 3: the governor's state
+            for (int i = 0; i < 3000; i++) {
+                int k = m.s.k; busy2 = k == 2 ? busy2 + 1 : 0; at3 = k == 3 ? at3 + 1 : 0;
+                double g = k == 2 ? (busy2 > 90 ? 1.6 : 2.2) : 2.2;   // the clock rises after 90 busy frames at hold 2 and falls at once at hold 3
+                m.gpu = g; run(&m, 1, g, 1, 3, 0);
+            }
+            end_k[on] = m.s.k; end_failed[on] = m.s.failed; tg[on] = m.s.tgtrials;
+        }
+        snprintf(b, sizeof b, "long grace: a low clock at hold 3 that rises after 90 busy frames at hold 2: back to 2 (k %d, failed %llu, long trials %llu)", end_k[1], end_failed[1], tg[1]);
+        check(end_k[1] == 2 && end_failed[1] <= 1 && tg[1] >= 1, b);
+        snprintf(b, sizeof b, "  without it every 30-frame trial fails and hold 3 stays (k %d, failed %llu)", end_k[0], end_failed[0]);
+        check(end_k[0] == 3 && end_failed[0] >= 3 && tg[0] == 0, b);
+    }
+    {   // The long grace in a scene that really got heavier: the GPU takes 2.3 at hold 2 whatever the clock. Three long trials, then hold 3 stays; the game keeps its speed
+        sim m = {0}; m.s.tgrace = FSTEP_TGRACE; run(&m, 60, 0.5, 1, 3, 0);
+        m.gpu = 1.6; run(&m, 400, 1.6, 1, 3, 0); run(&m, 3, 3.5, 1, 3, 0);
+        double r0 = m.real, g0 = m.game, d0 = m.s.dropped; int at2 = 0;
+        for (int i = 0; i < 6000; i++) { m.gpu = 2.3; at2 += m.s.k == 2; run(&m, 1, 2.3, 1, 3, 0); }
+        snprintf(b, sizeof b, "long grace, an overload: three long trials, then hold 3 stays (k %d, long trials %llu, failed %llu, frames at hold 2 %d)", m.s.k, (unsigned long long)m.s.tgtrials, (unsigned long long)m.s.failed, at2);
+        check(m.s.k == 3 && m.s.tgtrials == 3 && m.s.failed == 3 && at2 <= 3 * (FSTEP_TGRACE + FSTEP_RUN), b);
+        unsigned long long d1 = m.s.downs; run(&m, 3000, 2.3, 1, 3, 0);
+        check(m.s.downs == d1, "  then 3,000 more frames bring no trial");
+        snprintf(b, sizeof b, "  game time kept: %.0f vsyncs of %.0f behind, %.1f dropped", (m.real - r0) - (m.game - g0), m.real - r0, m.s.dropped - d0);
+        check(m.s.dropped - d0 < 1 && (m.real - r0) - (m.game - g0) <= FSTEP_DEBT_MAX + 1, b);
+    }
+    {   // The long grace ends early when the frames at the shorter hold run later than the longer hold would show them (3.6 vsyncs at hold 2, past hold 3)
+        sim m = {0}; m.s.tgrace = FSTEP_TGRACE; run(&m, 60, 0.5, 1, 3, 0);
+        m.gpu = 1.6; run(&m, 400, 1.6, 1, 3, 0); run(&m, 3, 3.5, 1, 3, 0);
+        int longest = 0, run2 = 0;
+        for (int i = 0; i < 3000; i++) { int k = m.s.k; double w = k == 2 ? 3.6 : 2.2; m.gpu = w; run(&m, 1, w, 1, 3, 0); run2 = k == 2 ? run2 + 1 : 0; if (run2 > longest) longest = run2; }
+        snprintf(b, sizeof b, "long grace, frames of 3.6 at hold 2: each trial ends after %d frames (ended early %llu, k %d)", longest, (unsigned long long)m.s.tgends, m.s.k);
+        check(longest <= FSTEP_TBAD && m.s.tgends >= 1 && m.s.k == 3, b);
+    }
+    {   // A cool phone: the GPU fits hold 2 at every hold (1.4), so a heavy moment's step to 3 comes back by the fit trial, and the long grace changes nothing
+        unsigned long long dn[2], up[2]; int kk[2]; double gm[2];
+        for (int on = 0; on < 2; on++) {
+            sim m = {0}; m.s.tgrace = on ? FSTEP_TGRACE : 0; run(&m, 60, 0.5, 1, 3, 0);
+            m.gpu = 1.4; run(&m, 400, 1.4, 1, 3, 0); run(&m, 3, 3.5, 1, 3, 0); run(&m, 1200, 1.4, 1, 3, 0);
+            dn[on] = m.s.downs; up[on] = m.s.ups; kk[on] = m.s.k; gm[on] = m.game;
+        }
+        snprintf(b, sizeof b, "long grace, a cool phone: the same path with it on or off (k %d / %d, downs %llu / %llu, ups %llu / %llu)", kk[1], kk[0], dn[1], dn[0], up[1], up[0]);
+        check(kk[1] == 2 && kk[0] == 2 && dn[1] == dn[0] && up[1] == up[0] && gm[1] == gm[0], b);
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }

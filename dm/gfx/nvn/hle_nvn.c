@@ -2182,6 +2182,14 @@ static void fstep_tick(const win_t *o, int c) {
     // (Breath of the Wild on an M5 Pro: the probe's 33 frames took the clock 338 → 432 MHz and its GPU time 24.8 → 18.5 ms, then it failed at 22 ms frames; hold 1 needed about 560 MHz)
     g_fs.ramp = mtl_probe_ramp_on();
 #if DM_ANDROID
+    // DM_FSTEP_TRIAL_GRACE=<frames> (env.txt; Android): the long grace of a trial back to a hold the frames held earlier (nvn_fstep.h tgrace), FSTEP_TGRACE by default; 0 = off,
+    // a 30-frame grace as for any trial. A phone's GPU governor keeps the longer hold's low clock through a 30-frame trial (Ocarina of Time on a Galaxy Z Fold 8). The Mac and
+    // the iPhone, whose controllers settle within such a trial or ramp it with FSTEP_RAMP, keep FSTEP_GRACE
+    { static int tgr = -2; if (tgr == -2) { const char *e = getenv("DM_FSTEP_TRIAL_GRACE");
+          tgr = e ? atoi(e) : FSTEP_TGRACE;
+          if (tgr < 0) tgr = 0;
+          if (e) LOG("[nvn] frame step: a trial back to a hold that held gets %d frames of grace (DM_FSTEP_TRIAL_GRACE%s)", tgr, tgr ? "" : "=0: as any trial"); }
+      g_fs.tgrace = tgr; }
     g_fs.probe_near = 1;   // a probe goes to the next shorter hold, when the GPU's headroom (g_fs.gpu, below) could fit it (nvn_fstep.h): the GPU governor follows the busy share, not a declared deadline
 #endif
     g_fs.per_vsync = fstep_hz() / 60;
@@ -2216,11 +2224,11 @@ static void fstep_tick(const win_t *o, int c) {
         double q[4] = {0, 0, 0, 0};   // the window's cost p50 / p95 and GPU part p50 / p95
         for (int h = 0; h < 2; h++) { const uint32_t *hb = h ? ghist : chist; acc = 0;
             for (int b = 0, i = 0; b <= 160 && i < 2; b++) { acc += hb[b]; while (i < 2 && cn && acc * 100 >= cn * (i ? 95 : 50)) q[2 * h + i++] = b / 20.0; } }
-        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials); "
+        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials, %llu with the long grace, %llu of those ended early); "
                     "cost p50 %.2f / p95 %.2f vsyncs (GPU part p50 %.2f / p95 %.2f, the larger in %llu frames, none finished in %llu), pacing taken out %.2f ms a frame at the acquire and %.2f in the present",
                     (vs - v0) / 60.0, (t - t0) / 1e9, (vs - v0) / 60.0 / ((t - t0) / 1e9), (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)held[3],
                     (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed,
-                    q[0], q[1], q[2], q[3], (unsigned long long)cgb, (unsigned long long)cg0, cn ? cpw / 1e6 / cn : 0, cn ? cps / 1e6 / cn : 0);
+                    (unsigned long long)g_fs.tgtrials, (unsigned long long)g_fs.tgends, q[0], q[1], q[2], q[3], (unsigned long long)cgb, (unsigned long long)cg0, cn ? cpw / 1e6 / cn : 0, cn ? cps / 1e6 / cn : 0);
         t0 = t; v0 = vs; memset(held, 0, sizeof held); memset(chist, 0, sizeof chist); memset(ghist, 0, sizeof ghist); cn = cpw = cps = cgb = cg0 = 0;
     }
 }

@@ -53,6 +53,16 @@
 // trials failing in a row stop them until the hold changes
 #define FSTEP_LATE_SOFT 0.5   // 8 ms at 60 Hz: a frame later than that at a hold its GPU fits steps up as before (the debt pays the rest back). Ocarina of Time's Kokiri frames at hold 2 on the Pad 3 are 2.0–2.4 vsyncs with a p95 of 2.65; at 0.3 three of 2.32–2.39 in a row stepped up after 22 s
 #define FSTEP_GFIT_MISS 10    // late frames a GPU-fit run of FSTEP_RUN may hold: at hold 3 one frame in ten is late there (the hold's own pacing), and FSTEP_MISS (3) ended every run
+// A trial back to a hold the frames held earlier in the scene (kheld: FSTEP_RUN frames on time there), whichever rule started it (the kheld trial, the GPU-fit trial, a probe
+// to the next hold), gets tgrace frames of grace instead of FSTEP_GRACE when the caller sets it: a phone's GPU governor sizes the clock to the busy share, so at the longer
+// hold it keeps a clock at which the GPU does not fit the shorter one, and only a trial that lasts long enough for it to see the GPU busy raises it again. Ocarina of Time on
+// a Galaxy Z Fold 8 held hold 2 (GPU 1.6 vsyncs at 826 MHz) until a heavy moment sent it to 3, where the clock fell to 578 MHz and the GPU took 2.2; for six minutes every trial
+// back to 2 failed within 30-45 frames with the GPU still at 2.1-2.3 (39 failed trials), and one that met the clock already up held 2 to the end of the run. The long grace ends
+// early once FSTEP_TBAD frames in a row run later than a frame at the longer hold would (shown or cost more than k + 1 vsyncs: a stutter past what the longer hold shows), or
+// once the debt passes half of FSTEP_DEBT_MAX (what is past it would be dropped, the game slowed, not paid back); the trial is then judged at once. Three such trials to one
+// hold failing in a row stop the long grace there until the frames hold that hold again or a trial to it holds. Trials to kmin keep FSTEP_GRACE (kheld is not learned there)
+#define FSTEP_TGRACE 180      // the long grace (the caller's default; hle_nvn.c DM_FSTEP_TRIAL_GRACE): 6 s at hold 2 when every frame shows 2 vsyncs, 9 s when every one shows 3
+#define FSTEP_TBAD 3          // frames in a row later than the longer hold would show them, which end the long grace
 
 typedef struct {
     int k, step;              // vsyncs each frame stays on screen; the step handed to the game for the next frame (k, or k + 1 while paying back)
@@ -80,11 +90,22 @@ typedef struct {
     double gpu;               // set by the caller before each call: the frame's GPU time in vsyncs (0 = not known), for the soft-late rule and the GPU-fit trial
     int gfit_run, gfit_miss, gtrial, gfail;   // frames whose GPU time fits k − 1 (a run; late frames in it, at most FSTEP_GFIT_MISS); the trial in progress is one by the GPU fit; such trials failed in a row
     int fit_miss, settle;     // frames of the current fit run that fit k but not k − 1; frames left of a trial's settling (FSTEP_SETTLE)
+    int tgrace;               // set by the caller (kept): the long grace of a trial back to a hold that held, in frames (0 = off: FSTEP_GRACE as for any trial)
+    int tg, tgt, tbad;        // the grace in progress is the long one; the trial in progress had it; frames in a row later than the longer hold (FSTEP_TBAD)
+    int tgfail[FSTEP_MAX + 1];   // trials with the long grace to each hold that failed in a row (3 stop it there)
+    uint64_t tgtrials, tgends;   // statistics: trials given the long grace; long graces ended early
     uint64_t late, paid, ups, downs, failed, probes; double dropped;   // statistics for the log
 } nvn_fstep;
 
 // Whether the cost at the longer hold is the cost that held kmin (a probe without a slowed report)
 static inline int nvn_fstep_same(const nvn_fstep *s) { return s->cref > 0 && s->cn >= FSTEP_RUN && s->ccur <= FSTEP_SAME * s->cref; }
+// The grace of a trial to hold to that starts now: the long one when the frames held that hold earlier (above kmin) and the long ones there have not failed three times running
+static inline int nvn_fstep_tgrace(nvn_fstep *s, int to, int kmin) {
+    s->tbad = 0;
+    s->tg = s->tgt = s->tgrace > 0 && to > kmin && to <= FSTEP_MAX && s->kheld[to] > 0 && s->tgfail[to] < 3;
+    if (!s->tg) return FSTEP_GRACE;
+    s->tgtrials++; return s->tgrace > FSTEP_GRACE ? s->tgrace : FSTEP_GRACE;
+}
 
 // Once per frame. shown: real time since the previous frame's start, in vsyncs; cost: the frame's work, max(CPU, GPU), in vsyncs (a GPU that cannot keep up makes frames late too); kmin: 1 at a 60 fps cap, 2 at 30;
 // kmax: the longest hold (FSTEP_MAX; 2 at a 30 fps cap, where the display link runs at 30 Hz and holds only even counts); fixed: a step the game has set itself (BotW's
@@ -98,7 +119,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     if (!s->hold) s->hold = hold0;
     if (fixed > 0) {   // the game's own step: speed is right by construction, nothing to pay back
         s->k = s->step = fixed < FSTEP_MAX ? fixed : FSTEP_MAX;
-        s->debt = 0; s->late_run = s->fit_run = s->trial = s->probe = s->grace = 0; s->run = 0;
+        s->debt = 0; s->late_run = s->fit_run = s->trial = s->probe = s->grace = 0; s->run = 0; s->tg = s->tgt = 0;
         s->kmin = FSTEP_MAX + 1;   // when it ends, k starts again from kmin
         return s->step;
     }
@@ -110,20 +131,26 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     s->since += shown;
     int cap_probe = kmin < s->kmin && s->kmin <= FSTEP_MAX && s->k > kmin;
     if (cap_probe) {   // the cap rose: a probe at once, whose grace covers the clocks still set for the longer hold
-        s->k = kmin; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
+        s->k = kmin; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->tg = s->tgt = 0; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
     } else if (kmin < s->kmin || s->k < kmin) s->k = kmin;   // the game's own step ended, or the cap fell
     if (s->k > kmax) s->k = kmax;
     s->kmin = kmin;
-    int scr = s->screen; s->screen = 0;
+    int scr = s->screen, tg_end = 0; s->screen = 0;
+    if (s->tg && s->grace > 0 && !cap_probe) {   // the long grace: frames later than the longer hold would show them, or a debt the payback cannot keep, end it
+        int bad = scr ? scr == 2 && shown > held + 1 + FSTEP_LATE + s->shown_slack : shown > held + 1 + FSTEP_LATE + s->shown_slack || cost > held + 1 + FSTEP_LATE;
+        s->tbad = bad ? s->tbad + 1 : 0;
+        if (s->tbad >= FSTEP_TBAD || s->debt > FSTEP_DEBT_MAX / 2) { s->grace = 0; s->tg = 0; s->tbad = 0; s->tgends++; tg_end = 1; }
+    }
     int late = scr ? scr == 2 : shown > held + FSTEP_LATE + s->shown_slack || cost > held + FSTEP_LATE, grace = s->grace > 0;
     int soft = late && !scr && s->gpu > 0 && s->gpu <= FSTEP_FIT * held && cost <= held + FSTEP_LATE_SOFT && shown <= held + FSTEP_LATE_SOFT + s->shown_slack;   // the pipeline's lateness at a hold the GPU fits: no step up
     if (grace && !cap_probe) {   // the completed frame at the old cap does not consume the new hold's grace
         if (s->grace > FSTEP_GRACE / 2) s->pa += cost; else s->pb += cost;
         s->plate += late; s->ptotal++;
         if (!--s->grace && s->ramp && s->plate && s->ptotal + FSTEP_GRACE <= FSTEP_PROBE_MAX && s->pb <= (1 - FSTEP_RAMP) * s->pa) { s->grace = FSTEP_GRACE; s->pa = s->pb = 0; s->plate = 0; }   // still getting cheaper: another window
+        if (!s->grace) s->tg = 0;
     }
     int settling = s->settle > 0; if (settling) s->settle--;
-    if (late) { s->late++; s->late_run = grace || settling || soft ? 0 : s->late_run + 1; s->fit_run = s->fit_miss = 0; } else s->late_run = 0;
+    if (late) { s->late++; s->late_run = grace || settling || soft ? 0 : tg_end ? FSTEP_TBAD : s->late_run + 1; s->fit_run = s->fit_miss = 0; } else s->late_run = 0;   // (a long grace ended by late frames: judged as three late frames)
     if (!(s->k > kmin && s->gpu > 0 && s->gpu <= FSTEP_FIT * (s->k - 1))) s->gfit_run = s->gfit_miss = 0;   // the GPU does not fit the shorter hold (or none known): no run
     else if (!late || soft) s->gfit_run++;
     else if (++s->gfit_miss > FSTEP_GFIT_MISS) s->gfit_run = s->gfit_miss = 0;   // a late frame: up to FSTEP_GFIT_MISS of them in a run (Ocarina of Time's Kokiri Forest at hold 3: one in ten)
@@ -143,7 +170,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     else {
         s->run = 0;
         if (held != s->ck) { s->ck = held; s->cn = 0; }
-        if (!late && fits) { s->ccur = s->cn ? s->ccur + (cost - s->ccur) / 8 : cost; s->cn++; if (s->cn >= FSTEP_RUN && !grace && held <= FSTEP_MAX) s->kheld[held] = s->ccur; }
+        if (!late && fits) { s->ccur = s->cn ? s->ccur + (cost - s->ccur) / 8 : cost; s->cn++; if (s->cn >= FSTEP_RUN && !grace && held <= FSTEP_MAX) { s->kheld[held] = s->ccur; s->tgfail[held] = 0; } }
     }
     if (s->late_run >= 3 && s->k < kmax) {   // step up to the cost, at least one vsync
         int want = (int)ceil(cost - 0.05);
@@ -151,11 +178,14 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
         if (want > kmax) want = kmax;
         if (s->trial || (s->probe == 2 && s->since < hold_max)) { s->failed++; s->trial = 0; s->hold = s->hold * 2 < hold_max ? s->hold * 2 : hold_max;
             if (s->mtrial && ++s->mfail >= 3 && held <= FSTEP_MAX) s->kheld[held] = 0;   // (three failed trials by kheld: that hold's cost is no longer the scene's)
-            if (s->gtrial) s->gfail++; }
+            if (s->gtrial) s->gfail++;
+            if (s->tgt && held <= FSTEP_MAX) s->tgfail[held]++; }
         else if (s->probe == 2) s->hold = hold0;   // the probe's run at kmin lasted
         if (held == kmin && s->run >= hold_max) s->cref = s->crun;   // kmin held 8 s at this cost
-        s->k = want; s->ups++; s->late_run = s->fit_run = s->gfit_run = s->gfit_miss = 0; s->since = 0; s->probe = 0; s->mtrial = s->gtrial = 0;
-    } else if (s->trial && !grace && !--s->trial) { if (s->probe) { s->probe = 2; s->since = 0; } else s->hold = hold0; s->mtrial = s->mfail = s->gtrial = s->gfail = 0; }   // the trial held (a probe's run at kmin is judged at the next step up)
+        s->k = want; s->ups++; s->late_run = s->fit_run = s->gfit_run = s->gfit_miss = 0; s->since = 0; s->probe = 0; s->mtrial = s->gtrial = 0; s->tg = s->tgt = s->tbad = 0;
+    } else if (s->trial && !grace && !--s->trial) {   // the trial held (a probe's run at kmin is judged at the next step up)
+        if (s->probe) { s->probe = 2; s->since = 0; } else s->hold = hold0;
+        s->mtrial = s->mfail = s->gtrial = s->gfail = 0; if (s->tgt && s->k <= FSTEP_MAX) s->tgfail[s->k] = 0; s->tgt = 0; }
     if (!late) {
         if (s->k <= kmin) s->fit_run = s->fit_miss = 0;
         else if (cost <= FSTEP_FIT * (s->k - 1)) s->fit_run++;
@@ -163,15 +193,15 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     }
     if (s->fit_run >= FSTEP_RUN && s->since >= s->hold && !s->trial) { s->k--; s->downs++; s->trial = FSTEP_RUN; s->fit_run = s->fit_miss = s->gfit_run = s->gfit_miss = 0; s->settle = FSTEP_SETTLE; }
     else if (s->k - 1 > kmin && s->k - 1 <= FSTEP_MAX && s->kheld[s->k - 1] > 0 && s->kheld[s->k - 1] <= FSTEP_FIT * (s->k - 1) && s->since >= s->hold && !s->trial && !s->probe) {
-        s->k--; s->downs++; s->trial = FSTEP_RUN; s->mtrial = 1; s->grace = FSTEP_GRACE; s->fit_run = s->fit_miss = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;   // back to a hold that held
+        s->k--; s->downs++; s->trial = FSTEP_RUN; s->mtrial = 1; s->grace = nvn_fstep_tgrace(s, s->k, kmin); s->fit_run = s->fit_miss = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;   // back to a hold that held
     } else if (s->gfit_run >= FSTEP_RUN && s->k > kmin && s->gfail < 3 && s->since >= s->hold && !s->trial && !s->probe) {   // the GPU has fitted the shorter hold: try it, with a probe's grace
-        s->k--; s->downs++; s->trial = FSTEP_RUN; s->gtrial = 1; s->grace = FSTEP_GRACE; s->fit_run = s->fit_miss = s->late_run = s->gfit_run = s->gfit_miss = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
+        s->k--; s->downs++; s->trial = FSTEP_RUN; s->gtrial = 1; s->grace = nvn_fstep_tgrace(s, s->k, kmin); s->fit_run = s->fit_miss = s->late_run = s->gfit_run = s->gfit_miss = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
     } else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial
                && !(s->probe_near && s->gpu > 0 && s->gpu * s->gpu / s->k > FSTEP_FIT * (s->k - 1 > kmin ? s->k - 1 : kmin))) {   // probe: straight to kmin, so the controller sees the whole deadline
         // probe_near's headroom rule: a governor that sizes the clock to the busy share can raise it at most in proportion to the idle share, so the GPU's time at hold k, gpu, can
         // fall to about gpu * (gpu / k) at best; a probe whose target that does not fit is not made (Ocarina of Time on a Galaxy Z Fold 8: at hold 2 with a GPU of 1.6 vsyncs a
         // probe to 1 failed every time and doubled the hold-off, which then kept hold 3 longer)
-        s->k = s->probe_near && s->k - 1 > kmin ? s->k - 1 : kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = FSTEP_GRACE; s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
+        s->k = s->probe_near && s->k - 1 > kmin ? s->k - 1 : kmin; s->downs++; s->probes++; s->trial = FSTEP_RUN; s->probe = 1; s->grace = nvn_fstep_tgrace(s, s->k, kmin); s->fit_run = s->late_run = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
     }
     s->step = s->k + (s->debt >= 1 && s->k < FSTEP_MAX);
     s->paid += s->step > s->k;

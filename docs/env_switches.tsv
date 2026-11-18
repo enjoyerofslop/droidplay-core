@@ -54,6 +54,7 @@ DM_FSLOG	diagnostic	`=<file>` writes one TSV line per ReadFile: seconds since bo
 DM_FSLOG_HASH	diagnostic	With `DM_FSLOG`, adds a column with the FNV-1a 64 hash of the bytes read
 DM_FSTEP_PROBE_RAMP	switch	`0` ends a frame-step probe's grace after its 30 frames as before; by default the grace is renewed while the probe's frames keep getting cheaper (macOS raises the GPU clock for the shorter deadline over seconds); `ab` alternates with `DM_AB`
 DM_FSTEP_TRACE	diagnostic	`1` logs the frame step's inputs every 15th frame (`hle_nvn.c` `fstep_tick`): the hold, the frame's shown time, wait, CPU, GPU and cost in vsyncs, the fitting run, the hold-off, the trial and the late run
+DM_FSTEP_TRIAL_GRACE	switch	Android: `=<frames>` the grace of a frame-step trial back to a hold the frames held earlier in the scene, so the GPU governor can raise the clock before the trial is judged (180 by default; ended early by three frames later than the longer hold would show them or a debt past half its cap); `0` gives such a trial the 30-frame grace of any trial, as before (`dm/gfx/nvn/nvn_fstep.h` `nvn_fstep_tgrace`)
 DM_FULLSCREEN	player	`1` (any value but `0`) starts the Mac window in fullscreen; `0` or unset, a window. The Mac settings window's Display mode
 DM_GAME	switch	Selects the game profile (a title ID under `dm/games` or `DM_GAMES_DIR`) for the Python tools and the rewriter; there is no default
 DM_GAMES_DIR	path	Profile folders outside the repository, separated by `:`, searched after `dm/games`; the NSP script points it at a provisional or derived profile
