@@ -2426,11 +2426,13 @@ The NVN replay on Vulkan for Android phones (`dm/android/gfx_vk.c`, `gfx_vk_draw
   - A fragment shader whose result the mark's store cannot change keeps its depth test before it runs (`EarlyFragmentTests`), as `dmsh_build.py` does on the Mac.
   - The first shader that has a pool array starts the pool set, so a game without one never makes it. Room is left for the stages' own descriptors, and `maxPerStageResources` is checked too.
   - `DM_VK_POOL=0` turns it off; `DM_VK_POOL_LOG=1` logs each ID as it is first read.
+  - The marks are copied out of their buffer in one read before the scan, and a word set in the copy is read again before it is cleared, so a bit the GPU set meanwhile is taken with it. Where no memory type is both cached and coherent (Arm's Mali: the Pixel 9 Pro XL's types are 0x7, 0xb, 0x11 and 0x21), the buffer is uncached, and the scan of Ocarina of Time's 33,792 IDs in it took 1.83-1.85 ms a sync two words a load (2.29-2.33 word by word), 17 syncs a frame, on the replay thread; copied, 0.17 ms. `DM_VK_POOL_SNAP=0` scans the buffer two words a load as before.
 - **Check:** `dm/tools/tests/test_spv_pool.py`; with `DM_SPV_DIR`, all 4,892 of Ocarina of Time's modules with pool arrays are rewritten and pass `spirv-val`, 3,759 of them with early depth tests added. Ocarina of Time's Kokiri Forest on a Galaxy Z Fold 8 (`bench_android.tsv` route `kokiri`, two runs each, `DM_VK_POOL=0` against on):
   - before, the run's 103 pool shaders were refused and 49,592 of their draws dropped in its first minute in the forest; after, none refused or dropped, and 6,031 draws bound the set;
   - the forest's draws read 12-15 IDs (the distant scenery's texture sets), and each chunk's sync took 0.33 ms on average;
   - 1.6 → 1.7 fps, frame p50 640-650 → 593-611 ms, GPU p50 138.6-138.8 → 119.4-128.2 ms;
   - the picture did not change there: the forest stays black for another cause, see the game's note.
+- **Check (the marks copied, 2026-11-18):** Kokiri Forest on a Pixel 9 Pro XL (Mali-G715), the bench's `kokiri` route, on main 6bbfcc20d with the compute form's kernels made workgroup-wide (`spv_wg32`), runs alternating: copied 10.75 and 10.77 fps (frame p50 88.4 and 87.9 ms, the replay thread's CPU 32.2 and 32.3 ms a frame), two words a load 9.05 and 9.23 fps (107.2 and 105.7 ms, 59.6 and 60.0 ms); the GPU frame 73.2 against 76.6-77.7 ms; the picture the same.
 - **Found on:** [Ocarina of Time](../../dm/games/0400486024DEC000/README.md#android) (Switch 2).
 
 ### Descriptor arrays longer than the replay writes (Android)
