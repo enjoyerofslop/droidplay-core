@@ -162,7 +162,7 @@ class SpvFsum(unittest.TestCase):
         adds = [x for op, x in o if op == 129]; self.assertEqual(sorted(x[3] if x[3] in {s[1] for s in sums} else x[2] for x in adds), sorted(s[1] for s in sums))   # each add takes a sum
         # each loop entered on its election: a selection whose condition is the elect, whose merge is the loop's old merge; the loop merges into a new block that goes there
         conds = [x for op, x in o if op == 250 and x[0] in {e[1] for e in els}]; self.assertEqual(len(conds), loops)
-        lms = [x for op, x in o if op == 246]; labels = [i for i, (op, x) in enumerate(o) if op == 248]
+        lms = [x for op, x in o if op == 246]
         for x in lms:
             j = next(i for i, (op, y) in enumerate(o) if op == 248 and y[0] == x[0])
             self.assertEqual(o[j + 1][0], 249)   # the new merge block: a branch on

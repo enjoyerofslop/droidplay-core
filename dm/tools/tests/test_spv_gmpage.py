@@ -85,7 +85,7 @@ class SpvGmPage(unittest.TestCase):
         self.assertFalse([x for op, x in o[hb:he] if op == 128 and consts.get(x[3]) == PAGE_WORD])   # a miss the hint answers reads no page word
         adds = [x for op, x in o[sb:pb] if op == 128 and consts.get(x[3]) == PAGE_WORD]; self.assertEqual(len(adds), 1)
         masks = [x for op, x in o[sb:pb] if op == 199 and consts.get(x[3]) == (1 << PAGE_BITS) - 1]; self.assertEqual(len(masks), 1)
-        merge, rest = o[pb][1][1], o[pb][1][2]
+        merge = o[pb][1][1]
         self.assertEqual(o[pb - 1], (247, (merge, 0)))
         ml = next(i for i, (op, x) in enumerate(o) if op == 248 and x[0] == merge); self.assertEqual(o[ml + 1], (249, (found,)))
         self.assertEqual(len([1 for op, x in o if op == 249 and x[0] == merge]), 1)   # the search's end
