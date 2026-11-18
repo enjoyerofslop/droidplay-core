@@ -506,6 +506,44 @@ int main(void) {
         snprintf(b, sizeof b, "long grace, a cool phone: the same path with it on or off (k %d / %d, downs %llu / %llu, ups %llu / %llu)", kk[1], kk[0], dn[1], dn[0], up[1], up[0]);
         check(kk[1] == 2 && kk[0] == 2 && dn[1] == dn[0] && up[1] == up[0] && gm[1] == gm[0], b);
     }
+    {   // A hold the scene never held (tnew): a start at hold 3 with the clock low (GPU 2.2 vsyncs at 578 MHz, 1.16 scaled to a 1,100 MHz top), a governor that raises it after
+        // 90 busy frames at hold 2. The top-clock fit starts a trial with the long grace, and hold 2 holds; without tnew no rule tries hold 2 at all
+        int end_k[2]; unsigned long long nt[2], dn[2];
+        for (int on = 0; on < 2; on++) {
+            sim m = {0}; m.s.tgrace = FSTEP_TGRACE; m.s.tnew = on; run(&m, 60, 0.5, 1, 3, 0);
+            m.gpu = 2.2; run(&m, 3, 3.5, 1, 3, 0);   // the load's heavy frames: hold 3, never hold 2
+            int busy2 = 0;
+            for (int i = 0; i < 3000; i++) {
+                int k = m.s.k; busy2 = k == 2 ? busy2 + 1 : 0; double g = k == 2 && busy2 > 90 ? 1.6 : 2.2, mhz = k == 2 && busy2 > 90 ? 826 : 578;
+                m.gpu = g; m.s.gpu_top = g * mhz / 1100; run(&m, 1, g, 1, 3, 0);
+            }
+            end_k[on] = m.s.k; nt[on] = m.s.tnewtrials; dn[on] = m.s.downs;
+        }
+        snprintf(b, sizeof b, "never-held hold 2 that fits at the top clock (1.16): a long trial, and hold 2 holds (k %d, top-clock trials %llu)", end_k[1], nt[1]);
+        check(end_k[1] == 2 && nt[1] >= 1, b);
+        snprintf(b, sizeof b, "  without tnew no trial to 2 at all (k %d, downs %llu)", end_k[0], dn[0]);
+        check(end_k[0] == 3 && dn[0] == 0 && nt[0] == 0, b);
+    }
+    {   // The gate: a probe to a never-held hold 2 gets the long grace only when the GPU would fit it at the top clock; 1.9 scaled does not (past 0.85 x 2), 1.2 does
+        for (int fits = 0; fits < 2; fits++) {
+            sim m = {0}; m.s.tgrace = FSTEP_TGRACE; m.s.tnew = 1; m.s.probe_near = 1; run(&m, 60, 0.5, 1, 3, 0); run(&m, 300, 2.3, 1, 3, 0);
+            m.gpu = 2.2; for (int i = 0; i < 20; i++) { m.s.gpu_top = fits ? 1.2 : 1.9; run(&m, 1, 2.3, 1, 3, 0); }   // the top-clock average at hold 3 (fewer frames than a top-clock trial needs)
+            m.slow = 1; int grace = -1, tg = -1;
+            for (int i = 0; i < 2000 && grace < 0; i++) { int k0 = m.s.k; m.s.gpu_top = fits ? 1.2 : 1.9; run(&m, 1, 2.3, 1, 3, 0); if (k0 == 3 && m.s.k == 2) { grace = m.s.grace; tg = m.s.tg; } }
+            if (fits) { snprintf(b, sizeof b, "  a never-held hold that fits at the top clock: its trial has the long grace (grace %d)", grace); check(tg == 1 && grace == FSTEP_TGRACE, b); }
+            else { snprintf(b, sizeof b, "  one that does not fit at the top clock (1.9): the normal grace (grace %d)", grace); check(tg == 0 && grace == FSTEP_GRACE, b); }
+        }
+        sim c = {0}; c.s.tgrace = FSTEP_TGRACE; c.s.tnew = 1; run(&c, 60, 0.5, 1, 3, 0); c.gpu = 2.2; run(&c, 3, 3.5, 1, 3, 0);
+        for (int i = 0; i < 3000; i++) { c.s.gpu_top = 0; c.gpu = 2.2; run(&c, 1, 2.2, 1, 3, 0); }
+        check(c.s.k == 3 && c.s.downs == 0, "  without a clock (gpu_top 0) the cost at hold 3 (2.2) stands in: no top-clock trial");
+    }
+    {   // A never-held hold that fits at the top clock on paper but not in fact (2.3 at hold 2 whatever the clock): three long trials, then none, the game keeping its time
+        sim m = {0}; m.s.tgrace = FSTEP_TGRACE; m.s.tnew = 1; run(&m, 60, 0.5, 1, 3, 0); m.gpu = 2.2; run(&m, 3, 3.5, 1, 3, 0);
+        double r0 = m.real, g0 = m.game, d0 = m.s.dropped;
+        for (int i = 0; i < 6000; i++) { double g = m.s.k == 2 ? 2.3 : 2.2; m.gpu = g; m.s.gpu_top = 1.2; run(&m, 1, g, 1, 3, 0); }
+        snprintf(b, sizeof b, "never-held, an overload: three long trials, then hold 3 stays (k %d, top-clock trials %llu, failed %llu)", m.s.k, (unsigned long long)m.s.tnewtrials, (unsigned long long)m.s.failed);
+        check(m.s.k == 3 && m.s.tnewtrials == 3 && m.s.failed == 3 && m.s.dropped - d0 < 1 && (m.real - r0) - (m.game - g0) <= FSTEP_DEBT_MAX + 1, b);
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }
