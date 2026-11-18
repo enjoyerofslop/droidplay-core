@@ -47,7 +47,7 @@ typedef struct { VkStructureType sType; const void *pNext; void *pPlacedAddress;
 #define MADV_POPULATE_READ 22
 #endif
 #include "gmem_table.h"   // the table's layout and the translator's lookup, free of Vulkan (dm/tools/tests/test_gmem_table.py)
-enum { GM_TAB_BYTES = GMEM_TAB_BYTES, GM_LOG_BYTES = DMSH_GMEM_MAP_ENTRIES / 8, GM_SEEN = 256 };
+enum { GM_TAB_BYTES = GMEM_PAGED_BYTES, GM_LOG_BYTES = DMSH_GMEM_MAP_ENTRIES / 8, GM_SEEN = 256 };
 // A piece's buffer is bound in place as whatever the game's buffer at that address is read as (gfx_vk_gmem_inplace.inc; a dispatch's write read as a vertex stream or a buffer
 // texture through fwd_hit), so it takes every buffer usage
 #define GM_USAGE (VK_BUFFER_USAGE_STORAGE_BUFFER_BIT | VK_BUFFER_USAGE_SHADER_DEVICE_ADDRESS_BIT_KHR | VK_BUFFER_USAGE_UNIFORM_BUFFER_BIT | VK_BUFFER_USAGE_VERTEX_BUFFER_BIT | \
@@ -467,12 +467,15 @@ static int gm_table(void) {
     pthread_mutex_unlock(&g_gm_mu);
     { int n0 = n; n = gm_sink_ranges(&seg, &cseg, n); if (n > n0) qsort(seg, (size_t)n, sizeof *seg, gm_seg_cmp); }   // DM_VK_RAW_GMEM_SINK (gfx_vk_gmem_lazy.inc)
     n = gmem_table_fill(t.p, (const uint64_t (*)[3])seg, n, &over);
+    int pages = 0, lost = 0; if (gmpage_on()) pages = gmem_table_pages(t.p, n, &lost);   // the page map after it (spv_gmpage.h)
     if (over) RED_ONCE(163, "raw global memory: %d more placed pieces than the %d entries of the pool table: addresses in them are not reached", over, DMSH_GMEM_MAP_ENTRIES - 1);
     if (g_gt.b) { g_gt.seq = C ? C->seq : g_seq;   // the chunk recorded now may read it
         if (g_ngt_free < 8) g_gt_free[g_ngt_free++] = g_gt; else { dead_add(5, (uint64_t)g_gt.b); dead_add(4, (uint64_t)g_gt.m); } }
     g_gt = t; g_gm_tabs++;
     { static int said; if (!said++) { LOG("[vk] raw global memory: pool table of %d placed pieces, built again whenever a pool is placed or given back", n - 1); gm_selftest(); } }
     gm_hint_stat(seg, n - 1);
+    { static int said; int lvl = n - 1 >= 400 ? 4 : n - 1 >= 200 ? 3 : n - 1 >= 100 ? 2 : n - 1 >= 50 ? 1 : 0;
+      if (gmpage_on() && lvl > said) { said = lvl; LOG("[vk] raw global memory: the page map after the table holds %d pages of %d pieces (%.1f MiB) that no chunk hint names; %d pages left to the search, their word taken (spv_gmpage.h)", pages, n - 1, pages / 256.0, lost); } }
     return 1;
 }
 // A raw-memory binding of shader s (cb_offset 0 the table, DMSH_GMEM_LOG_CB_OFFSET the write log): the buffer, offset and range to bind

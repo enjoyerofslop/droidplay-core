@@ -557,6 +557,22 @@ static size_t spv_fit_nophys(const uint32_t *code, size_t nw, const char *what, 
     if (!atomic_exchange(&logged, 1)) LOG("[vk] raw global memory off: shaders' loads through physical pointers read 0 and their stores are dropped (DM_SPV_NOPHYS=0: as translated). First: %s, %d accesses", what, ch);
     *out = o; return k;
 }
+// The module with each raw global memory helper reading the page map after the pool table where its cached entry and its chunk's hint miss (spv_gmpage.h), in *out (to
+// free); 0 when raw global memory is off, the module has no such helper, or one not in the translator's form (said once). The table carries the map (gm_table) whenever
+// this is on. DM_SPV_GMPAGE=0 (env.txt): helpers search the table on such a miss, as translated, and the table has no map
+static int gmpage_on(void) { static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_GMPAGE"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_SPV_GMPAGE=0: raw global memory helpers search the pool table where the cached entry and the chunk's hint miss"); } return on; }
+static size_t spv_fit_gmpage(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    *out = NULL;
+    if (!gmpage_on() || !gm_on() || nw < 5 || !spv_gmcache_wanted(code, nw)) return 0;
+    size_t cap = nw + SPV_GMPAGE_EXTRA(SPV_GMPAGE_MAX); uint32_t *s = malloc(2 * (size_t)code[3] * 4), *o = malloc(cap * 4); int why = 0;
+    size_t k = s && o ? spv_gmpage(code, nw, s, o, cap, &why) : 0; free(s);
+    if (!k) { free(o);
+        if (why) { static _Atomic int said; if (!atomic_exchange(&said, 1)) LOG("[vk] %s: a raw global memory helper not in the translator's form (%s): it searches the table where it misses, as translated", what, why == SPV_GMPAGE_FORM ? "form" : why == SPV_GMPAGE_MANY ? "too many helpers" : "room"); }
+        return 0; }
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1)) LOG("[vk] raw global memory helpers look an address their cached entry and its chunk's hint miss up in the table's page map before they search (DM_SPV_GMPAGE=0: as translated). First: %s", what);
+    *out = o; return k;
+}
 static size_t spv_fit_gmcache(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_GMCACHE"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_SPV_GMCACHE=0: raw global memory helpers read their last entry's range from the table on every access"); }
     *out = NULL;

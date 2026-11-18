@@ -33,6 +33,7 @@
 #include "spv_vsinit.h"   // vertex shader outputs start as (0,0,0,1), as on the hardware (gfx_vk_draw.inc spv_fit_vsinit)
 #include "spv_inarr.h"   // attribute arrays: every location they cover (gfx_vk_draw.inc spv_io), and split into an input per location (spv_fit_inarr)
 #include "spv_gmcache.h"   // raw global memory helpers keep their last entry's range and delta in private words (gfx_vk_draw.inc spv_fit_gmcache)
+#include "spv_gmpage.h"   // raw global memory helpers look a missed address up in the table's page map before they search (gfx_vk_draw.inc spv_fit_gmpage)
 #include "spv_fsum.h"   // float atomic adds to one word summed across the subgroup first, one invocation adding (gfx_vk_draw.inc spv_fit_fsum)
 #include "spv_nophys.h"   // with raw global memory off, loads and stores through physical pointers taken out (gfx_vk_draw.inc spv_fit_nophys)
 #include "pk_guard.h"   // the start-up list's marker and skip list (gfx_vk_draw.inc pk_guard)

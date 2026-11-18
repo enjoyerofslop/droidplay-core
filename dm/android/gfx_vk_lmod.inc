@@ -64,6 +64,7 @@ static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, int tff, ui
         }
     }
     uint32_t *nph = NULL; size_t nphn = spv_fit_nophys(code, n, path, &nph); if (nphn) { free(code); code = nph; n = nphn; }   // raw memory off: no physical pointer read (spv_nophys.h)
+    uint32_t *gp = NULL; size_t gpn = spv_fit_gmpage(code, n, path, &gp); if (gpn) { free(code); code = gp; n = gpn; }   // raw memory helpers read the page map before they search (spv_gmpage.h)
     uint32_t *gc = NULL; size_t gcn = spv_fit_gmcache(code, n, path, &gc); if (gcn) { free(code); code = gc; n = gcn; }   // raw memory helpers' last entry kept in private words (spv_gmcache.h)
     uint32_t *np = NULL; size_t npn = gm_np_code(code, n, path, first, &np); if (npn) { free(code); code = np; n = npn; }   // raw memory without physical pointers (spv_noptr.h)
     uint32_t *vi = NULL; size_t vn = spv_fit_vsinit(code, n, path, &vi); if (vn) { free(code); code = vi; n = vn; }   // vertex outputs start as (0,0,0,1)
