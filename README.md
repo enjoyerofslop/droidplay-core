@@ -125,8 +125,10 @@ menu** gives it a menu entry. Where FUSE is missing, `--appimage-extract-and-run
   puts it in the old one's place and opens it. Its first start prepares the new version and keeps the previous one; your games, builds and
   settings stay. An AppImage with the name it was downloaded with takes the new version's (the menu entry DroidPlay added follows it); one you renamed keeps
   your name. Where DroidPlay can't write to the AppImage's folder, **Download** opens the release page instead.
-- **Games you've already built** keep what they were built with. Build them again (**Build and install**) to get a release's fixes; what didn't change isn't
-  redone, so it's usually quick. Saves stay on the phone.
+- **Games you've already built:** after an update, DroidPlay for Windows and Linux offers **Update games** for the connected phone. It builds each game's engine
+  again from the new DroidPlay (a few seconds a game, with no game files) and updates the app on the phone, which brings most fixes. A fix to a game's shaders or to how
+  its code is adapted needs **Build and install**; what didn't change isn't redone, so it's usually quick. Game apps carry their own engine: build them again. Saves stay
+  on the phone ([after DroidPlay updates](docs/android.md#after-droidplay-updates)).
 - **What changed** in each release is in the [release notes](https://github.com/enjoyerofslop/droidplay-core/releases).
 
 ## On your phone

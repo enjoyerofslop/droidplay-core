@@ -3,7 +3,8 @@
 #   The folder may instead hold the game as one NUP container (a .nup file: base game, updates and DLC), or as a dump folder (scripts/pack_dump.py), or the .nup file may
 #   be given in its place: neither needs prod.keys (build_ipa_from_nsp.py reads them, as for iOS)
 #   python scripts/build_android_from_nsp.py <NSP folder> -k <prod.keys> --push-only [--serial ...]   install the app and copy a game built before, without building
-#   python scripts/build_android_from_nsp.py --apk-only [--serial ...]                                  the app with every game host built on this computer, installed
+#   python scripts/build_android_from_nsp.py --apk-only [--serial ...]                                  the app with every game host built on this computer, each built again
+#                                                                                                        from this checkout first (refresh_hosts: no game files needed), installed
 #   python scripts/build_android_from_nsp.py --migrate --title <title ID> [--serial ...]               a one-game install's folder (files/game) into files/games/<title ID>
 #   python scripts/build_android_from_nsp.py --import-save <folder | archive> --title <title ID> [--serial ...]   a save for that game, swapped in by the app after it asks
 #   python scripts/build_android_from_nsp.py --restore-backup <backup folder> [--title <title ID>] [--serial ...]   a game's save (or every game's) from Back up saves' copy
@@ -16,7 +17,8 @@
 # One app carries every game: its launcher (dm/android/java Launcher.java) lists the games on the phone, Android/data/org.nxnative.android/files/games/<title ID>/,
 # and the app holds a host per game, lib/arm64-v8a/libdmhost_<title ID>.so, started by its loader (dm/android/loader.c). The hosts built on this computer are kept in a
 # library (<data>/hosts/<title ID>/: %LOCALAPPDATA%\nxnative\android on Windows, ~/.local/share/nxnative/android elsewhere, or under XDG_DATA_HOME on Linux), and every APK is packed from all of them,
-# so building a second game keeps the first in the app.
+# so building a second game keeps the first in the app. Before each pack, the hosts not built from this checkout are built again from it (refresh_hosts), so every game
+# in the app runs the same runtime; --keep-hosts packs them as they are.
 # Steps (the extraction and the rewrite are build_ipa_from_nsp.py's own, reused):
 #   1. find the game profile from the title ID (dm/games/<id>); a game without one is surveyed and packed from a provisional profile (<NSP folder>/<id>_build/profile),
 #      first with --no-push, then built and installed like the others (an experimental build: it may not boot)
@@ -429,7 +431,7 @@ def oodle_phone(serial, sdk, g, game, pkg_ver, nsp_dir, patched, work, logs, env
     import android_oodle   # pyright: ignore[reportMissingImports]
     so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
     library_add(g.id, so, loader, st, {'title_id': g.id, 'name': bi.nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
-                                       'display': bi.nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
+                                       'display': bi.nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)}, g)
     install(serial, make_apk(sdk, logs, env), logs)
     dst = f'{REMOTE}/games/{g.id}'; adb(serial, 'shell', 'mkdir', '-p', dst); adb(serial, 'shell', 'rm', '-rf', f'{dst}/code')
     push_dir(serial, patched, dst, 'code', logs / 'adb_push_code_oodle.log'); open_tree(serial, dst)
@@ -490,13 +492,66 @@ def oodle_decode(roms, mains, dlc_roms, game, pkg_ver, nsp_dir, patched, work, l
 
 
 # ---------------- The library of game hosts ----------------
-def library_add(gid, so, loader, selftest, meta):   # the game's host, and the loader, VK_DRIVER_LIBS and self test of the latest build (they do not depend on the game)
+# <data>/hosts/<title ID>/: the game's host, libdmhost_<title ID>.so, and meta.json: its name, version, display version and NSP folder; 'built', when the host was built;
+# 'profile', which profile it was built from (profile_kind), 'core' and 'build', the DroidPlay Core version and the commit it was built from (core_version, build_stamp.py:
+# what the host's build: line logs); 'files_core' and 'chain', the version and the shader chain (ANDROID_CHAIN) the game's files on the phone were made with, which a host-only
+# update (refresh_hosts) leaves as they are. A derived or provisional profile is kept beside it, in profile/<title ID> (keep_profile)
+def library_add(gid, so, loader, selftest, meta, g=None):   # the game's host, and the loader, VK_DRIVER_LIBS and self test of the latest build (they do not depend on the game)
     lib = data_dir(); d = lib / 'hosts' / gid; d.mkdir(parents=True, exist_ok=True)
     shutil.copyfile(so, d / so.name)
-    (d / 'meta.json').write_text(json.dumps(dict(meta, built=datetime.datetime.now().isoformat(timespec='seconds')), indent=1), encoding='utf-8')
+    if g is not None:
+        meta = dict(meta, profile=profile_kind(g), core=core_version(), build=host_stamp(), files_core=core_version(), chain=android_chain())
+        if meta['profile'] == 'repository': shutil.rmtree(d / 'profile', ignore_errors=True)
+        else: keep_profile(gid, g.dir)
+    write_meta(gid, dict(meta, built=datetime.datetime.now().isoformat(timespec='seconds'))); _FRESH.add(gid)
+    library_loader(loader, selftest)
+
+
+def write_meta(gid, meta):
+    p = data_dir() / 'hosts' / gid / 'meta.json'; tmp = p.with_name(f'meta.{os.getpid()}.json')
+    tmp.write_text(json.dumps(meta, indent=1), encoding='utf-8'); os.replace(tmp, p)   # whole or not at all: the desktop app reads it while a refresh writes it
+
+
+def library_loader(loader, selftest):   # the loader, VK_DRIVER_LIBS and the self test of the latest build: they do not depend on the game
+    lib = data_dir()
     (lib / 'loader').mkdir(exist_ok=True); shutil.copyfile(loader, lib / 'loader' / loader.name)
     for f in driver_libs(loader.parent): shutil.copyfile(f, lib / 'loader' / f.name)
     st = lib / 'selftest'; shutil.rmtree(st, ignore_errors=True); shutil.copytree(selftest, st)
+
+
+def profile_kind(g):   # where profile g lives: 'repository' (dm/games), 'derived' (made from a dm/games profile for a version or build it doesn't register) or 'provisional'
+    # (the survey's guesses for a game with none): the last two in <NSP folder>/<id>_build/profile
+    if g.dir.resolve().is_relative_to((REPO / 'dm/games').resolve()): return 'repository'
+    return 'derived' if (REPO / 'dm/games' / g.id / 'game.tsv').is_file() else 'provisional'
+
+
+def keep_profile(gid, src):
+    """A derived or provisional profile (the folder src) kept in the library, <data>/hosts/<gid>/profile/<gid>: it lives beside the NSP folder, which the player may delete
+    or unplug, and refresh_hosts builds the host from it again. Only what game.py's header reads: game.tsv, and the shader map's rows for the game's own upscaler
+    (game.py upscaler_keys; a whole map is megabytes)"""
+    d = data_dir() / 'hosts' / gid / 'profile' / gid
+    if Path(src).resolve() == d.resolve(): return
+    part = d.with_name(f'{gid}.{os.getpid()}'); shutil.rmtree(part, ignore_errors=True); part.mkdir(parents=True)
+    shutil.copyfile(Path(src) / 'game.tsv', part / 'game.tsv')
+    sm = Path(src) / 'shader_map.tsv'
+    if sm.is_file():
+        rows = [ln for ln in sm.read_text(encoding='utf-8', errors='replace').splitlines() if UPSCALER_ROW.search(ln)]
+        if rows: (part / 'shader_map.tsv').write_text(''.join(r + '\n' for r in rows), encoding='utf-8', newline='\n')
+    bi.swap_in(part, d)
+
+
+UPSCALER_ROW = re.compile(r'/agl_ndsr\.pck#')   # game.py UPSCALER_SOURCE
+
+
+def host_stamp():   # the commit and version a host built now records and logs (dm/android/tools/build_stamp.py: `<commit>[+dirty] (<version>)`)
+    import build_stamp   # pyright: ignore[reportMissingImports]  (dm/android/tools, on the path)
+    return build_stamp.stamp()
+
+
+def android_chain():   # the Vulkan shader chain the translated shaders are made at (spv_android.py ANDROID_CHAIN), or None
+    try: m = re.search(r'^ANDROID_CHAIN = (\d+)', (REPO / 'dm/android/tools/spv_android.py').read_text(encoding='utf-8'), re.M)
+    except OSError: return None
+    return int(m[1]) if m else None
 
 
 def driver_libs(d):   # VK_DRIVER_LIBS in a folder: a library made before they were built has none, and its APK goes without (DM_VK_DRIVER then logs that they are missing)
@@ -512,6 +567,124 @@ def library():   # {title ID: (host, meta)} of the hosts built on this computer
             except (OSError, ValueError): meta = {}
             out[d.name] = (so, meta)
     return out
+
+
+# ---------------- Every game's host from this checkout (Update games) ----------------
+# A game's host is built at its install, with its profile compiled in (dm/android/CMakeLists.txt GAME, game.py header), and every APK packs the library's hosts as they
+# are: a runtime fix (front_android.c, the Vulkan replay, a service) reached a game only once that game was built and installed again, "Update the app" (--apk-only)
+# repacked the old hosts, and one APK carried runtimes of as many commits as games (#528's controller fix reached no tester who only updated). So every pack of the
+# app, --apk-only, --push-only and a build alike, first builds each library host again whose recorded build is not this checkout's (refresh_hosts): from its profile
+# alone, with no game files, in one CMake folder reconfigured per game (about 6 s a game). The game's code and shaders on the phone stay as its last build made them:
+# what changes the rewriter's or the translator's output still needs that build. --keep-hosts packs the hosts as they are. A game app carries its own host, built
+# with it, and is updated only by building it again
+HOST_BUILD = 'host_build'   # <data>/host_build: refresh_hosts' build folder, not the game's <id>_build/android_host, which may be on a drive that is unplugged
+
+
+def header_source(h):   # the profile folder a host header was generated from, as game.py names it on the header's first line: 'dm/games/<id>' for a repository profile
+    try: first = Path(h).read_text(encoding='utf-8', errors='replace').split('\n', 1)[0]
+    except OSError: return None
+    m = re.fullmatch(r'// Generated by dm/games/game\.py from (.+)/game\.tsv; do not edit', first.strip())
+    return m[1] if m else None
+
+
+def packed_main(work, ver):   # the build ID of the main module the build of version ver rewrote (<id>_build/patched_android_<ver>/main.fixups.tsv), or None
+    try: text = (work / f'patched_android_{ver}' / 'main.fixups.tsv').read_text(encoding='utf-8', errors='replace')
+    except OSError: return None
+    m = re.search(r'^# BUILD_ID\s+(\w+)', text, re.M)
+    return m[1] if m else None
+
+
+def registers(d, bid, ver):   # whether the profile in folder d has a build row for main build bid, or for version ver when bid isn't known
+    try: rows = [[c.strip() for c in ln.split('\t')] for ln in (d / 'game.tsv').read_text(encoding='utf-8').splitlines() if ln.startswith('build\t')]
+    except OSError: return False
+    return any(f'main={bid}' in r for r in rows) if bid else bool(ver) and any(r[1:2] == [ver] for r in rows)
+
+
+def host_profile(gid, meta):
+    """The profile gid's host is built from again → (kind, folder): folder None for the repository's own (dm/games/<gid>), else a folder outside it that game.py takes
+    first; (None, why) when there is none. A host the library records the profile of (library_add) takes that one. One from before that is worked out from the game's
+    build folder, <NSP folder>/<id>_build: the profile its header was last generated from (header_source), else the one that registers the main it rewrote, else the
+    derived or provisional profile there, else the repository's"""
+    repo, kept = REPO / 'dm/games' / gid, data_dir() / 'hosts' / gid / 'profile' / gid
+    def has(d): return d is not None and (d / 'game.tsv').is_file()
+    kind = meta.get('profile')
+    if kind == 'repository': return ('repository', None) if has(repo) else (None, f'game profile {gid} is not in dm/games any more')
+    if kind: return (kind, kept) if has(kept) else (None, f'its {kind} profile is missing ({kept})')
+    own_kind = 'derived' if has(repo) else 'provisional'
+    work = Path(meta['nsp_dir']) / f'{gid}_build' if meta.get('nsp_dir') else None
+    if work:
+        src = header_source(work / 'android_host' / 'gen' / gid / 'game_profile.h')
+        if src == f'dm/games/{gid}' and has(repo): return 'repository', None
+        if src and has(Path(src)): return own_kind, Path(src)
+    own, bid, ver = (work / 'profile' / gid, packed_main(work, meta.get('version')), meta.get('version')) if work else (None, None, None)
+    if has(repo) and registers(repo, bid, ver): return 'repository', None
+    if has(own): return own_kind, own
+    if has(repo): return 'repository', None
+    return None, f'no profile for it: none in dm/games, and none in {work / "profile" if work else "its build folder"}'
+
+
+def host_current(meta, stamp):   # the host was built from this checkout as it is: a checkout with changes ('+dirty') or no recorded commit is built again every time
+    return meta.get('build') == stamp and '+dirty' not in stamp and not stamp.startswith('not recorded')
+
+
+@contextlib.contextmanager
+def folder_lock(d, say_wait):   # one refresh at a time in the one build folder: two (two phones, or the desktop app and a console) would build one game's host with another's header
+    sys.path.insert(0, str(REPO / 'dm/android/tools')); import device_lock   # pyright: ignore[reportMissingImports]
+    d.mkdir(parents=True, exist_ok=True); f = open(d / '.lock', 'a+', encoding='utf-8'); told = False
+    try:
+        while not device_lock._try_lock(f):
+            if not told: say_wait(); told = True
+            time.sleep(2)
+        yield
+    finally: f.close()
+
+
+_FRESH = set()   # the hosts this run built itself (library_add): current whatever host_current says of a checkout with changes
+
+
+def refresh_hosts(sdk, logs, env, strict=False):
+    """Every library host whose recorded build isn't this checkout's (host_current) built again from it, with its profile (host_profile) → a summary for the stage's end.
+    A game whose profile can't be found, or whose host doesn't build, keeps the host it has, with a [RED] line that says so; with strict (--apk-only, whose point this
+    is), none built at all stops the run. The loader, the driver libraries and the self test come from the same build"""
+    hosts = library()
+    if not hosts: raise BuildError(f'no game host built on this computer yet ({data_dir()}): build a game first')
+    stamp, t0 = host_stamp(), time.time()
+    todo = {gid: v for gid, v in hosts.items() if gid not in _FRESH and not host_current(v[1], stamp)}
+    if not todo: return f'all {len(hosts)} built from {stamp} already'
+    work, made, kept, err, built = data_dir() / HOST_BUILD, [], [], None, None
+    with folder_lock(work, lambda: say('waiting for another update of the game hosts on this computer to finish')):
+        for i, (gid, (_, meta)) in enumerate(todo.items()):
+            name = meta.get('name') or gid
+            bi.PROG.set(step=f'{name} ({i + 1} of {len(todo)})', done=i, total=len(todo), unit='games')
+            kind, found = host_profile(gid, meta); pdir = found if isinstance(found, Path) else None
+            old = f'stays as it was built{" on " + meta["built"][:10] if meta.get("built") else ""}: build and install {name} again for the fixes'
+            if kind is None: say(f'[RED] {name} ({gid}): {found}, so its host {old}'); kept.append(name); continue
+            e = {k: v for k, v in env.items() if k not in ('DM_GAMES_DIR', 'DM_GAMES_FIRST')}   # the repository's profile, whatever the console set
+            if pdir: e.update(DM_GAMES_DIR=str(pdir.parent), DM_GAMES_FIRST='1')
+            glogs = logs / 'hosts' / gid; glogs.mkdir(parents=True, exist_ok=True)
+            try: so, loader, ndk = build_host(sdk, gid, work, glogs, e)
+            except BuildError as ex:
+                err = ex; say(f'[RED] {name} ({gid}): its host did not build ({str(ex).splitlines()[0][:300]}), so it {old}'); kept.append(name); continue
+            d = data_dir() / 'hosts' / gid; tmp = d / f'.{so.name}.{os.getpid()}'; shutil.copyfile(so, tmp); os.replace(tmp, d / so.name)
+            if pdir: keep_profile(gid, pdir)
+            else: shutil.rmtree(d / 'profile', ignore_errors=True)
+            write_meta(gid, dict(meta, profile=kind, core=core_version(), build=stamp, built=datetime.datetime.now().isoformat(timespec='seconds')))
+            made.append(name); built = (loader, ndk)
+        # the self test's module rewritten for Android, as a build's is (its x18 thread slots: nso_asm.py), whatever environment --apk-only started in
+        if built: library_loader(built[0], build_selftest(built[1], work, logs, dict(env, DM_TARGET='android', PYTHONUTF8='1')))
+    if strict and not made:
+        raise BuildError(f'no game host could be built from this checkout{f" ({str(err).splitlines()[0][:300]})" if err else ""}, so the app on the phone is left as it is. '
+                         f'The logs are in {logs / "hosts"}')
+    return (f'{len(made)} built from {stamp} in {bi.hms(time.time() - t0)}' + (f', {len(hosts) - len(todo)} built from it already' if len(todo) < len(hosts) else '') +
+            (f'; {len(kept)} kept as they were ({", ".join(kept)})' if kept else ''))
+
+
+def app_with_hosts(sdk, logs, env, keep=False, strict=False):   # the 'game hosts' stage (refresh_hosts; none with keep, --keep-hosts), then the 'APK' stage → make_apk's APK
+    if not keep:
+        bi.PROG.stage('game hosts', step='each game\'s host built again from this DroidPlay (no game files needed)')
+        bi.PROG.end(refresh_hosts(sdk, logs, env, strict))
+    bi.PROG.stage('APK'); apk = make_apk(sdk, logs, env); bi.PROG.end(str(apk))
+    return apk
 
 
 def safe_name(name):   # a file name every file system takes, a phone's and Windows' too
@@ -667,7 +840,9 @@ def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, wor
     bi.PROG.set(step='packing the APK' + (' with the RomFS inside' if inside else ''))
     bi.run([sys.executable, REPO / 'dm/android/tools/build_apk.py', '--sdk', sdk, '--game-app', g.id, '--so', so, '--game-dir', stage,
             *[x for f in driver_libs(Path(so).parent) for x in ('--lib', f)], *(['--romfs', str(rom)] if inside else []), '--keystore', KEYSTORE, '-o', apk, '--label', meta.get('name') or g.id,
-            *(['--icon', icon] if icon.is_file() else [])], logs / 'android_game_apk.log', env=env)
+            *(['--icon', icon] if icon.is_file() else []),
+            # its version, as the launcher app's: the host logs it beside its own (front_android.c app_version.h), the same when one build packed both
+            *(['--version-name', v] if (v := core_version()) else [])], logs / 'android_game_apk.log', env=env)
     Path(f'{apk}.idsig').unlink(missing_ok=True)   # apksigner's v4 signature, for adb's incremental installs only: clutter beside an app to share
     if xapk:
         out = out_dir / f'{base}.xapk'; obb = f'Android/obb/{pkg}/main.1.{pkg}.obb'
@@ -1620,7 +1795,9 @@ def main(argv):
     ap.add_argument('--reconnect-wait', type=float, default=180.0, help='wait up to this many seconds for a phone adb lost on the way, over Wi-Fi or USB, then go on (default 180)')
     ap.add_argument('--phone-id', help="with --serial: the phone's ID (ro.serialno, or aid-<Android ID>), to find it by when its serial changes (a new Wi-Fi port)")
     ap.add_argument('--update-shaders', action='store_true', help='pull the shaders a game compiled at run time on the phone, translate the new ones and copy them (no app build)')
-    ap.add_argument('--apk-only', action='store_true', help='pack the app with every game host built on this computer and install it')
+    ap.add_argument('--apk-only', action='store_true', help='build every game host on this computer again from this checkout (no game files needed), pack the app with them '
+                    'and install it: the games on the phone get the runtime of this DroidPlay')
+    ap.add_argument('--keep-hosts', action='store_true', help='pack the game hosts on this computer as they were built, without building them again from this checkout first')
     ap.add_argument('--migrate', action='store_true', help="move a one-game install's files/game to files/games/<--title> on the phone")
     ap.add_argument('--title', help='the title ID for --migrate, --import-save and --restore-backup')
     ap.add_argument('--title-id', default=os.environ.get('TITLE_ID', ''), help='the game to pack when the folder holds several (a cartridge with more than one game): '
@@ -1683,8 +1860,8 @@ def main(argv):
             with phone(serial, f'build_android_from_nsp.py: moving {a.title.upper()} to the launcher'):
                 if not migrate_legacy(serial, a.title.upper()): say(f'nothing to move: no game in {REMOTE}/game')
             bi.PROG.end(); return
-        bi.PROG.plan(2); env = dict(os.environ)
-        bi.PROG.stage('APK'); apk = make_apk(sdk_dir(a.sdk), logs, env); bi.PROG.end(str(apk))
+        bi.PROG.plan(3 - a.keep_hosts); env = dict(os.environ)
+        apk = app_with_hosts(sdk_dir(a.sdk), logs, env, a.keep_hosts, strict=True)
         bi.PROG.stage('install')
         with phone(serial, 'build_android_from_nsp.py: installing the app'): install(serial, apk, logs)
         bi.PROG.end(serial)
@@ -1760,7 +1937,7 @@ def main(argv):
         if not spv.is_dir(): spv = None
         new = pull_captures(serial, g.id, capture_dir, logs) if prov else 0
         if a.update_shaders and not prov: say('a registered profile: its shader tables name the captures they were made from, nothing is pulled')
-        bi.PROG.plan((0 if a.update_shaders else 3) + 2 * bool(new) + bool(a.update_shaders))
+        bi.PROG.plan((0 if a.update_shaders else 3 + (not a.keep_hosts)) + 2 * bool(new) + bool(a.update_shaders))
         if new:   # the split again with the new captures, and the new ones translated (the others are kept)
             aoc = work / 'aoc'; dlc_roms = sorted(p for p in aoc.iterdir() if p.is_dir() or p.suffix == '.img') if aoc.is_dir() else []
             if (game / 'oodle_cache/complete').is_file(): env['DM_OODLE_CACHE'] = str(game / 'oodle_cache')   # what the full build decoded on the phone (oodle_decode)
@@ -1776,7 +1953,7 @@ def main(argv):
         sv = [pkg_ver] if derived else g.words('shader_versions') or [pkg_ver]
         if not all(v in have for v in sv): say(f'[RED] the folder has no {", ".join(v for v in sv if v not in have)}, whose files the profile shader tables were made from: no shaders are translated'); sv = []
         picks = bi.pick_nsps(fam, have, sorted(set(sv) | {pkg_ver}, key=bi.vnum))
-        bi.PROG.plan(4 + (not kind) + 2 * bool(sv) + len(set(sv) - {pkg_ver}) + bool(fam['dlc']) + (not a.no_push))   # an extraction per other shader version, and the DLC's
+        bi.PROG.plan(4 + (not kind) + 2 * bool(sv) + len(set(sv) - {pkg_ver}) + bool(fam['dlc']) + (not a.no_push) + (not a.keep_hosts and not a.game_apk))   # an extraction per other shader version, the DLC's, the other games' hosts
         nx = None
         if not kind: bi.PROG.stage('build nx_extract'); nx = build_nx_extract(work, logs, env); bi.PROG.end()   # a NUP or a dump folder is read without it
         def extract(v):   # one version into extract/<v>, as build_ipa_from_nsp.py's main does: a NUP's packages, a dump's folders, or the NSPs through nx_extract
@@ -1831,7 +2008,7 @@ def main(argv):
         spv, g = build_shaders(sv, sdirs, work, logs, env, g, dlc_roms, derive_shader_tables, derived, (lambda: mac_oodle) if mac_oodle else None)
         bi.PROG.stage('Android host'); so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
         if not a.game_apk: library_add(g.id, so, loader, st, {'title_id': g.id, 'name': nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
-                                            'display': nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
+                                            'display': nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)}, g)
         bi.PROG.end(str(so))
         font = button_font(work, logs, env)
     have_l = nacp.languages(game / 'control.nacp')
@@ -1850,7 +2027,7 @@ def main(argv):
         elif inside: say(f'done: {made[0]}, the game with its data inside. Install it on any Android device (arm64, Vulkan)')
         else: say(f'done: {made[0]} and {made[1].name}. Install the APK, put {made[1].name} anywhere on the device or its SD card, and pick it when the app first opens')
         return
-    bi.PROG.stage('APK'); apk = make_apk(sdk, logs, env); bi.PROG.end(str(apk))
+    apk = app_with_hosts(sdk, logs, env, a.keep_hosts)   # this game's host is built from this checkout already: the others' that aren't
     if a.no_push:
         say(f'done: {data_dir() / "nxnative.apk"}. On the phone: install it, then copy {patched} to {REMOTE}/games/{g.id}/code and {bi.rfs.source(game)} to {REMOTE}/games/{g.id}/'); return
     bi.PROG.stage('install and copy to the phone')
