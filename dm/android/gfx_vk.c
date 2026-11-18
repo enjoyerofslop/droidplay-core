@@ -1266,8 +1266,12 @@ static void *chunk_thread(void *arg) {
 typedef struct { const uint8_t *lo, *hi; uint8_t how; int flags; } pool_rng;   // how: the GPU addresses the game took in it (mtl_pool_addressed): bit 0 a buffer's (the whole pool), bit 1 a texture's; flags: NVN's
 static pool_rng *g_pools; static int g_npool, g_cappool; static pthread_mutex_t g_pool_mu = PTHREAD_MUTEX_INITIALIZER;
 static _Atomic uint64_t g_pool_gen = 1;
-enum { PC_RECENT = 8 };
-static __thread struct { uint64_t gen; unsigned next; pool_rng r[PC_RECENT]; } t_pc;   // an empty entry has hi NULL
+// Besides the last PC_RECENT pools, each thread keeps PC_SLOTS pools found, by the 64 KiB granule of the address looked up: Ocarina of Time's draws read uniform buffers in
+// hundreds of small pools a frame (about 4,000 pools in Kokiri Forest), and with the recent list alone about 5,100 of its 19,000 lookups a frame took the lock and the search
+// (mtl_addr and pool_find were 5.7% of its replay thread on a Galaxy Z Fold 8)
+enum { PC_RECENT = 8, PC_SLOTS = 512 };
+static __thread struct { uint64_t gen; unsigned next; pool_rng r[PC_RECENT]; uint64_t sgen[PC_SLOTS]; pool_rng s[PC_SLOTS]; } t_pc;   // an empty entry has hi NULL; s[i] is valid while sgen[i] == gen
+static unsigned pc_slot(const uint8_t *a) { return (unsigned)((((uint64_t)(uintptr_t)a >> 16) * 0x9E3779B97F4A7C15ull) >> 55); }   // (PC_SLOTS = 1 << 9)
 static void gm_place(const void *mem, uint64_t size, int live), gm_unplace(const void *mem);   // raw global memory (gfx_vk_gmem.inc): the pool's pages as placed Vulkan memory, with DM_VK_RAW_GMEM=1
 // The pool's NVN flags, which hle_nvn.c gives just before mtl_pool_add on the same thread (a weak hook there): raw global memory leaves shader-code pools unplaced (gfx_vk_gmem.inc)
 static __thread const void *t_pf_mem; static __thread int t_pf_flags;
@@ -1302,16 +1306,18 @@ static int pool_find(const uint8_t *a, uint64_t len) {   // under g_pool_mu: the
     return -1;
 }
 int mtl_addr(uint64_t addr, uint64_t len, void **buf, uint64_t *off) {
-    const uint8_t *a = (const uint8_t *)(uintptr_t)addr; pool_rng p = {NULL, NULL};
-    if (t_pc.gen == atomic_load_explicit(&g_pool_gen, memory_order_acquire))
-        for (unsigned k = 0; k < PC_RECENT; k++) if (a >= t_pc.r[k].lo && a + len <= t_pc.r[k].hi) { p = t_pc.r[k]; break; }
+    const uint8_t *a = (const uint8_t *)(uintptr_t)addr; pool_rng p = {NULL, NULL}; unsigned sl = pc_slot(a);
+    if (t_pc.gen == atomic_load_explicit(&g_pool_gen, memory_order_acquire)) {
+        if (t_pc.sgen[sl] == t_pc.gen && a >= t_pc.s[sl].lo && a + len <= t_pc.s[sl].hi) p = t_pc.s[sl];
+        else for (unsigned k = 0; k < PC_RECENT; k++) if (a >= t_pc.r[k].lo && a + len <= t_pc.r[k].hi) { p = t_pc.r[k]; t_pc.s[sl] = p; t_pc.sgen[sl] = t_pc.gen; break; }
+    }
     if (!p.hi) {
         pthread_mutex_lock(&g_pool_mu);
         int i = pool_find(a, len);
         if (i >= 0) {
             p = g_pools[i]; uint64_t gen = atomic_load_explicit(&g_pool_gen, memory_order_relaxed);
-            if (t_pc.gen != gen) { memset(t_pc.r, 0, sizeof t_pc.r); t_pc.gen = gen; }
-            t_pc.r[t_pc.next++ % PC_RECENT] = p;
+            if (t_pc.gen != gen) { memset(t_pc.r, 0, sizeof t_pc.r); t_pc.gen = gen; }   // (the slots go stale with the old generation)
+            t_pc.r[t_pc.next++ % PC_RECENT] = p; t_pc.s[sl] = p; t_pc.sgen[sl] = gen;
         }
         pthread_mutex_unlock(&g_pool_mu);
         if (!p.hi) return 0;
