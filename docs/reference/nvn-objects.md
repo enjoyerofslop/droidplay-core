@@ -258,7 +258,14 @@ A game may tell NVN objects apart by their bytes, without an NVN call. A host re
   retired since (`g_rgen`, bumped by `nvn_dirty_add_range` and `nvn_dirty_remove_range`): a write to the same pages releases those ranges' pages without a scan. A range
   registered after a set was remembered has no protected page yet, so the remembered set is still the right one to release; a span more than `PW_MAX` ranges cover is not
   remembered. 14.8 → 2.5 µs a report on the Fold, the chunk's retirement 434 → 123 µs, the replay's wait for a free chunk 17 → 8 ms a frame.
-- **Check:** `t_dirty_slots`, `t_dirty_race`, `t_dirty_retire_race` (`dm/gfx/tests`).
+- **Fix (2026-11-18):** a write the remembered sets miss still walked every range: about 2.1 million of 8.9 million `prep_write` calls in a Kokiri Forest run on the Fold (the
+  counter reports and write-backs move across many pages and pools), so the walk was still about 8 ms of the completion thread's 10–11 ms a frame. Such a write now looks its
+  ranges up in an index of the live ranges sorted by base, with the largest end so far at each entry (`range_index.h`): a binary search finds the first range that can reach the
+  write, even where ranges overlap or nest, and the walk stops at the first base past it. Each thread keeps its own, made again when `g_rgen` has moved (about 1,750 times
+  over a 4-minute run); the fault handler still walks, since it can't allocate. Turned on and off every 150 presents in one process (22 adjacent pairs): the completion thread
+  10.7 → 2.3 ms of CPU a frame (−8.3 ± 0.3 ms), the process −4.5 ± 2.5 ms.
+- **Check:** `t_dirty_slots`, `t_dirty_race`, `t_dirty_retire_race` (`dm/gfx/tests`); `test_range_index` (`dm/tools/tests`: the index's walk against the full walk, 4,300 random
+  ranges with overlaps and nesting).
 - **Found on:** [The Legend of Zelda: Ocarina of Time](../../dm/games/0400486024DEC000/README.md) on a Galaxy Z Fold 8 (DroidPlay Core; the raw global memory entry in
   [rendering.md](rendering.md) had noted the walk and prepared its own write-backs once per chunk).
 
