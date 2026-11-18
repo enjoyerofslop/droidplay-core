@@ -35,6 +35,7 @@
 #include "spv_gmcache.h"   // raw global memory helpers keep their last entry's range and delta in private words (gfx_vk_draw.inc spv_fit_gmcache)
 #include "spv_nophys.h"   // with raw global memory off, loads and stores through physical pointers taken out (gfx_vk_draw.inc spv_fit_nophys)
 #include "pk_guard.h"   // the start-up list's marker and skip list (gfx_vk_draw.inc pk_guard)
+#include "layer_scratch.h"   // which passes draw into one-layer scratch images (gfx_vk_layerscratch.inc)
 #include "spv_pool.h"
 #include "spv_harr.h"   // descriptor arrays longer than stage_set writes shortened to it (gfx_vk_draw.inc spv_fit_harr)
 #include "spv_wide.h"
@@ -2920,6 +2921,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
         (unsigned long long)g_cs_free, (unsigned long long)g_cs_gbarred, (unsigned long long)g_cs_first, (unsigned long long)g_cs_closed, cs_game() ? "ordered by the game's barriers, DM_VK_CS_BARRIER" : "DM_VK_CS_BARRIER=full");
     if (slot0_fill_on()) LOG("[vk] render passes given a scratch target in their empty colour slot 0: %llu, made with no colour slot as every one was empty: %llu (cumulative; gfx_vk_draw.inc slot0_fill_on)", (unsigned long long)g_slot0_fills, (unsigned long long)g_slot0_none);
     if (layer_pad_on()) LOG("[vk] layered render passes padded past 1 MB of texels with scratch colour slots: %llu (cumulative; gfx_vk_layerpad.inc layer_pad_on)", (unsigned long long)g_layer_pads);
+    if (layer_scratch_on()) LOG("[vk] render passes whose colour targets are layers of one image, drawn into one-layer scratch images: %llu (cumulative; gfx_vk_layerscratch.inc layer_scratch_on)", (unsigned long long)g_layer_scratch);
     if (dup_slots_on()) LOG("[vk] render passes attaching an image once that two colour slots name: %llu, draws whose write to the slot left unused was lost: %llu (cumulative; gfx_vk_draw.inc dup_slots)", (unsigned long long)g_dup_passes, (unsigned long long)g_dup_lost);
     if (stg_stat()) { static unsigned long long f0; static uint64_t a0, r0, s0; uint64_t a = atomic_load(&g_stg_allocs), r = atomic_load(&g_stg_frees), sl = g_sp_slices; double nf = frame > f0 ? (double)(frame - f0) : 1;
       pthread_mutex_lock(&g_sp_mu); int nb = g_sp_nblk, fr = g_sp_nfree; pthread_mutex_unlock(&g_sp_mu);

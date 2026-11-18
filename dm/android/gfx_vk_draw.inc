@@ -1259,8 +1259,9 @@ make:
 static nvn_hmap g_fbs;
 static void bcrt_drop(VkImage base);   // below, with the render passes
 static void lsnap_drop_img(VkImage img);   // below, with the render passes
+static void lsc_drop_img(VkImage img); static void lsc_copy(int back);   // gfx_vk_layerscratch.inc
 static void views_drop(VkImage img) {
-    bcrt_drop(img); lsnap_drop_img(img);
+    bcrt_drop(img); lsnap_drop_img(img); lsc_drop_img(img);
     for (uint32_t i = 0; i < g_views.cap; i++) {
         if (!g_views.vals[i]) continue;
         view_key *k = (view_key *)(void *)(g_views.keys + (size_t)i * g_views.klen);
@@ -1592,7 +1593,7 @@ static void lin_writeback(int i) {   // attachment i of the pass that ends
 }
 static void rp_end(void) {
     if (!P.active) return;
-    occl_end(); vkCmdEndRenderPass(C->cb); prof_pass_end(); P.active = 0; if (dump_on()) dump_pass_end();   // the profile's end timestamp after the pass: on a tiler the tiles' stores are part of it (a timestamp inside a pass is written per tile, and only the last tile's draws came before it)
+    occl_end(); vkCmdEndRenderPass(C->cb); prof_pass_end(); P.active = 0; lsc_copy(1); if (dump_on()) dump_pass_end();   // the profile's end timestamp after the pass: on a tiler the tiles' stores are part of it (a timestamp inside a pass is written per tile, and only the last tile's draws came before it)
     for (int i = 0; i < 8; i++) if (g_bcrt_pend[i].sh) {
         if (g_bcrt_pend[i].base->conv) bcd_decode(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly);   // decoded on the GPU into the image the game samples
         else bcrt_copy(g_bcrt_pend[i].base, g_bcrt_pend[i].sh, g_bcrt_pend[i].lv, g_bcrt_pend[i].ly, 1);
@@ -1650,6 +1651,7 @@ static vtex *slot0_scratch(uint32_t w, uint32_t h) {
     return sv[n++] = v;
 }
 #include "gfx_vk_layerpad.inc"   // small layered passes padded past the tile memory (layer_pad_on)
+#include "gfx_vk_layerscratch.inc"   // colour targets in layers of one image drawn into scratch images (layer_scratch_on)
 // One image in two colour slots of a pass: Breath of the Wild's 1280x720 G-buffer passes bind one target at slots 1 and 2 and another at 3 and 4, and write only the
 // first of each (channel mask 0xf0f0ff). Vulkan leaves attachments that alias in one subpass undefined: the OnePlus Pad 3's Adreno 830 stored the unwritten copy over
 // the written one, and the Shrine of Resurrection was drawn dark (Link unlit) and blurred (dm/android/baselines.md problem 15), where the Odin 2's Adreno 740 drew it
@@ -1692,7 +1694,7 @@ static int rp_prepare_(int layered) {
     if (P.active) rp_end();   // a draw that writes the layer, in a pass of one layer: the pass again, layered
     lsnap_drop_all();   // an earlier rp_prepare's that no pass used
     if (!R.has_rt) { RED_ONCE(83, "draw with no render target set"); return 0; }
-    memset(P.cv, 0, sizeof P.cv); P.dv = NULL; memset(g_bcrt_pend, 0, sizeof g_bcrt_pend); g_dup_mask = 0;
+    memset(P.cv, 0, sizeof P.cv); P.dv = NULL; memset(g_bcrt_pend, 0, sizeof g_bcrt_pend); memset(g_lsc_pend, 0, sizeof g_lsc_pend); g_dup_mask = 0;
     rp_key k; memset(&k, 0, sizeof k); VkImageView views[9]; memset(views, 0, sizeof views); uint32_t nv = 0, w = UINT32_MAX, h = UINT32_MAX, layers = UINT32_MAX; k.samples = 1;
     VkImageView cvw[8] = {0}, dvw = VK_NULL_HANDLE;   // by slot, then the depth view: views[] in attachment order once slot 0 may be filled (slot0_fill_on)
     k.ncolor = (uint32_t)(R.rt.n > 8 ? 8 : R.rt.n);
@@ -1737,6 +1739,7 @@ static int rp_prepare_(int layered) {
     if (!nv || w == UINT32_MAX) { RED_ONCE(84, "render targets without an image"); lsnap_drop_all(); return 0; }
     if (layers == UINT32_MAX) layers = 1;   // only BC shadows: one layer
     if (k.ncolor > 1 && dup_slots_on()) dup_slots(&k, cvw);   // before slot 0 is filled: a copy left unused there leaves slot 0 empty
+    lsc_pend_t lsc[8]; memset(lsc, 0, sizeof lsc); layer_scratch(&k, cvw, layers, lsc);   // after dup_slots: one layer in two slots is one slot
     if (k.ncolor && slot0_fill_on()) {   // no colour slot holds a target: the pass gets none, so it has no empty slot 0 (slot0_fill_on)
         uint32_t i = 0; while (i < k.ncolor && !cvw[i]) i++;
         if (i == k.ncolor) { k.ncolor = 0; g_slot0_none++; }
@@ -1760,6 +1763,7 @@ static int rp_prepare_(int layered) {
         nvn_hm_put(&g_fbs, &fk, fb);
     }
     P.rp = rp; P.key = k; P.w = w; P.h = h; P.layers = layers; P.fb = fb; P.layered = layered; if (layers > 1) g_layered_passes++;
+    memcpy(g_lsc_pend, lsc, sizeof lsc); for (int i = 0; i < 8; i++) if (lsc[i].sc) { g_layer_scratch++; break; }
     return 1;
 }
 static int rp_prepare(void) { return rp_prepare_(0); }
@@ -1767,6 +1771,7 @@ static void copied_depth_pass(VkCommandBuffer c);   // gfx_vk_dscopy.inc
 static int rp_start(void) {
     if (P.active) return 1;
     VkCommandBuffer c = cb(); if (!c) return 0;
+    lsc_copy(0);   // the layers into their scratch images, each time the pass begins (gfx_vk_layerscratch.inc)
     VkRenderPassBeginInfo bi = {.sType = VK_STRUCTURE_TYPE_RENDER_PASS_BEGIN_INFO, .renderPass = P.rp, .framebuffer = P.fb, .renderArea = {{0, 0}, {P.w, P.h}}};
     if (prof_on()) prof_pass_begin();
     vkCmdBeginRenderPass(c, &bi, VK_SUBPASS_CONTENTS_INLINE); bf_reset(); crumb('p', NULL, NULL, P.w, P.h);
