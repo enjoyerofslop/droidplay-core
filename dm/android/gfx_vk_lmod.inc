@@ -12,7 +12,7 @@ static _Atomic uint64_t g_lm_ids, g_lm_hit, g_lm_miss;   // modules known by the
 static __thread int t_pool_info;   // what spv_pool did to the modules lm_code made since sh_get cleared it
 static __thread int t_harr_info;   // what spv_harr did to them (SPV_HARR_SHRUNK, SPV_HARR_FAIL), the same way
 // The module's code as it is made (to free): the file, a vertex or fragment shader's attribute arrays split (spv_inarr); a fragment shader variant's unwritten inputs made constants (spv_drop_inputs), else the vertex pipeline's
-// storage made read-only where the GPU needs it (spv_readonly); then physical pointers through the pools' array where the driver refuses them (gm_np_code), the pool set (spv_pool_fit), arrays longer than stage_set writes (spv_fit_harr), the subgroup rewrites (spv_fit) and, last, the set's binding numbers compacted (spv_bind.h). first: the module's first
+// storage made read-only where the GPU needs it (spv_readonly); then physical pointers through the pools' array where the driver refuses them (gm_np_code), the pool set (spv_pool_fit), arrays longer than stage_set writes (spv_fit_harr), a kernel's warp as its workgroup (spv_fit_wg32), the subgroup rewrites (spv_fit) and, last, the set's binding numbers compacted (spv_bind.h). first: the module's first
 // making, which tells *b0, logs and dumps (made again for a pipeline, it says nothing new)
 static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, int tff, uint64_t e5, const lm_bl *bl, const spv_bmap *bm, int first, int *b0, size_t *onw) {
     size_t n = 0; uint32_t *code = spv_read(path, &n); if (!code) return NULL;
@@ -70,8 +70,10 @@ static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, int tff, ui
     uint32_t *vi = NULL; size_t vn = spv_fit_vsinit(code, n, path, &vi); if (vn) { free(code); code = vi; n = vn; }   // vertex outputs start as (0,0,0,1)
     uint32_t *pf = NULL; size_t pn = spv_pool_fit(code, n, path, &pf); if (pn) { free(code); code = pf; n = pn; }   // the texture pool by ID moved into the pool set
     uint32_t *ha = NULL; size_t hn = spv_fit_harr(code, n, path, &ha); if (hn) { free(code); code = ha; n = hn; }   // arrays past what stage_set writes shortened to it
+    uint32_t *wg = NULL; size_t wgn = spv_fit_wg32(code, n, path, &wg); if (wgn) { free(code); code = wg; n = wgn; }   // a task / mesh kernel's warp as its workgroup (spv_wg32.h)
     uint32_t *fit = NULL; size_t fn = spv_fit(code, n, path, &fit); if (fn) { free(code); code = fit; n = fn; }
     uint32_t *fs = NULL; size_t fsn = spv_fit_fsum(code, n, path, &fs); if (fsn) { free(code); code = fs; n = fsn; }   // after the subgroup rewrites: float atomic adds summed across the subgroup (spv_fsum.h)
+    t_wg32 = 0;
     uint32_t *ly = NULL; size_t ln = spv_fit_layer(code, n, path, &ly); if (ln) { free(code); code = ly; n = ln; }
     uint32_t *lb = NULL; size_t lbn = tff == 1 || tff == 2 || tff == 4 || alpha ? 0 : spv_fit_lbase(code, n, path, &lb); if (lbn) { free(code); code = lb; n = lbn; }   // the layer less or plus a base (not in the capture's wrapper, nor beside the alpha test's push constant)
     uint32_t *ts = NULL; size_t tn = spv_fit_tgs(code, n, path, &ts); if (tn) { free(code); code = ts; n = tn; }   // shared memory past the GPU's limit (spv_tgspill)

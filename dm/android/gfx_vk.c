@@ -45,6 +45,7 @@
 #include "ds_texels.h"   // depth / stencil readbacks rebuilt in NVN's layouts (mtl_read_texels, copy_t2b)
 #include "rb16.h"   // NVN's RGB-order 16-bit formats held in Vulkan's order, converted where they cross guest memory (vt_create's rbx)
 #include "spv_narrow.h"   // each subgroup of a GPU narrower than 32 lanes a warp of its own (gfx_vk_draw.inc spv_fit_narrow)
+#include "spv_wg32.h"   // a task / mesh kernel's warp as its whole workgroup on such a GPU (gfx_vk_draw.inc spv_fit_wg32)
 #include "spv_xor.h"   // Maxwell's butterfly shuffle as ShuffleXor, on the drivers whose Shuffle by the lane ^ a mask is wrong (gfx_vk_draw.inc spv_fit_xor)
 #include "spv_tgspill.h"   // compute shared memory past the GPU's limit from a storage buffer (gfx_vk_draw.inc spv_fit_tgs)
 #include "spv_noptr.h"   // raw global memory through a descriptor array, for drivers that refuse OpConvertUToPtr (gfx_vk_gmem_noptr.inc)
