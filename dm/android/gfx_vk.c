@@ -408,6 +408,7 @@ typedef struct chunk {
     gm_logref *gml; int ngml, cgml, gm_st, ip_wr;   // its raw store write logs; gm_st: a shader with raw stores ran in it (gfx_vk_gmem.inc); ip_wr: one wrote a storage buffer in place
     struct { const char *a, *b; uint32_t n, m; char kind; } cr[CR_MAX]; int ncr;   // what it recorded, the last CR_MAX of ncr (crumb): named when the GPU hangs or is lost in it (gpu_slow)
     wb_filter wf;   // what its write-backs and queued copies cover, made when it is submitted (wbf_build); not read while it is the chunk being recorded (wbf_skip)
+    uint8_t *ubk; size_t nubk, cubk;   // DM_VK_UB_INPLACE_CHECK: the uniform buffers it bound in place with their bytes at the bind (gfx_vk_gmem_inplace.inc ubk_note)
 } chunk;
 // Chunks in use (g_nchunk of NCHUNK_MAX): the one being recorded and those submitted, until the completion thread is done with them. With none free, cur() waits for the
 // oldest (the wait is in the GPU busy line: g_chunk_wait_ns). A submission is cut every 48-64 draws (EARLY_DRAWS, MID_DRAWS), so a game sends many a frame, and with four
@@ -947,8 +948,20 @@ static int wr_pending(uintptr_t lo, uintptr_t hi) {
 }
 static uint64_t g_mem_cur, g_mem_fly, g_mem_free;   // the same for the submission's own CPU writes and small copies (uniform buffer updates, buffer copies and fills)
 static void gm_ip_write(uintptr_t lo, uintptr_t hi);   // gfx_vk_gmem_inplace.inc: a chunk still to run that reads those pages in place runs first
+// Pages the replay itself wrote lately (uniform buffer updates, small copies and fills: mem_view), by page, with the present it was at: a uniform buffer on one is not bound
+// in place (gfx_vk_gmem_inplace.inc ub_inplace), since such a write after a draw that read it in place has to wait for that draw's chunk (gm_ip_write)
+enum { MVW_N = 1024, MVW_KEEP = 600 };
+static struct { uint64_t pg, at; } g_mvw[MVW_N];
+static _Atomic uint64_t g_presents;
+static unsigned mvw_slot(uint64_t pg) { return (unsigned)((pg * 0x9E3779B97F4A7C15ull) >> 54); }   // (MVW_N = 1 << 10)
+static void mvw_note(uint64_t a, uint64_t n) { uint64_t now = atomic_load(&g_presents); for (uint64_t p = a >> 12, e = (a + n - 1) >> 12, k = 0; p <= e && k < 64; p++, k++) { unsigned s = mvw_slot(p); g_mvw[s].pg = p; g_mvw[s].at = now + 1; } }
+static int mvw_hit(uint64_t a, uint64_t n) {
+    uint64_t now = atomic_load(&g_presents);
+    for (uint64_t p = a >> 12, e = (a + n - 1) >> 12; p <= e; p++) { unsigned s = mvw_slot(p); if (g_mvw[s].pg == p && g_mvw[s].at && now + 1 - g_mvw[s].at < MVW_KEEP) return 1; }
+    return 0;
+}
 static void mem_view(uint64_t rd, uint64_t rn, uint64_t wr, uint64_t wn) {
-    if (wn) gm_ip_write((uintptr_t)wr, (uintptr_t)(wr + wn));
+    if (wn) { gm_ip_write((uintptr_t)wr, (uintptr_t)(wr + wn)); mvw_note(wr, wn); }
     if (vk_safe()) { cpu_view(); return; }
     uint64_t c = g_view_cur, f = g_view_fly, e = g_view_free;
     rd_rng r[1] = {{(uintptr_t)rd, (uintptr_t)(rd + rn)}}, w[1] = {{(uintptr_t)wr, (uintptr_t)(wr + wn)}};
@@ -1191,7 +1204,9 @@ static void gm_ip_done(const chunk *c, int i);   // gfx_vk_gmem_inplace.inc
 static void gm_chunk_done(chunk *c);   // gfx_vk_gmem.inc
 typedef struct spare_mem spare_mem; static void spare_put(spare_mem *s);   // gfx_vk_spare.inc: dead kind 7
 static void prof_collect(chunk *c);   // gfx_vk_draw.inc
+static void ub_inpl_verify(chunk *c);   // gfx_vk_gmem_inplace.inc (DM_VK_UB_INPLACE_CHECK)
 static void chunk_done(chunk *c) {
+    if (c->nubk) ub_inpl_verify(c);   // before any write of the chunk lands
     for (int i = 0; i < c->ncop; i++) {   // queued before any write-back of the chunk (a copy is queued only once the GPU's writes before it have landed)
         const cop_t *o = &c->cop[i]; dm_guest_write_prepare((void *)(uintptr_t)o->dst, o->n);
         if (!o->fill) memmove((void *)(uintptr_t)o->dst, (const void *)(uintptr_t)o->src, o->n);

@@ -55,6 +55,45 @@ static int gm_inplace_al(uint64_t addr, size_t n, VkDeviceSize al, VkBuffer *b, 
 // DM_VK_INPLACE_WRITE=0 (env.txt): written ones copied and written back as before
 static int ip_w_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_INPLACE_WRITE"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_INPLACE_WRITE=0: written storage buffers are copied and written back as before"); } return v; }
 static uint64_t g_ip_wbinds, g_ip_wbytes;
+// DM_VK_UB_INPLACE=1 (env.txt; off by default): a game uniform buffer in a placed pool is bound there, as a read-only storage buffer is: no copy into the arena, no shadow and no
+// compare (ucopy). Ocarina of Time binds about 13,600 game uniform buffers a frame in Kokiri Forest, about 4,500 of them copied (2.7 MB a frame into the arena and as much into
+// the shadows) and the rest compared with their chunk's copy; in place, its replay thread took 1.8 ms less CPU a frame on a Galaxy Z Fold 8. The replay's own writes are ordered
+// as for storage buffers (gm_ip_write: one to a page read in place waits for that chunk, so a buffer on a page the replay wrote lately, mvw_hit, is copied rather than made to
+// wait). The game's are not: the GPU reads the buffer when the chunk runs, and this game, ahead of the replay, rewrites some uniform buffers before then (DM_VK_UB_INPLACE_CHECK:
+// its pair of 12,720-byte buffers and 144-byte ones), so a draw would read a later frame's values where the copy keeps those of the replay's bind. Hence off
+static int ub_inpl_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_UB_INPLACE"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_UB_INPLACE=1: uniform buffers in placed pools are bound in place"); } return v; }
+static int mvw_hit(uint64_t a, uint64_t n);   // gfx_vk.c
+static uint64_t g_ub_inpl, g_ub_inpl_mvw;   // uniform buffers bound in place; not, on a page the replay wrote lately
+// DM_VK_UB_INPLACE_CHECK=1 (env.txt; a diagnostic, slow): each uniform buffer bound in place keeps its bytes at the bind (once a chunk per address and size), and the chunk compares
+// them with guest memory when it completes, before its own writes land. One that changed was written while the chunk's draws could still read it, where a copy made at the bind
+// would have kept the bytes it had then: counted, the first 8 logged
+static int ub_inpl_check(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_UB_INPLACE_CHECK"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_UB_INPLACE_CHECK=1: uniform buffers bound in place are compared with their bytes at the bind when their chunk completes"); } return v; }
+static _Atomic uint64_t g_ubk_n, g_ubk_diff, g_ubk_gone;   // compared; changed; in no pool by then (not compared)
+static void ubk_note(uint64_t addr, size_t n) {
+    static struct { uint64_t a, n, seq; } memo[1024]; unsigned h = (unsigned)((addr >> 4) ^ (addr >> 16) ^ n) & 1023;
+    if (memo[h].a == addr && memo[h].n == n && memo[h].seq == C->seq) return;
+    size_t need = C->nubk + 16 + ((n + 7) & ~(size_t)7);
+    if (need > C->cubk) { size_t c = need * 2 > 65536 ? need * 2 : 65536; uint8_t *p = realloc(C->ubk, c); if (!p) return; C->ubk = p; C->cubk = c; }
+    uint8_t *d = C->ubk + C->nubk; uint64_t nn = n; memcpy(d, &addr, 8); memcpy(d + 8, &nn, 8); memcpy(d + 16, (const void *)(uintptr_t)addr, n); C->nubk = need;
+    memo[h].a = addr; memo[h].n = n; memo[h].seq = C->seq;
+}
+static void ub_inpl_verify(chunk *c) {   // the completion thread, first in chunk_done
+    for (size_t k = 0; k + 16 <= c->nubk;) { uint64_t a, n; memcpy(&a, c->ubk + k, 8); memcpy(&n, c->ubk + k + 8, 8);
+        if (!mtl_addr(a, n, NULL, NULL)) atomic_fetch_add(&g_ubk_gone, 1);
+        else if (atomic_fetch_add(&g_ubk_n, 1), memcmp((const void *)(uintptr_t)a, c->ubk + k + 16, n)) { uint64_t d = atomic_fetch_add(&g_ubk_diff, 1);
+            if (d < 8) LOG("[RED] [vk] DM_VK_UB_INPLACE_CHECK: the uniform buffer at %#llx (%llu bytes) bound in place in chunk %llu changed before the chunk completed", (unsigned long long)a, (unsigned long long)n, (unsigned long long)c->seq); }
+        k += 16 + ((n + 7) & ~7ull); }
+    c->nubk = 0;
+}
+static int ub_inplace(uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *off, size_t *range) {
+    if (!ub_inpl_on() || !n || n > g_vk.props.limits.maxUniformBufferRange) return 0;
+    if (mvw_hit(addr, n)) { g_ub_inpl_mvw++; return 0; }
+    VkDeviceSize r; if (!gm_inplace_al(addr, n, g_vk.props.limits.minUniformBufferOffsetAlignment, b, off, &r)) return 0;
+    g_ip_binds--; g_ip_bytes -= n; g_ub_inpl++;   // (counted here, not as a storage buffer)
+    if (ub_inpl_check()) ubk_note(addr, n);
+    *range = r > g_vk.props.limits.maxUniformBufferRange ? n : (size_t)r;
+    return 1;
+}
 static int gm_inplace(uint64_t addr, size_t n, VkBuffer *b, VkDeviceSize *off, VkDeviceSize *range) {
     return gm_inplace_al(addr, n, g_vk.props.limits.minStorageBufferOffsetAlignment, b, off, range);
 }
@@ -129,11 +168,12 @@ static void gm_ip_write(uintptr_t lo, uintptr_t hi) {
     else { g_ip_wfly++; seq_wait(need); }
 }
 static void gm_ip_stat(void) {
-    if (!g_ip_binds && !g_ip_wbinds && !g_ip_span && !g_ip_unal && !g_gm_wsyncs && !g_fill_gpu && !g_fill_arena) return;
+    if (!g_ip_binds && !g_ip_wbinds && !g_ip_span && !g_ip_unal && !g_gm_wsyncs && !g_fill_gpu && !g_fill_arena && !g_ub_inpl) return;
     LOG("[vk] storage buffers bound in their placed pools: %llu read-only bindings (%llu MB read in place), %llu written ones (%llu MB), not in place %llu crossing two pieces, %llu at an offset not a multiple of %llu; "
         "the replay's CPU writes over pages read in place: %llu waited for the chunk being recorded, %llu for one in flight, %llu after it had run, %llu over none; written ranges prepared %llu, "
-        "again in their chunk (skipped) %llu; writes over placed pages after a table binding (DM_VK_RAW_GMEM_WSYNC) %llu; small fills made on the GPU after pending writes: in place %llu, in a write-back's arena copy %llu (DM_VK_FILL_GPU) (cumulative; gfx_vk_gmem_inplace.inc)",
+        "again in their chunk (skipped) %llu; writes over placed pages after a table binding (DM_VK_RAW_GMEM_WSYNC) %llu; small fills made on the GPU after pending writes: in place %llu, in a write-back's arena copy %llu (DM_VK_FILL_GPU); uniform buffers bound in place %llu, copied as on a page the replay wrote lately %llu (DM_VK_UB_INPLACE); DM_VK_UB_INPLACE_CHECK: %llu compared at their chunk's end, %llu changed, %llu in no pool by then (cumulative; gfx_vk_gmem_inplace.inc)",
         (unsigned long long)g_ip_binds, (unsigned long long)(g_ip_bytes >> 20), (unsigned long long)g_ip_wbinds, (unsigned long long)(g_ip_wbytes >> 20), (unsigned long long)g_ip_span, (unsigned long long)g_ip_unal,
         (unsigned long long)g_vk.props.limits.minStorageBufferOffsetAlignment, (unsigned long long)g_ip_wcur, (unsigned long long)g_ip_wfly, (unsigned long long)g_ip_wfree, (unsigned long long)g_ip_wnone,
-        (unsigned long long)atomic_load(&g_ip_prep), (unsigned long long)atomic_load(&g_ip_prep_dup), (unsigned long long)g_gm_wsyncs, (unsigned long long)g_fill_gpu, (unsigned long long)g_fill_arena);
+        (unsigned long long)atomic_load(&g_ip_prep), (unsigned long long)atomic_load(&g_ip_prep_dup), (unsigned long long)g_gm_wsyncs, (unsigned long long)g_fill_gpu, (unsigned long long)g_fill_arena, (unsigned long long)g_ub_inpl, (unsigned long long)g_ub_inpl_mvw,
+        (unsigned long long)atomic_load(&g_ubk_n), (unsigned long long)atomic_load(&g_ubk_diff), (unsigned long long)atomic_load(&g_ubk_gone));
 }

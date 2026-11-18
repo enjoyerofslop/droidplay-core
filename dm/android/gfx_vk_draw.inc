@@ -3313,6 +3313,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             memset(d + n, 0, q - n); for (; q + 4 <= aa; q += 4) memcpy(d + q, &nan, 4);
             al = aa; g_ext_checked++;
         } else if (slot >= 3 && slot - 3 < 16 && src && src == (const void *)(uintptr_t)D.ubo[nst][slot - 3].addr && (ubf_get(s, i, n, &b, &off, &uf) ? uf : ub_fwd(D.ubo[nst][slot - 3].addr, n, &b, &off))) g_buf_fwd[0]++;   // a pending write read on the GPU (wb_promote, buf_fwd; draw_view's answer: ubf_get)
+        else if (slot >= 3 && slot - 3 < 16 && src && src == (const void *)(uintptr_t)D.ubo[nst][slot - 3].addr && ub_inplace(D.ubo[nst][slot - 3].addr, n, &b, &off, &al)) {}   // in its placed pool (gfx_vk_gmem_inplace.inc)
         else if ((g_uc_guest = slot == 1 || (slot >= 3 && slot - 3 < 16)), !ucopy(src, n, al, &b, &off)) return 0;
         if (slot == 0 && nst == 5) { g_c0_b = b; g_c0_off = off; }   // (vk_dispatch: an indirect dispatch's counts copied here on the GPU)
         int dy = s->cbdyn[i] != 0xff; if (dy) dyn[s->cbdyn[i]] = (uint32_t)off;   // a dynamic one's offset goes to the bind, its descriptor at 0
