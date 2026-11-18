@@ -20,7 +20,7 @@
 #include <sched.h>
 enum { RQ_SIZE = 8u << 20 };   // about 25,000 records a frame of 30 to 200 bytes: several frames' worth
 enum { R_BEGINQ = 1, R_BEGINRP, R_BINDDS, R_BINDIB, R_BINDP, R_BINDVB, R_BLIT, R_CLRATT, R_CLRCOL, R_CLRDS, R_CPB2I, R_CPI, R_CPI2B, R_DISPATCH, R_DRAW, R_DRAWIDX, R_ENDQ, R_ENDRP,
-       R_BARRIER, R_PUSH, R_RESETQ, R_RESOLVE, R_BLENDC, R_DBIAS, R_SCISSOR, R_SCMASK, R_SREF, R_SWMASK, R_VIEWPORT, R_TS, R_BEGINCB, R_ENDCB, R_SUBMIT, R_WRAP, R_CPB, R_UPDDS, R_DRAWMESH, R_DISPIND, R_DRAWIDXIND };
+       R_BARRIER, R_PUSH, R_RESETQ, R_RESOLVE, R_BLENDC, R_DBIAS, R_SCISSOR, R_SCMASK, R_SREF, R_SWMASK, R_VIEWPORT, R_TS, R_BEGINCB, R_ENDCB, R_SUBMIT, R_WRAP, R_CPB, R_UPDDS, R_DRAWMESH, R_DISPIND, R_DRAWIDXIND, R_FILLB };
 typedef struct { uint32_t fn, n; VkCommandBuffer cb; } rq_hdr;   // n: the record's bytes, header included, a multiple of 16
 static uint8_t *g_rq;
 static _Atomic uint64_t g_rq_w, g_rq_r;   // bytes written / made since the start (the ring offset is the count modulo RQ_SIZE)
@@ -158,6 +158,11 @@ typedef struct { uint32_t x, y, z; } a_dispatch;
 static void rec_vkCmdDispatch(VkCommandBuffer cb, uint32_t x, uint32_t y, uint32_t z) {
     if (!rec_on()) { vkCmdDispatch(cb, x, y, z); return; }
     uint8_t *r = rq_take(R_DISPATCH, cb, sizeof(rq_hdr) + sizeof(a_dispatch)); *(a_dispatch *)(void *)(r + sizeof(rq_hdr)) = (a_dispatch){x, y, z}; rq_push(r);
+}
+typedef struct { VkBuffer b; VkDeviceSize o, n; uint32_t v, pad; } a_fillb;   // a buffer fill on the GPU (gfx_vk_gmem_inplace.inc gm_fill_gpu)
+static void rec_vkCmdFillBuffer(VkCommandBuffer cb, VkBuffer b, VkDeviceSize o, VkDeviceSize n, uint32_t v) {
+    if (!rec_on()) { vkCmdFillBuffer(cb, b, o, n, v); return; }
+    uint8_t *r = rq_take(R_FILLB, cb, sizeof(rq_hdr) + sizeof(a_fillb)); *(a_fillb *)(void *)(r + sizeof(rq_hdr)) = (a_fillb){b, o, n, v, 0}; rq_push(r);
 }
 // The indirect forms (a task or mesh draw in compute form, gfx_vk_meshemu.inc): the GPU reads their arguments from the buffer when the command runs, so the record
 // is the buffer and the place in it. Made on the replay thread they went into the command buffer ahead of the binds queued for them, beside the recorder's own calls
@@ -330,6 +335,7 @@ static void rq_make(const uint8_t *rec) {   // one record's call
         case R_DRAW: { const a_draw *a = (const void *)s; vkCmdDraw(cb, a->vc, a->ic, a->fv, a->fi); break; }
         case R_DRAWIDX: { const a_drawidx *a = (const void *)s; vkCmdDrawIndexed(cb, a->xc, a->ic, a->fx, a->vo, a->fi); break; }
         case R_DRAWIDXIND: { const a_drawidxind *a = (const void *)s; vkCmdDrawIndexedIndirect(cb, a->b, a->o, a->n, a->stride); break; }
+        case R_FILLB: { const a_fillb *a = (const void *)s; vkCmdFillBuffer(cb, a->b, a->o, a->n, a->v); break; }
         case R_DRAWMESH: { const a_drawmesh *a = (const void *)s; g_draw_mesh(cb, a->x, a->y, a->z); break; }
         case R_ENDQ: { const a_endq *a = (const void *)s; vkCmdEndQuery(cb, a->p, a->q); break; }
         case R_ENDRP: vkCmdEndRenderPass(cb); break;
@@ -398,6 +404,7 @@ static void *rq_thread(void *arg) {
 #define vkCmdDraw rec_vkCmdDraw
 #define vkCmdDrawIndexed rec_vkCmdDrawIndexed
 #define vkCmdDrawIndexedIndirect rec_vkCmdDrawIndexedIndirect
+#define vkCmdFillBuffer rec_vkCmdFillBuffer
 #define vkCmdEndQuery rec_vkCmdEndQuery
 #define vkCmdEndRenderPass rec_vkCmdEndRenderPass
 #define vkCmdPipelineBarrier rec_vkCmdPipelineBarrier

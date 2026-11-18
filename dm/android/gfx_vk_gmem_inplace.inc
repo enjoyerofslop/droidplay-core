@@ -67,6 +67,35 @@ static int gm_inplace_w(uint64_t addr, size_t n, int cs, VkBuffer *b, VkDeviceSi
     C->ip_wr = 1; g_ip_wbinds++; g_ip_wbytes += n;
     return 1;
 }
+// A small buffer fill (nvnCommandBufferClearBuffer) over memory the GPU still writes in place (a storage buffer written in its placed pool, raw stores), recorded as a fill on
+// the GPU in that pool, after a full barrier, instead of a fill on the CPU: the CPU's had to wait until the chunk holding the write completed (mem_view: the chunk submitted and
+// waited for), which Ocarina of Time met once a frame in Kokiri Forest, about 10 ms of the replay thread's wall time a frame on a Galaxy Z Fold 8 with the GPU drained. Its
+// entry is an in-place write-back as gm_inplace_w makes (CPU reads of the range wait for the chunk, later dispatches read it in the pool, and its pages count as written when the
+// chunk completes). Only when every pending write over the range lands in place: one that lands from a copy afterwards (an arena write-back, a queued copy) would land over the
+// GPU's fill, so the CPU waits for it and fills, as before. DM_VK_FILL_GPU=0 (env.txt): every small fill on the CPU, as before
+static int fill_target(uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o);   // gfx_vk.c
+static int fill_gpu_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_FILL_GPU"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_FILL_GPU=0: small buffer fills are made on the CPU"); } return v; }
+static uint64_t g_fill_gpu, g_fill_arena;   // fills made on the GPU in place / in a write-back's arena copy
+static int gm_fill_gpu(uint64_t dst, uint64_t n, uint32_t value) {
+    if (!fill_gpu_on() || !n || ((dst | n) & 3) || vk_safe() || !cur()) return 0;
+    VkBuffer b; VkDeviceSize off, rng;
+    int k = fill_target((uintptr_t)dst, (uintptr_t)(dst + n), &b, &off);
+    if (!k) return 0;   // nothing pending over it (the CPU fill waits for nothing), or a write the fill can't follow on the GPU
+    if (k == 1) {   // in the write-back's arena copy, which lands it with the rest: the write-back already makes CPU reads of the range wait and later dispatches read the copy
+        if (off & 3) return 0;
+        VkCommandBuffer c = cb(); if (!c) return 0;   // (outside the pass; a run of dispatches closed)
+        cb_barrier(); vkCmdFillBuffer(c, b, off, n, value); cb_barrier();
+        g_fill_arena++; return 1; }
+    if (!gm_on()) return 0;
+    pthread_mutex_lock(&g_gm_mu); int placed = gm_seg_at((uintptr_t)dst) >= 0; pthread_mutex_unlock(&g_gm_mu);
+    if (!placed) return 0;   // (a chunk's raw stores reach only placed memory: none is placed for the fill)
+    if (!gm_inplace_al(dst, n, 4, &b, &off, &rng)) return 0;
+    VkCommandBuffer c = cb(); if (!c) return 0;
+    wb_t *w = wb_add(); if (!w) return 0;
+    *w = (wb_t){0, (size_t)off, n, 1, n, n, (uint8_t *)(uintptr_t)dst, NULL, 1}; w->ipb = b; w->inpl = 1; C->nfwd++; C->ip_wr = 1;
+    cb_barrier(); vkCmdFillBuffer(c, b, off, n, value); cb_barrier();
+    g_fill_gpu++; return 1;
+}
 // The completion thread, for chunk c's write-back i written in place: its pages prepared, once per range in the chunk. Preparing costs a walk of every tracked range
 // (nvn_dirty.c prep_write: thousands in Ocarina of Time, 98% of the completion thread on the Fold), and a buffer many draws write gets an entry for each
 static _Atomic uint64_t g_ip_prep, g_ip_prep_dup;
@@ -100,11 +129,11 @@ static void gm_ip_write(uintptr_t lo, uintptr_t hi) {
     else { g_ip_wfly++; seq_wait(need); }
 }
 static void gm_ip_stat(void) {
-    if (!g_ip_binds && !g_ip_wbinds && !g_ip_span && !g_ip_unal && !g_gm_wsyncs) return;
+    if (!g_ip_binds && !g_ip_wbinds && !g_ip_span && !g_ip_unal && !g_gm_wsyncs && !g_fill_gpu && !g_fill_arena) return;
     LOG("[vk] storage buffers bound in their placed pools: %llu read-only bindings (%llu MB read in place), %llu written ones (%llu MB), not in place %llu crossing two pieces, %llu at an offset not a multiple of %llu; "
         "the replay's CPU writes over pages read in place: %llu waited for the chunk being recorded, %llu for one in flight, %llu after it had run, %llu over none; written ranges prepared %llu, "
-        "again in their chunk (skipped) %llu; writes over placed pages after a table binding (DM_VK_RAW_GMEM_WSYNC) %llu (cumulative; gfx_vk_gmem_inplace.inc)",
+        "again in their chunk (skipped) %llu; writes over placed pages after a table binding (DM_VK_RAW_GMEM_WSYNC) %llu; small fills made on the GPU after pending writes: in place %llu, in a write-back's arena copy %llu (DM_VK_FILL_GPU) (cumulative; gfx_vk_gmem_inplace.inc)",
         (unsigned long long)g_ip_binds, (unsigned long long)(g_ip_bytes >> 20), (unsigned long long)g_ip_wbinds, (unsigned long long)(g_ip_wbytes >> 20), (unsigned long long)g_ip_span, (unsigned long long)g_ip_unal,
         (unsigned long long)g_vk.props.limits.minStorageBufferOffsetAlignment, (unsigned long long)g_ip_wcur, (unsigned long long)g_ip_wfly, (unsigned long long)g_ip_wfree, (unsigned long long)g_ip_wnone,
-        (unsigned long long)atomic_load(&g_ip_prep), (unsigned long long)atomic_load(&g_ip_prep_dup), (unsigned long long)g_gm_wsyncs);
+        (unsigned long long)atomic_load(&g_ip_prep), (unsigned long long)atomic_load(&g_ip_prep_dup), (unsigned long long)g_gm_wsyncs, (unsigned long long)g_fill_gpu, (unsigned long long)g_fill_arena);
 }

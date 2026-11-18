@@ -894,6 +894,32 @@ static int chunk_hits(const chunk *c, uintptr_t lo, uintptr_t hi, int write) {  
     return 0;
 }
 typedef struct { uintptr_t lo, hi; } rd_rng;
+// where a small fill of [lo, hi) can go on the GPU, ordered after the writes still pending over it (gfx_vk_gmem_inplace.inc gm_fill_gpu): 0 nowhere (nothing pending, or a write
+// it cannot follow), 1 in the current chunk's newest write over it when that is a plain arena copy holding the whole range and no chunk in flight writes the range (*b / *o:
+// where in the arena; the fill lands with its write-back, against the snapshot guest memory still holds), 2 in place in guest memory when every pending write over it lands in
+// place at the GPU's time (a storage buffer written in its placed pool, raw stores) and none lands from a copy afterwards (an arena write-back, a queued copy), which would land
+// over the fill
+static int fill_target(uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o) {
+    int any = 0, copies = 0, fly = 0, r = 0;
+    pthread_mutex_lock(&g_cmu);
+    for (int f = 0; f < g_fifo_n; f++) { const chunk *c = g_fifo[f];
+        if (c->gm_st && gm_store_wait()) any = fly = 1;
+        for (int i = 0; i < c->nwb; i++) if (wb_hits(&c->wb[i], lo, hi)) { any = fly = 1; if (!c->wb[i].inpl) copies = 1; }
+        for (int i = 0; i < c->ncop; i++) { const cop_t *x = &c->cop[i]; if ((x->dst < hi && lo < x->dst + x->n) || (!x->fill && x->src < hi && lo < x->src + x->n)) any = fly = copies = 1; } }
+    pthread_mutex_unlock(&g_cmu);
+    if (C) {
+        for (int i = 0; i < C->ncop; i++) { const cop_t *x = &C->cop[i]; if ((x->dst < hi && lo < x->dst + x->n) || (!x->fill && x->src < hi && lo < x->src + x->n)) return 0; }   // (lands after the write-backs)
+        if (C->gm_st && gm_store_wait()) any = 1;
+        for (int i = C->nwb - 1; i >= 0; i--) { const wb_t *w = &C->wb[i]; if (!wb_hits(w, lo, hi)) continue;
+            if (w->inpl) { any = 1; break; }   // the newest is in place: the older ones decide as the chunks in flight do
+            if (!fly && w->st < 0 && w->rows == 1 && !w->ofw && !w->vd && !w->lin && !w->ds_n && !w->rbx && lo >= (uintptr_t)w->dst && hi <= (uintptr_t)w->dst + w->row_bytes) {
+                *b = C->ar[-1 - w->st].b; *o = (VkDeviceSize)w->off + (VkDeviceSize)(lo - (uintptr_t)w->dst); return 1; }
+            return 0; }
+        for (int i = 0; i < C->nwb; i++) if (wb_hits(&C->wb[i], lo, hi) && !C->wb[i].inpl) copies = 1;
+    }
+    if (any && !copies) r = 2;
+    return r;
+}
 // the guest memory the replay is about to read (write: or write) on the CPU: when something pending overlaps it, the sync is made (the current chunk submitted and
 // waited for, or the chunks in flight waited for)
 static void ranges_view_(const rd_rng *r, int n, int write) {
@@ -2516,7 +2542,7 @@ static int cop_add(uint64_t src, uint64_t dst, uint64_t n, uint32_t value, int f
     return 1;
 }
 void mtl_sub_copy(uint64_t src, uint64_t dst, uint64_t n) { if (!n || cop_add(src, dst, n, 0, 0)) return; mem_view(src, n, dst, n); memmove((void *)dst, (const void *)src, n); }
-void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) { if (cop_add(0, dst, n, value, 1)) return; mem_view(0, 0, dst, n); uint8_t *d = (uint8_t *)dst; for (uint64_t i = 0; i + 4 <= n; i += 4) memcpy(d + i, &value, 4); }
+void mtl_sub_fill(uint64_t dst, uint64_t n, uint32_t value) { if (cop_add(0, dst, n, value, 1) || gm_fill_gpu(dst, n, value)) return; mem_view(0, 0, dst, n); uint8_t *d = (uint8_t *)dst; for (uint64_t i = 0; i + 4 <= n; i += 4) memcpy(d + i, &value, 4); }
 // q0: the fence of the submission it ends (nvn_queue.inc ends a continuation at each signal), for the queue scheduler's event ordering (nvn_event_publish_gpu)
 void mtl_sub_event(volatile uint32_t *val, uint32_t mode, uint32_t v) { post((post_op){1, val, mode, v, 0, 0, atomic_load(&g_fence) + 1, 0}); }
 void mtl_sub_counter(uint64_t addr, uint32_t type) { post((post_op){2, NULL, 0, 0, addr, type}); }

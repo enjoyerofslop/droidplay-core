@@ -108,7 +108,7 @@ class RecDesc(unittest.TestCase):
 
 # The recorder takes the replay's calls by macro (#define vkCmdX rec_vkCmdX, at the end of gfx_vk_rec.inc). A command with no macro is made on the replay thread, on a
 # command buffer the recorder thread is filling: it lands ahead of the binds queued for it, and two threads write one command buffer.
-NOT_RECORDED = {'vkCmdFillBuffer': 'gfx_vk_bc.inc'}   # the breadcrumbs' only: bc_on turns them off when the recorder is on
+NOT_RECORDED = {}   # a command made only where the recorder is off, by name: the file using it (it must turn itself off with the recorder); vkCmdFillBuffer has a record since the GPU fill (gfx_vk_gmem_inplace.inc gm_fill_gpu)
 
 
 class RecorderCalls(unittest.TestCase):
