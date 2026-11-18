@@ -11,6 +11,7 @@ void nvn_dirty_close(void);                                        // Protect th
 void nvn_dirty_open_stats(uint64_t *opened, uint64_t *changed);    // Cumulative: pages nvn_dirty_open opened, and those of them that changed while open
 int nvn_dirty_tracked(const void *addr, size_t len);
 void nvn_dirty_protect(const void *addr, size_t len);              // Set the covered pages read-only
+void nvn_dirty_protect_span(const void *span, const void *addr, size_t len);   // The same through a kept handle (nvn_dirty_span: looked up again only if it no longer holds the span)
 void nvn_dirty_protect_sparse(const void *addr, size_t len);       // The same, for the pages behind a placement sparse tile: a later write to one moves nvn_dirty_sparse_writes
 uint64_t nvn_dirty_sparse_writes(void);                            // Writes so far to pages protected that way
 uint64_t nvn_dirty_now(void);                                      // Current generation: take the content's stamp before nvn_dirty_protect and before reading it

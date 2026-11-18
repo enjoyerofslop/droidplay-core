@@ -293,11 +293,13 @@ int nvn_dirty_tracked(const void *addr, size_t len) {
 // The tracked range holding [addr, addr+len), as a handle a caller keeps (packaged textures: the scan over every range ran twice per texture lookup). NULL = untracked
 const void *nvn_dirty_span(const void *addr, size_t len) { return len ? find_span((uintptr_t)addr, len) : NULL; }
 // Set read-only: mark the pages BUSY first and mark them PROT only after mprotect has landed (for the order and the invariant see the state notes at the top of the file)
-void nvn_dirty_protect(const void *addr, size_t len) {
+static void protect_in(const void *span, const void *addr, size_t len) {
     // Keep this descriptor live through the last mprotect. Retirement restores
     // RW under this same mutex; it must not finish between lookup and PG_BUSY.
     pthread_mutex_lock(&g_slot_mu);
-    range_t *r = len ? find_span((uintptr_t)addr, len) : NULL;
+    range_t *r = (range_t *)span; uintptr_t ua = dirty_untag((uintptr_t)addr);
+    if (!len) r = NULL;
+    else if (!r || !atomic_load_explicit(&r->live, memory_order_acquire) || ua < dirty_untag(r->base) || ua + len > dirty_untag(r->end)) r = find_span((uintptr_t)addr, len);
     if (!r) { pthread_mutex_unlock(&g_slot_mu); return; }
     uintptr_t a = dirty_untag((uintptr_t)addr), ub = dirty_untag(r->base), p = (a - ub) >> g_shift, q = (a + len - 1 - ub) >> g_shift;
     // Consecutive pages are merged into one mprotect (per-page calls reach thousands per frame on the first upload of large textures; character select page startup frame 5: 4888 calls).
@@ -314,6 +316,10 @@ void nvn_dirty_protect(const void *addr, size_t len) {
     }
     pthread_mutex_unlock(&g_slot_mu);
 }
+void nvn_dirty_protect(const void *addr, size_t len) { protect_in(NULL, addr, len); }
+// A caller that keeps its range (nvn_dirty_span) skips the lookup: a uniform buffer stamped again at each rebind after a write (gfx_vk_draw.inc ucopy) looked its pool up among
+// about 4,500 ranges each time, past find_span's one-range memo whenever the buffers bound in turn lie in different pools
+void nvn_dirty_protect_span(const void *span, const void *addr, size_t len) { protect_in(span, addr, len); }
 // As nvn_dirty_protect, for the pages behind a placement sparse tile: a write to one of them moves nvn_dirty_sparse_writes, which nothing else moves, so its textures need no look at their tiles
 // until one is written (the page table's walk per look is what this replaces; nvn_mtl.m sparse_look)
 void nvn_dirty_protect_sparse(const void *addr, size_t len) {

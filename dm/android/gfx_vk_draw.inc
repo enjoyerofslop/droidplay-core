@@ -3143,7 +3143,7 @@ static void stage_textures(vshader *s) {
 // A draw's copy of a constant or storage buffer reuses the copy an earlier draw of the same chunk made of the same bytes: same source and size, and the source still
 // equal to a shadow kept in host memory (the arena may be write-combined, slow to read: ar_mem_type). Super Mario Bros. Wonder's scene draws read six or seven uniform buffers
 // each, mostly the same from draw to draw; copying them again for every draw was the largest cost of its render thread on an Adreno 619 (memcpy, 15%)
-typedef struct { const void *src; size_t n; uint64_t seq; VkBuffer b; VkDeviceSize off; uint8_t *shadow; size_t cap; } ucopy_t;
+typedef struct { const void *src; size_t n; uint64_t seq, pstamp, nost; VkBuffer b; VkDeviceSize off; uint8_t *shadow; size_t cap; const void *span; int prot; } ucopy_t;   // prot: the source's pages were protected at pstamp with its bytes equal to the copy (span: their tracked range); nost: no stamp before this chunk
 static int support_skip(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_SUPPORT_SKIP"); v = !(e && *e == '0'); } return v; }   // stage_set
 static int desc_scratch(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_DESC_SCRATCH"); v = !(e && *e == '0'); } return v; }   // stage_set
 // DM_VK_EXT_CHECK=1 (env.txt; a diagnostic, off by default): a constant buffer the shader is said to read less of than is bound (cb_ext_pick) is copied whole, the bytes past
@@ -3155,16 +3155,43 @@ static uint64_t g_sup_written, g_sup_skipped;   // stages that wrote the support
 // g_ucopy_bytes / g_ucopy_shadow: what the misses copied to the arena and again to the shadows, two memcpy of the same n bytes, both saved by a smaller extent (cb_ext_pick);
 // DM_VK_EXT_CHECK's whole copies are in neither, so with it on they do not compare with a run without
 static ucopy_t g_ucopy[1024]; static uint64_t g_ucopy_hit, g_ucopy_miss, g_ucopy_bytes, g_ucopy_shadow;
+// A guest uniform buffer (or a shader's own constants, c1) bound again in the chunk is taken without the compare while the dirty-page tracker shows none of its pages written
+// since it was last found equal to the copy. At its first rebind in the chunk it is compared as before, after its pages are stamped and write-protected (nvn_dirty, as
+// gfx_vk_sbcopy.inc does for storage buffers): any later write, the game's on another thread, the replay's own (uniform buffer updates, small copies, fills) or a write-back
+// landing, faults or is prepared and moves a page's generation past the stamp, and the next rebind compares again. A compare whole of every rebind was 8.8% of Ocarina of Time's
+// replay thread on a Galaxy Z Fold 8 in Kokiri Forest (about 9,000 rebinds and 25 MB a frame). Untracked memory, stack-built banks (c0, c2) and the support buffer are compared
+// as before. DM_VK_UB_TRUST=1 (env.txt; off by default): so trusted. Off because it didn't pay there: the game rewrites many of those pages every frame, so the stamps made it
+// fault about 200 times a frame (12-27 us each) and the replay thread saved no CPU it could measure (in one process, on against off: +0.55 +/- 0.64 ms and -0.84 +/- 0.54 ms
+// in two runs, the process +4 ms). DM_VK_UB_CHECK=1 (a diagnostic): each rebind taken without the compare is compared as well; one that differs is copied again, counted in
+// the copies line and logged (the first 8)
+// A buffer found written since its stamp is compared without a stamp for the next UB_BACKOFF chunks (about 6 frames of Ocarina of Time): one the game rewrites every frame
+// only paid for the stamp (an mprotect when its pages were writable again) and for the fault of the next write to it
+enum { UB_BACKOFF = 256 };
+static int ub_trust(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_UB_TRUST"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_UB_TRUST=1: uniform buffer rebinds whose pages are unwritten since a stamp skip the compare"); } return v; }
+static int ub_check(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_UB_CHECK"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_UB_CHECK=1: uniform buffer rebinds taken without the compare are compared too"); } return v; }
+static uint64_t g_ub_trusted, g_ub_checked, g_ub_differ, g_ub_prot, g_ub_written; static int g_uc_guest;   // g_uc_guest: the next ucopy's source is guest memory (stage_set)
 static int ucopy(const void *src, size_t n, size_t al, VkBuffer *b, VkDeviceSize *off) {   // src NULL: al zero bytes (not cached)
+    int guest = g_uc_guest; g_uc_guest = 0;
     if (!src) { uint8_t *d = ar_alloc(al, b, off); if (!d) return 0; memset(d, 0, al); return 1; }
     uintptr_t h = ((uintptr_t)src >> 4) ^ ((uintptr_t)src >> 14) ^ n * 0x9e37u; ucopy_t *e = &g_ucopy[h & 1023];
-    if (C && e->src == src && e->n == n && e->seq == C->seq && !memcmp(src, e->shadow, n)) { *b = e->b; *off = e->off; g_ucopy_hit++; return 1; }
+    if (C && e->src == src && e->n == n && e->seq == C->seq) {
+        int same = -1, fresh = 0;
+        if (guest && e->prot && ub_trust()) {
+            if (!nvn_dirty_since_span(e->span, src, n, e->pstamp)) { same = 1; g_ub_trusted++;
+                if (ub_check()) { g_ub_checked++; if (memcmp(src, e->shadow, n)) { same = 0; if (g_ub_differ++ < 8) LOG("[RED] [vk] DM_VK_UB_CHECK: uniform buffer %p (%zu bytes) changed in chunk %llu with no page of it written since its stamp", src, n, (unsigned long long)C->seq); } } }
+            else { e->prot = 0; g_ub_written++; e->nost = C->seq + UB_BACKOFF; } }
+        if (same < 0) {   // compared; a tracked guest buffer stamped and protected first, so a write after the compare shows
+            if (guest && ub_trust() && C->seq >= e->nost && (e->span || (e->span = nvn_dirty_span(src, n)))) { e->pstamp = nvn_dirty_now(); nvn_dirty_protect_span(e->span, src, n); e->prot = fresh = 1; g_ub_prot++; }
+            same = !memcmp(src, e->shadow, n); }
+        if (same) { *b = e->b; *off = e->off; g_ucopy_hit++; return 1; }
+        if (!fresh) e->prot = 0;   // (protected just now: the copy below reads it after the stamp, so the stamp holds for it)
+    }
     uint8_t *d = ar_alloc(al, b, off); if (!d) return 0;
     memcpy(d, src, n); if (al > n) memset(d + n, 0, al - n);
     g_ucopy_miss++; g_ucopy_bytes += n;
     if (!C) return 1;
     if (e->cap < n) { free(e->shadow); e->shadow = malloc(n); e->cap = e->shadow ? n : 0; }
-    if (e->shadow) { memcpy(e->shadow, src, n); g_ucopy_shadow += n; e->src = src; e->n = n; e->seq = C->seq; e->b = *b; e->off = *off; } else e->src = NULL;
+    if (e->shadow) { memcpy(e->shadow, src, n); g_ucopy_shadow += n; if (e->src != src || e->n != n) { e->span = NULL; e->prot = 0; e->nost = 0; } e->src = src; e->n = n; e->seq = C->seq; e->b = *b; e->off = *off; } else e->src = NULL;
     return 1;
 }
 #include "gfx_vk_sbcopy.inc"   // read-only storage buffers outside placed pools: a chunk's copy bound again while the dirty tracker shows its pages unwritten
@@ -3285,7 +3312,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             memset(d + n, 0, q - n); for (; q + 4 <= aa; q += 4) memcpy(d + q, &nan, 4);
             al = aa; g_ext_checked++;
         } else if (slot >= 3 && slot - 3 < 16 && src && src == (const void *)(uintptr_t)D.ubo[nst][slot - 3].addr && ub_fwd(D.ubo[nst][slot - 3].addr, n, &b, &off)) g_buf_fwd[0]++;   // a pending write read on the GPU (wb_promote, buf_fwd)
-        else if (!ucopy(src, n, al, &b, &off)) return 0;
+        else if ((g_uc_guest = slot == 1 || (slot >= 3 && slot - 3 < 16)), !ucopy(src, n, al, &b, &off)) return 0;
         if (slot == 0 && nst == 5) { g_c0_b = b; g_c0_off = off; }   // (vk_dispatch: an indirect dispatch's counts copied here on the GPU)
         int dy = s->cbdyn[i] != 0xff; if (dy) dyn[s->cbdyn[i]] = (uint32_t)off;   // a dynamic one's offset goes to the bind, its descriptor at 0
         bi[nbi] = (VkDescriptorBufferInfo){b, dy ? 0 : off, al};
