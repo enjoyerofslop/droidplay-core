@@ -91,6 +91,7 @@ jobs:
         # test_rb16 builds dm/android/rb16.h with the real format table (dm/gfx/tex/nvn_fmt_mtl.c), NVN's RGB-order 16-bit formats exchanged into Vulkan's order and back (#417)
         # test_au_pace builds dm/android/au_pace.h, the AAudio output's 5 ms pacer and its ring, against a simulated phone of 20 ms data callbacks and a game that keeps three 240-frame buffers (#485)
         # test_wb_filter builds dm/android/wb_filter.h, the write summaries that let a lookup of pending writes skip the chunks in flight it can't meet (gfx_vk.c chunk_hits, wbf_fly_clear)
+        # test_rc_pend builds dm/android/rc_pend.h, the index of the counter reports replayed last (gfx_vk.c rc_note, rc_value), against the walk it replaced
         # test_android_linux runs DroidPlay for Linux's first-start unpack (dm/android/linux/unpack.py), Stop ending a build's process group, and the XDG data folder
         run: |
           mkdir -p "$RUNNER_TEMP/cc" && ln -sf "$(command -v clang)" "$RUNNER_TEMP/cc/cc"
