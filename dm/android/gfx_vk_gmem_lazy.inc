@@ -23,6 +23,7 @@
 typedef struct { uintptr_t lo, hi; const void *pool; uint8_t *st; uint32_t nch; int merge, want, raw; } gm_lz;   // st: each chunk's state (LZ_*); merge: a binding crossed two of its pieces; raw: a scanned pointer reached it (its written chunks placed too); want: a chunk of it is LZ_WANT (gm_lazy_tick visits only those)
 enum { LZ_NO, LZ_WANT, LZ_PLACED, LZ_REFUSED };
 static gm_lz *g_lz; static int g_nlz, g_clz;   // under g_gm_pl
+static int g_lz_pend;   // under g_gm_pl: a pool may have a wanted chunk or a merge asked (gm_lazy_tick visits the pools only then, or at its 200 ms scan)
 static _Atomic int g_lz_any;
 static uint64_t g_lz_ptr_scans, g_lz_ptr_hits, g_lz_ptr, g_lz_ptr_ns, g_lz_raw_pools;   // g_lz_raw_pools: pools a pointer reached   // gm_lazy_ptrs: buffers scanned, words pointing into a chunked pool, chunks wanted for them
 static uint64_t g_lz_overlap;   // chunk runs refused for holding another pool's placed piece (gm_lz_run)
@@ -55,8 +56,11 @@ static void gm_frz_end(uintptr_t lo, uintptr_t hi) { (void)lo; (void)hi; atomic_
 
 // ---- The chunks (caller holds g_gm_pl) ----
 // g_lz is kept sorted by address (pools don't overlap: none did in Ocarina of Time, counted on a Galaxy S25 Edge), so a lookup is a binary search. The pointer scan asks for
-// every word it reads, and with every pool chunked there are thousands of them (4,041 in Kokiri Forest)
+// every word it reads, and with every pool chunked there are thousands of them (4,041 in Kokiri Forest). A word below the first pool or past the last is no pointer into one,
+// and most words are such (floats and small integers, where Ocarina of Time's pools lie past 0x4c00000000): they skip the search, which was 3% of its replay thread on a
+// Galaxy Z Fold 8 in Kokiri Forest (the pointer scan's 132 buffers a frame, 512 words each, a search per word)
 static gm_lz *gm_lz_of(uintptr_t a) {
+    if (!g_nlz || a < g_lz[0].lo || a >= g_lz[g_nlz - 1].hi) return NULL;   // (sorted, no overlaps: the last pool ends the highest)
     int lo = 0, hi = g_nlz;   // the first pool starting above a
     while (lo < hi) { int m = (lo + hi) / 2; if (g_lz[m].lo <= a) lo = m + 1; else hi = m; }
     return lo > 0 && a < g_lz[lo - 1].hi ? &g_lz[lo - 1] : NULL;
@@ -138,7 +142,7 @@ static void gm_lazy_add(const void *pool, uintptr_t lo, size_t size, int live) {
     L->lo = lo; L->hi = lo + size; L->pool = pool; L->nch = nch; L->st = st;
     g_nlz++; g_lz_pools++; atomic_store(&g_lz_any, 1); atomic_fetch_add(&g_gm_gen, 1);   // (the table's sink ranges: DM_VK_RAW_GMEM_SINK)
     gm_lz_scan(L);
-    int got = gm_lz_place(L, live, 1);
+    int got = gm_lz_place(L, live, 1); g_lz_pend |= L->want;
     static int nl; if (nl++ < 4) LOG("[vk] raw global memory: memory pool %#lx+%#zx placed in chunks of %u MiB as they are used: %d of %u now (DM_VK_RAW_GMEM_LAZY=0: whole)",
                                      (unsigned long)lo, size, GM_CHUNK >> 20, got, L->nch);
 }
@@ -153,9 +157,10 @@ static int gm_lazy_bind(uint64_t addr, size_t n) {
     if (L && addr + n <= L->hi) {
         uint32_t c0 = (uint32_t)((addr - L->lo) / GM_CHUNK), c1 = (uint32_t)((addr + n - 1 - L->lo) / GM_CHUNK); int ok = 1;
         for (uint32_t k = c0; k <= c1; k++) if (L->st[k] == LZ_PLACED || L->st[k] == LZ_REFUSED) ok = 0;
-        if (!ok) { if (!L->merge) { L->merge = 1; g_lz_cross++; } }   // part of it placed already (an allocation of its own) or refused: copied now, the pool made one allocation at the next tick
+        if (!ok) { if (!L->merge) { L->merge = 1; g_lz_cross++; g_lz_pend = 1; } }   // part of it placed already (an allocation of its own) or refused: copied now, the pool made one allocation at the next tick
         else { for (uint32_t k = c0; k <= c1; k++) L->st[k] = LZ_WANT; L->want = 1;
                int r = gm_lz_run(L, c0, c1 + 1, 1, 0); got = r > 0 ? r : 0;   // this run alone now: the pool's other wanted chunks wait for the tick
+               g_lz_pend = 1;   // (the tick looks at the pool's wanted chunks again)
                g_lz_bind += (uint64_t)got; }
     }
     pthread_mutex_unlock(&g_gm_pl);
@@ -169,8 +174,8 @@ static void gm_lz_ptr_scan(uintptr_t addr, size_t n, int depth, gm_lz **hit, int
     for (size_t k = 0; k < nw; k++) {
         uint64_t v = w[k]; gm_lz *L = v >> 40 ? NULL : gm_lz_of((uintptr_t)v); if (!L) continue;
         g_lz_ptr_hits++; uint32_t c = (uint32_t)(((uintptr_t)v - L->lo) / GM_CHUNK); int got = 0;
-        if (!L->raw) { L->raw = 1; g_lz_raw_pools++; L->want = 1; }   // the shader may index anywhere in the pool from here: its written chunks go at the next tick (gm_lz_scan)
-        for (uint32_t x = c; x < L->nch && x <= c + 1; x++) if (L->st[x] == LZ_NO) { L->st[x] = LZ_WANT; L->want = 1; g_lz_ptr++; got = 1; }
+        if (!L->raw) { L->raw = 1; g_lz_raw_pools++; L->want = 1; g_lz_pend = 1; }   // the shader may index anywhere in the pool from here: its written chunks go at the next tick (gm_lz_scan)
+        for (uint32_t x = c; x < L->nch && x <= c + 1; x++) if (L->st[x] == LZ_NO) { L->st[x] = LZ_WANT; L->want = 1; g_lz_ptr++; got = 1; g_lz_pend = 1; }
         if (got) { int dup = 0; for (int i = 0; i < *nhit && !dup; i++) dup = hit[i] == L; if (!dup && *nhit < 8) hit[(*nhit)++] = L; }
         if (!depth) gm_lz_ptr_scan((uintptr_t)v, L->hi - (uintptr_t)v, 1, hit, nhit);
     }
@@ -192,7 +197,7 @@ static void gm_lazy_ptrs(uint64_t addr, size_t n) {
 // writes all over in time. gm_inplace asks for it (the replay's thread, g_gm_mu not held)
 static void gm_lazy_cross(uint64_t addr) {
     if (!atomic_load(&g_lz_any) || pthread_mutex_trylock(&g_gm_pl)) return;
-    gm_lz *L = gm_lz_of((uintptr_t)addr); if (L && !L->merge) { L->merge = 1; g_lz_cross++; }
+    gm_lz *L = gm_lz_of((uintptr_t)addr); if (L && !L->merge) { L->merge = 1; g_lz_cross++; g_lz_pend = 1; }
     pthread_mutex_unlock(&g_gm_pl);
 }
 // The whole pool as one allocation (pieces of at most g_gm_piece): the GPU waited for, the tracker's pages opened, the pool frozen (reads too), its pieces given back to
@@ -227,7 +232,11 @@ static void gm_lazy_tick(void) {
     static uint64_t last; uint64_t now = gm_now(); int scan = now - last > 200000000ull;
     if (pthread_mutex_trylock(&g_gm_pl)) { g_lz_busy++; return; }
     int wr = scan && gm_lz_written();   // the written-pages scan: every pool with DM_VK_RAW_GMEM_WRITTEN=1; otherwise the pools a pointer reached, and only pools with a merge or a wanted chunk are placed (thousands of pools)
-    for (int i = 0; i < g_nlz; i++) { gm_lz *L = &g_lz[i]; if (L->merge) { gm_lz_merge(L); continue; } if (wr || (scan && L->raw)) gm_lz_scan(L); if (L->want) gm_lz_place(L, 1, 1); }
+    // the pools visited only when one may have work: every submission walked all of them (4,041 in Kokiri Forest, about 73 submissions a frame), 2% of Ocarina of Time's replay
+    // thread on a Galaxy Z Fold 8 for pools with nothing to do
+    if (scan || g_lz_pend) { int pend = 0;
+        for (int i = 0; i < g_nlz; i++) { gm_lz *L = &g_lz[i]; if (L->merge) { gm_lz_merge(L); continue; } if (wr || (scan && L->raw)) gm_lz_scan(L); if (L->want) gm_lz_place(L, 1, 1); pend |= L->want || L->merge; }
+        g_lz_pend = pend; }
     if (scan) last = now;
     pthread_mutex_unlock(&g_gm_pl);
 }

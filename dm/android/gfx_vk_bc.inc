@@ -8,7 +8,7 @@
 // their address, size and first words, textures and images with their serial, size and format), so the report names what the dispatch read.
 // The ring is read where the replay already reports a hang: gpu_slow (a chunk over GPU_SLOW_NS: its dispatches up to the first one never begun) and gpu_fault_log (the
 // device lost: the last eight begun and never ended). The barriers serialize the dispatches with the transfers around them, so frame times with it on are not the game's.
-// The recorder thread (DM_VK_RECORDER=1) makes the vkCmd* calls later, on its own thread, and vkCmdFillBuffer is not one of its records: with it on, breadcrumbs stay off
+// The recorder thread (DM_VK_RECORDER=1) makes the vkCmd* calls later, on its own thread, out of step with the host records kept here: with it on, breadcrumbs stay off
 #include <stdarg.h>
 enum { BC_N = 4096, BC_HOST = 2048, BC_DESC = 2400 };   // GPU ring slots (two words each), host records kept, bytes of a record's bindings text
 typedef struct { uint32_t id; uint64_t seq; const char *key; uint32_t g[3]; char desc[BC_DESC]; } bc_ent;

@@ -93,6 +93,25 @@ int main(void) {
     for (int i = 0; i < NMANY; i++) { nvn_dirty_remove_range(many[i]); munmap(many[i], 4096); }
     free(many);
 
+    // The fault handler's index (nvn_dirty.c fi_find): made at a protect after a fault had to walk every range; faults then find their ranges through it, and a pool registered
+    // after it was made is found by the walk until the next one
+    enum { NIDX = 3000 };
+    void **ip = malloc(NIDX * sizeof *ip); int bad = 0;
+    for (int i = 0; i < NIDX; i++) { ip[i] = page_map(); nvn_dirty_add_range(ip[i], 4096); }
+    nvn_dirty_protect(ip[5], 4096); ((volatile uint8_t *)ip[5])[0] = 1;   // no index for these registrations yet: the walk
+    for (int k = 0; k < 50; k++) { int i = (k * 397) % NIDX; nvn_dirty_protect(ip[i], 4096); stamp = nvn_dirty_now(); ((volatile uint8_t *)ip[i])[1] = 2; bad += nvn_dirty_since(ip[i], 4096, stamp) != 1; }
+    EXPECT("3000 pools: 50 written after protect, each dirty", 0, bad);
+    void *late = page_map(); nvn_dirty_add_range(late, 4096);
+    nvn_dirty_protect(late, 4096); stamp = nvn_dirty_now(); ((volatile uint8_t *)late)[0] = 3;
+    EXPECT("a pool registered after the index: written, dirty", 1, nvn_dirty_since(late, 4096, stamp));
+    nvn_dirty_protect(late, 4096); stamp = nvn_dirty_now(); ((volatile uint8_t *)late)[1] = 4;
+    EXPECT("... and again once the index holds it", 1, nvn_dirty_since(late, 4096, stamp));
+    nvn_dirty_protect(ip[7], 4096); stamp = nvn_dirty_now();
+    EXPECT("a protected pool not written: clean", 0, nvn_dirty_since(ip[7], 4096, stamp));
+    nvn_dirty_remove_range(late); munmap(late, 4096);
+    for (int i = 0; i < NIDX; i++) { nvn_dirty_remove_range(ip[i]); munmap(ip[i], 4096); }
+    free(ip);
+
     // Adjacent pools sharing a host page (pools are 4 KB aligned, host pages 16 KB): the first page of SMBW's ASTC texture pool is shared with a small preceding pool, and was judged untracked and re-uploaded on every use
     size_t pg = (size_t)getpagesize();
     uint8_t *blk = mmap(NULL, 4 * pg, PROT_READ | PROT_WRITE, MAP_PRIVATE | MAP_ANON, -1, 0);

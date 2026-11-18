@@ -1261,7 +1261,23 @@ static int g_view_slice;   // view_get: a render target's view (rp_start): a 3D 
 static VkFormat g_view_fmt;   // view_get: a format other than the image's (a storage view in a shader's declared format; the image is mutable), 0 = the image's
 static nvn_hmap g_views = {.klen = sizeof(view_key)};
 static VkFormat view_format(const vtex *v, const view_t *vv);   // below: a texture view's own format (0: the image's)
+// The view asked last of each image is kept in it (vtex vm) with what it was asked with, and given again for the same question without the key and the table lookup: Ocarina
+// of Time's draws ask about 7,000 times a frame, nearly always the same view of each texture (view_get and its table lookup 3.7% of its replay thread on a Galaxy Z Fold 8).
+// A view goes only with its image (views_drop: the vtex is destroyed, or its image made again, which forgets the memo), so the kept handle is the table's. DM_VK_VIEW_MEMO=0
+// (env.txt): every lookup builds the key and searches the table, as before
+static int view_memo_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_VIEW_MEMO"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_VIEW_MEMO=0: every view is looked up in the table"); } return v; }
+static VkImageView view_get_(const vtex *v, VkImageViewType type, uint32_t level, uint32_t nlevels, uint32_t layer, uint32_t nlayers, VkImageAspectFlags aspect, const uint8_t swz[4]);
 static VkImageView view_get(const vtex *v, VkImageViewType type, uint32_t level, uint32_t nlevels, uint32_t layer, uint32_t nlayers, VkImageAspectFlags aspect, const uint8_t swz[4]) {
+    if (!view_memo_on()) return view_get_(v, type, level, nlevels, layer, nlayers, aspect, swz);
+    vtex *w = (vtex *)(uintptr_t)v;   // (the memo only: what the vtex describes is not changed)
+    if (w->vm.iv && w->vm.img == v->img && w->vm.type == type && w->vm.fmt == g_view_fmt && w->vm.slice == (uint8_t)!!g_view_slice && w->vm.level == level && w->vm.nlevels == nlevels
+        && w->vm.layer == layer && w->vm.nlayers == nlayers && w->vm.aspect == aspect && w->vm.has_swz == !!swz && (!swz || !memcmp(w->vm.swz, swz, 4))) return w->vm.iv;
+    VkImageView iv = view_get_(v, type, level, nlevels, layer, nlayers, aspect, swz);
+    if (iv) { w->vm.img = v->img; w->vm.type = type; w->vm.fmt = g_view_fmt; w->vm.slice = (uint8_t)!!g_view_slice; w->vm.level = level; w->vm.nlevels = nlevels; w->vm.layer = layer;
+              w->vm.nlayers = nlayers; w->vm.aspect = aspect; w->vm.has_swz = !!swz; if (swz) memcpy(w->vm.swz, swz, 4); w->vm.iv = iv; }
+    return iv;
+}
+static VkImageView view_get_(const vtex *v, VkImageViewType type, uint32_t level, uint32_t nlevels, uint32_t layer, uint32_t nlayers, VkImageAspectFlags aspect, const uint8_t swz[4]) {
     view_key k; memset(&k, 0, sizeof k);
     if (level >= v->levels) level = v->levels - 1;
     if (g_view_slice && v->type == VK_IMAGE_TYPE_3D) {   // a render target's slice of a 3D image (layer = the depth slice): a 2D view of it, which the image is 2D_ARRAY_COMPATIBLE for (gfx_vk.c vt_new);
@@ -3175,7 +3191,7 @@ static void stage_textures(vshader *s) {
 // A draw's copy of a constant or storage buffer reuses the copy an earlier draw of the same chunk made of the same bytes: same source and size, and the source still
 // equal to a shadow kept in host memory (the arena may be write-combined, slow to read: ar_mem_type). Super Mario Bros. Wonder's scene draws read six or seven uniform buffers
 // each, mostly the same from draw to draw; copying them again for every draw was the largest cost of its render thread on an Adreno 619 (memcpy, 15%)
-typedef struct { const void *src; size_t n; uint64_t seq; VkBuffer b; VkDeviceSize off; uint8_t *shadow; size_t cap; } ucopy_t;
+typedef struct { const void *src; size_t n; uint64_t seq, pstamp, nost; VkBuffer b; VkDeviceSize off; uint8_t *shadow; size_t cap; const void *span; int prot; } ucopy_t;   // prot: the source's pages were protected at pstamp with its bytes equal to the copy (span: their tracked range); nost: no stamp before this chunk
 static int support_skip(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_SUPPORT_SKIP"); v = !(e && *e == '0'); } return v; }   // stage_set
 static int desc_scratch(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_DESC_SCRATCH"); v = !(e && *e == '0'); } return v; }   // stage_set
 // DM_VK_EXT_CHECK=1 (env.txt; a diagnostic, off by default): a constant buffer the shader is said to read less of than is bound (cb_ext_pick) is copied whole, the bytes past
@@ -3187,16 +3203,43 @@ static uint64_t g_sup_written, g_sup_skipped;   // stages that wrote the support
 // g_ucopy_bytes / g_ucopy_shadow: what the misses copied to the arena and again to the shadows, two memcpy of the same n bytes, both saved by a smaller extent (cb_ext_pick);
 // DM_VK_EXT_CHECK's whole copies are in neither, so with it on they do not compare with a run without
 static ucopy_t g_ucopy[1024]; static uint64_t g_ucopy_hit, g_ucopy_miss, g_ucopy_bytes, g_ucopy_shadow;
+// A guest uniform buffer (or a shader's own constants, c1) bound again in the chunk is taken without the compare while the dirty-page tracker shows none of its pages written
+// since it was last found equal to the copy. At its first rebind in the chunk it is compared as before, after its pages are stamped and write-protected (nvn_dirty, as
+// gfx_vk_sbcopy.inc does for storage buffers): any later write, the game's on another thread, the replay's own (uniform buffer updates, small copies, fills) or a write-back
+// landing, faults or is prepared and moves a page's generation past the stamp, and the next rebind compares again. A compare whole of every rebind was 8.8% of Ocarina of Time's
+// replay thread on a Galaxy Z Fold 8 in Kokiri Forest (about 9,000 rebinds and 25 MB a frame). Untracked memory, stack-built banks (c0, c2) and the support buffer are compared
+// as before. DM_VK_UB_TRUST=1 (env.txt; off by default): so trusted. Off because it didn't pay there: the game rewrites many of those pages every frame, so the stamps made it
+// fault about 200 times a frame (12-27 us each) and the replay thread saved no CPU it could measure (in one process, on against off: +0.55 +/- 0.64 ms and -0.84 +/- 0.54 ms
+// in two runs, the process +4 ms). DM_VK_UB_CHECK=1 (a diagnostic): each rebind taken without the compare is compared as well; one that differs is copied again, counted in
+// the copies line and logged (the first 8)
+// A buffer found written since its stamp is compared without a stamp for the next UB_BACKOFF chunks (about 6 frames of Ocarina of Time): one the game rewrites every frame
+// only paid for the stamp (an mprotect when its pages were writable again) and for the fault of the next write to it
+enum { UB_BACKOFF = 256 };
+static int ub_trust(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_UB_TRUST"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_UB_TRUST=1: uniform buffer rebinds whose pages are unwritten since a stamp skip the compare"); } return v; }
+static int ub_check(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_UB_CHECK"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_UB_CHECK=1: uniform buffer rebinds taken without the compare are compared too"); } return v; }
+static uint64_t g_ub_trusted, g_ub_checked, g_ub_differ, g_ub_prot, g_ub_written; static int g_uc_guest;   // g_uc_guest: the next ucopy's source is guest memory (stage_set)
 static int ucopy(const void *src, size_t n, size_t al, VkBuffer *b, VkDeviceSize *off) {   // src NULL: al zero bytes (not cached)
+    int guest = g_uc_guest; g_uc_guest = 0;
     if (!src) { uint8_t *d = ar_alloc(al, b, off); if (!d) return 0; memset(d, 0, al); return 1; }
     uintptr_t h = ((uintptr_t)src >> 4) ^ ((uintptr_t)src >> 14) ^ n * 0x9e37u; ucopy_t *e = &g_ucopy[h & 1023];
-    if (C && e->src == src && e->n == n && e->seq == C->seq && !memcmp(src, e->shadow, n)) { *b = e->b; *off = e->off; g_ucopy_hit++; return 1; }
+    if (C && e->src == src && e->n == n && e->seq == C->seq) {
+        int same = -1, fresh = 0;
+        if (guest && e->prot && ub_trust()) {
+            if (!nvn_dirty_since_span(e->span, src, n, e->pstamp)) { same = 1; g_ub_trusted++;
+                if (ub_check()) { g_ub_checked++; if (memcmp(src, e->shadow, n)) { same = 0; if (g_ub_differ++ < 8) LOG("[RED] [vk] DM_VK_UB_CHECK: uniform buffer %p (%zu bytes) changed in chunk %llu with no page of it written since its stamp", src, n, (unsigned long long)C->seq); } } }
+            else { e->prot = 0; g_ub_written++; e->nost = C->seq + UB_BACKOFF; } }
+        if (same < 0) {   // compared; a tracked guest buffer stamped and protected first, so a write after the compare shows
+            if (guest && ub_trust() && C->seq >= e->nost && (e->span || (e->span = nvn_dirty_span(src, n)))) { e->pstamp = nvn_dirty_now(); nvn_dirty_protect_span(e->span, src, n); e->prot = fresh = 1; g_ub_prot++; }
+            same = !memcmp(src, e->shadow, n); }
+        if (same) { *b = e->b; *off = e->off; g_ucopy_hit++; return 1; }
+        if (!fresh) e->prot = 0;   // (protected just now: the copy below reads it after the stamp, so the stamp holds for it)
+    }
     uint8_t *d = ar_alloc(al, b, off); if (!d) return 0;
     memcpy(d, src, n); if (al > n) memset(d + n, 0, al - n);
     g_ucopy_miss++; g_ucopy_bytes += n;
     if (!C) return 1;
     if (e->cap < n) { free(e->shadow); e->shadow = malloc(n); e->cap = e->shadow ? n : 0; }
-    if (e->shadow) { memcpy(e->shadow, src, n); g_ucopy_shadow += n; e->src = src; e->n = n; e->seq = C->seq; e->b = *b; e->off = *off; } else e->src = NULL;
+    if (e->shadow) { memcpy(e->shadow, src, n); g_ucopy_shadow += n; if (e->src != src || e->n != n) { e->span = NULL; e->prot = 0; e->nost = 0; } e->src = src; e->n = n; e->seq = C->seq; e->b = *b; e->off = *off; } else e->src = NULL;
     return 1;
 }
 #include "gfx_vk_sbcopy.inc"   // read-only storage buffers outside placed pools: a chunk's copy bound again while the dirty tracker shows its pages unwritten
@@ -3262,6 +3305,26 @@ static void sr_put(sr_ent *e, VkDescriptorSetLayout l, VkDescriptorSet set) {   
 // The set of shader s's stage for the draw being made into *pset, and the offsets of its dynamic uniform buffers into dyn (s->ndyn of them, by binding): a set written with
 // the same descriptors in this recording (sr_find), else one from the chunk (ds_get; tf: of dsl_tf) written here. dseq: the chunk recorded when the draw's first stage began
 // (C->seq after cur()): nothing is written or taken once another is recorded (ds_moved), and the caller tells that 0 from another failure by ds_moved
+static int ubf_get(const vshader *s, int i, size_t n, VkBuffer *b, VkDeviceSize *o, int *found);   // below, with draw_view
+// A graphics stage's c0 bank (bank_c0: its storage buffer table, the base instance and the largest point size, 2 KB) was built and compared with the chunk's last copy (ucopy)
+// for every stage of every draw, though it changes only with the stage's storage buffer bindings, its table's place and the base instance: about 5,000 banks a frame in Ocarina
+// of Time. A stage whose inputs are those of the bank it copied last in this chunk binds that copy again. Compute's bank is built every time (it holds the group counts,
+// which an indirect dispatch's GPU copy writes into it). DM_VK_C0_MEMO=0 (env.txt): built and compared every time, as before
+static int c0_memo_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_C0_MEMO"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_C0_MEMO=0: every stage builds its c0 bank"); } return v; }
+typedef struct { uint64_t seq; uint32_t base, binst; size_t n; uint64_t sb[16][2]; VkBuffer b; VkDeviceSize off; uint8_t shadow[0x800]; } c0m_t;   // shadow: DM_VK_C0_CHECK's
+static c0m_t g_c0m[5]; static uint64_t g_c0m_hit, g_c0m_miss, g_c0m_checked, g_c0m_bad;
+// DM_VK_C0_CHECK=1 (env.txt; a diagnostic): a bank bound again is built anyway and compared with the bytes of the copy it binds; one that differs is counted, logged (the first 8) and copied
+static int c0_check(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_C0_CHECK"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_C0_CHECK=1: c0 banks bound again are built and compared too"); } return v; }
+static int c0m_same(const c0m_t *m, int nst, uint32_t base_inst, size_t n) {
+    if (!C || m->seq != C->seq || m->n != n || m->base != c_bases[nst] || m->binst != base_inst) return 0;
+    for (int r = 0; r < 16; r++) if (m->sb[r][0] != D.ssbo[nst][r].addr || m->sb[r][1] != D.ssbo[nst][r].size) return 0;
+    return 1;
+}
+static void c0m_note(c0m_t *m, int nst, uint32_t base_inst, size_t n, VkBuffer b, VkDeviceSize off, const uint8_t *bank) {
+    if (c0_check()) memcpy(m->shadow, bank, n);
+    m->seq = C ? C->seq : 0; m->base = c_bases[nst]; m->binst = base_inst; m->n = n; m->b = b; m->off = off;
+    for (int r = 0; r < 16; r++) { m->sb[r][0] = D.ssbo[nst][r].addr; m->sb[r][1] = D.ssbo[nst][r].size; }
+}
 static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, const prog_t *pr, int prog_stage, uint32_t base_inst, uint64_t dseq) {
     g_alias_key = s->key;
     int bcs = s->stage == SH_CS && bc_on(); if (bcs) { g_bc_dn = 0; g_bc_desc[0] = 0; }   // the bindings text of a dispatch's breadcrumb (gfx_vk_bc.inc)
@@ -3285,7 +3348,17 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         g_sup_written++;
     } else g_sup_skipped++;
     for (int i = 0; i < s->ncb; i++) {
-        int slot = s->cb[i].slot; size_t n = 16; const void *src = NULL; uint8_t bank[0xA00];
+        int slot = s->cb[i].slot, uf = 0; size_t n = 16; const void *src = NULL; uint8_t bank[0xA00];
+        int c0m = slot == 0 && nst < 5 && c0_memo_on() && !bcs && !ext_check();   // (c0m_t: the graphics stages')
+        if (c0m) { size_t n0 = s->cb[i].ext && 0x800 > s->cb[i].ext ? s->cb[i].ext : 0x800;
+            int same = c0m_same(&g_c0m[nst], nst, base_inst, n0);
+            if (same && c0_check()) { bank_c0(nst, bank, base_inst); g_c0m_checked++;
+                if (memcmp(bank, g_c0m[nst].shadow, n0)) { same = 0; if (g_c0m_bad++ < 8) LOG("[RED] [vk] DM_VK_C0_CHECK: stage %d's c0 bank (%zu bytes, shader %s) differs from the copy it would bind again", nst, n0, s->key); } }
+            if (same) { b = g_c0m[nst].b; off = g_c0m[nst].off; g_c0m_hit++;
+                int dy = s->cbdyn[i] != 0xff; if (dy) dyn[s->cbdyn[i]] = (uint32_t)off;
+                bi[nbi] = (VkDescriptorBufferInfo){b, dy ? 0 : off, (n0 + 15) & ~(size_t)15};
+                wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)s->cb[i].binding, 0, 1, dy ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, NULL, &bi[nbi++], NULL};
+                continue; } }
         if (slot == 0) { bank_c0(nst, bank, base_inst); src = bank; n = 0x800; }
         else if (slot == 2) { if (!c2) bank_c2(nst, bank); src = c2 ? c2 : bank; n = C2_SIZE; }
         else if (slot == DMSH_PUSH_BANK) { src = D.push[nst == 5]; n = DMSH_PUSH_SIZE; }   // NVN2 push constants: compute's block or the graphics stages' (OP_PUSH_CONST)   // c2 read as a constant buffer: 81 of Breath of the Wild's 19,592 shaders, none of a measured frame's
@@ -3316,9 +3389,11 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
             if (src) memcpy(d, src, n); else memset(d, 0, n);
             memset(d + n, 0, q - n); for (; q + 4 <= aa; q += 4) memcpy(d + q, &nan, 4);
             al = aa; g_ext_checked++;
-        } else if (slot >= 3 && slot - 3 < 16 && src && src == (const void *)(uintptr_t)D.ubo[nst][slot - 3].addr && ub_fwd(D.ubo[nst][slot - 3].addr, n, &b, &off)) g_buf_fwd[0]++;   // a pending write read on the GPU (wb_promote, buf_fwd)
-        else if (!ucopy(src, n, al, &b, &off)) return 0;
+        } else if (slot >= 3 && slot - 3 < 16 && src && src == (const void *)(uintptr_t)D.ubo[nst][slot - 3].addr && (ubf_get(s, i, n, &b, &off, &uf) ? uf : ub_fwd(D.ubo[nst][slot - 3].addr, n, &b, &off))) g_buf_fwd[0]++;   // a pending write read on the GPU (wb_promote, buf_fwd; draw_view's answer: ubf_get)
+        else if (slot >= 3 && slot - 3 < 16 && src && src == (const void *)(uintptr_t)D.ubo[nst][slot - 3].addr && ub_inplace(D.ubo[nst][slot - 3].addr, n, &b, &off, &al)) {}   // in its placed pool (gfx_vk_gmem_inplace.inc)
+        else if ((g_uc_guest = slot == 1 || (slot >= 3 && slot - 3 < 16)), !ucopy(src, n, al, &b, &off)) return 0;
         if (slot == 0 && nst == 5) { g_c0_b = b; g_c0_off = off; }   // (vk_dispatch: an indirect dispatch's counts copied here on the GPU)
+        if (c0m) { c0m_note(&g_c0m[nst], nst, base_inst, n, b, off, bank); g_c0m_miss++; }
         int dy = s->cbdyn[i] != 0xff; if (dy) dyn[s->cbdyn[i]] = (uint32_t)off;   // a dynamic one's offset goes to the bind, its descriptor at 0
         bi[nbi] = (VkDescriptorBufferInfo){b, dy ? 0 : off, al};
         wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)s->cb[i].binding, 0, 1, dy ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, NULL, &bi[nbi++], NULL};
@@ -3497,6 +3572,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
 // stream's bytes, no queued copy writes them, and every attribute of the stream is read as it is (a converted one needs the bytes on the CPU)
 // chunk c's newest write to [lo, hi): 1 when one decides (*res: whether it can be read on the GPU, *b / *o where), 0 when the chunk does not write the range
 static int fwd_hit(chunk *c, int nwb, uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o, int *res) {
+    if (wbf_skip(c, lo, hi)) return 0;   // a chunk in flight whose write summary rules the range out (gfx_vk.c, wb_filter.h)
     for (int k = 0; k < c->ncop; k++) if (c->cop[k].dst < hi && lo < c->cop[k].dst + c->cop[k].n) { *res = 0; return 1; }
     for (int i = nwb - 1; i >= 0; i--) { const wb_t *w = &c->wb[i]; if (!wb_hits(w, lo, hi)) continue;
         int ipr = !w->fwd && w->inpl && g_rd_cs && ip_read_on();   // a draw's in-place write, read by a dispatch
@@ -3516,7 +3592,7 @@ static int fwd_find(uintptr_t lo, uintptr_t hi, VkBuffer *b, VkDeviceSize *o) {
     if (!C || hi <= lo) return 0;
     int n = g_fwd_nwb >= 0 && g_fwd_nwb <= C->nwb ? g_fwd_nwb : C->nwb, r = 0;
     if (fwd_hit(C, n, lo, hi, b, o, &r)) return r;
-    if (!atomic_load(&g_inflight_wb) && !atomic_load(&g_inflight_cop)) return 0;
+    if ((!atomic_load(&g_inflight_wb) && !atomic_load(&g_inflight_cop)) || wbf_fly_clear(lo, hi)) return 0;   // no chunk in flight writes the range (gfx_vk.c, wb_filter.h)
     pthread_mutex_lock(&g_cmu);
     for (int f = g_fifo_n - 1; f >= 0; f--) { chunk *w = g_fifo[f]; int nw = w->nwb;
         if (fwd_hit(w, nw, lo, hi, b, o, &r)) { if (r && w->hold < C->seq) w->hold = C->seq; break; } }
@@ -3818,12 +3894,27 @@ static void dep_log(vshader *const sh[4], const rd_rng *r, const char *kd, const
             (unsigned long)(r[q].hi - r[q].lo), w, C->nwb, b->ofw ? "order-free copy (storage buffer)" : b->inpl ? "in place in a placed pool (storage buffer)" : b->st >= 0 ? "staging (texture copy)" : b->snap ? "arena with snapshot (storage buffer)" : "arena (feedback / buffer image)", b->fwd ? " of a dispatch" : "",
             (void *)b->dst, b->rows, b->row_bytes); }
 }
+// draw_view's answers for the draw's uniform buffers read on the GPU (ub_fwd), kept for its stage_set: the same lookup was made twice a binding, about 13,600 bindings a
+// frame in Ocarina of Time's Kokiri Forest. An answer holds while the chunk is the one draw_view looked in (a sync since closed it) and the write-backs it looked at are the
+// same (g_fwd_nwb); a lookup that found a write in a chunk in flight held that chunk (fwd_find). DM_VK_UBF_MEMO=0 (env.txt): stage_set looks again, as before
+static int ubf_memo_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_UBF_MEMO"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_UBF_MEMO=0: stage_set looks its uniform buffers up again"); } return v; }
+typedef struct { const vshader *s; uint64_t seq; int nwb; int8_t r[CB_MAX]; size_t n[CB_MAX]; VkBuffer b[CB_MAX]; VkDeviceSize o[CB_MAX]; } ubf_memo_t;
+static ubf_memo_t g_ubf[4]; static uint64_t g_ubf_hit;
+static int ubf_get(const vshader *s, int i, size_t n, VkBuffer *b, VkDeviceSize *o, int *found) {   // → 1 with *found draw_view's answer for binding i of s
+    if (!ubf_memo_on() || !C) return 0;
+    for (int k = 0; k < 4; k++) { const ubf_memo_t *m = &g_ubf[k];
+        if (m->s != s) continue;
+        if (m->seq != C->seq || m->nwb != g_fwd_nwb || m->r[i] < 0 || m->n[i] != n) return 0;
+        *found = m->r[i]; if (*found) { *b = m->b[i]; *o = m->o[i]; } g_ubf_hit++; return 1; }
+    return 0;
+}
 // What a draw copies from guest memory lands first when an earlier draw, dispatch or copy wrote it and that write is still pending (gfx_vk.c ranges_view):
 // the vertex streams, the index buffer, each stage's uniform slots and storage buffers, and its buffer textures and images. Called before anything of the draw is recorded.
 // A buffer texture's memory is the texture pool entry its handle names, looked up as stage_set's tbuf_view does. Synced on anything pending instead (cpu_view), it made every
 // such draw after one GPU write-back a round trip: Final Fantasy Resonance's opening reads buffer textures in most draws, ~100 syncs a frame, 15.5 fps on the Odin 2 and 10 on the Pad 3
 static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   // vtx: the vertex streams too (a draw; 0 for a dispatch)
     g_did++;   // (wb_live.h: the accesses of one draw or dispatch)
+    for (int k = 0; k < 4; k++) g_ubf[k].s = NULL;
     if (vk_safe()) { g_fwd_nwb = 0; cpu_view(); return; }
     if (!C && fwd_open_on()) cur();   // the chunk the draw is recorded in, before the lookups of pending writes in the chunks in flight (fwd_open_on)
     if (gm_view(sh)) { g_fwd_nwb = 0; return; }   // raw global memory reads anything at the GPU's time: with DM_VK_RAW_GMEM_SYNC=1 every pending write-back landed (gfx_vk_gmem.inc)
@@ -3844,9 +3935,11 @@ static void draw_view(vshader *const sh[4], const p_draw_idx *di, int vtx) {   /
     for (int k = 0; k < 4; k++) { const vshader *s = sh[k]; if (!s) continue; int nst = nvn_stage_of(s->stage); KS = (signed char)k;
         if (!tbuf_range_on()) { for (int i = 0; i < s->ntx; i++) if ((s->tx[i].type & 0xff) == 2) { g_vs = 5; cpu_view(); return; }
                                 for (int i = 0; i < s->nim; i++) if ((s->im[i].type & 0xff) == 2) { g_vs = 6; cpu_view(); return; } }
+        ubf_memo_t *um = &g_ubf[k]; um->s = s; um->seq = C ? C->seq : 0; um->nwb = g_fwd_nwb; memset(um->r, -1, sizeof um->r);
         K = 'u'; for (int i = 0; i < s->ncb; i++) { int sl = s->cb[i].slot; if (sl < 3 || sl - 3 >= 16) continue; const p_bind_buf *u = &D.ubo[nst][sl - 3];
             size_t un = u->size > 0x10000 ? 0x10000 : (size_t)u->size; if (s->cb[i].ext && un > s->cb[i].ext) un = s->cb[i].ext;   // what stage_set binds (ub_fwd there)
-            VkBuffer ub_; VkDeviceSize uo_; if (u->addr && un && !ext_check()) { wb_promote((uintptr_t)u->addr, (uintptr_t)(u->addr + un)); if (ub_fwd(u->addr, un, &ub_, &uo_)) continue; }
+            VkBuffer ub_; VkDeviceSize uo_; if (u->addr && un && !ext_check()) { wb_promote((uintptr_t)u->addr, (uintptr_t)(u->addr + un));
+                int f = ub_fwd(u->addr, un, &ub_, &uo_); um->r[i] = (int8_t)f; um->n[i] = un; if (f) { um->b[i] = ub_; um->o[i] = uo_; continue; } }
             RNG(u->addr, u->size); }
         K = 's'; for (int i = 0; i < s->nsb; i++) { const rb_sbuf *sb = &s->sb[i]; uint32_t off = 4u * (uint32_t)sb->cb_off, base = (uint32_t)c_bases[nst] << 4;
             if (sb->cb_slot == 0 && nst == 5 && off >= 0x210 && off < 0x310 && !((off - 0x210) % 16)) { const p_bind_buf *u = &D.ubo[5][(off - 0x210) / 16]; int sw = sb_w(s, sb); if (!(sw && ofw_ok(sb, cs, u->addr, u->size))) FWD(sb_fwd, u->addr, u->size, sw); }   // compute: its uniform buffer table (stage_set); an order-free write needs no sync (ofw_bind)
