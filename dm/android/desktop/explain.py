@@ -36,7 +36,8 @@ def esc(s): return str(s).replace('&', '&amp;').replace('<', '&lt;').replace('>'
 # ("extract v393216") is matched by its first word
 STAGES = {'build nx_extract': 'Preparing the game reader', 'extract': 'Reading the game files', 'unpack': 'Reading the game files', 'check': 'Reading the game files',
           'decompress NSZ': 'Unpacking compressed game files', 'rewrite': "Adapting the game's code for Android", 'shader split': "Finding the game's shaders",
-          'shaders for Vulkan': "Translating shaders for your phone's GPU", 'Android host': "Building the game's engine", 'APK': 'Packing the DroidPlay app',
+          'shaders for Vulkan': "Translating shaders for your phone's GPU", 'Android host': "Building the game's engine", 'game hosts': "Building each game's engine again from this DroidPlay",
+          'APK': 'Packing the DroidPlay app',
           'install and copy to the phone': 'Copying the game to the phone', 'install': 'Installing DroidPlay on the phone',
           'copy the shaders to the phone': 'Copying the shaders to the phone', 'game app': "Packing the game's own app", 'move the one-game install': 'Moving the old install',
           'JDK 21': 'Downloading Java', '.NET SDK 10': 'Downloading .NET', 'Android command-line tools': 'Downloading the Android tools',

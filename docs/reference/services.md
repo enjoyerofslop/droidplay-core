@@ -449,6 +449,13 @@ Most service calls can be found before they crash, before the first boot or the 
 - **Fix (resolved):** the handles no longer wait for a routed output: with rumble on and an output sink installed (`dm_haptics_enabled`), a connected npad style gets its two handles; `vib_send` checks for an output at each send (`hle_hid.c`). No sink, rumble off or a disconnected npad still get none, and `IsVibrationPermitted` still follows the routed outputs. `DM_RUMBLE_LOG=1` logs the handle requests and, once a second, the values sent, those with no routed output and the peak amplitude. Each input value is counted separately, including mixed batches; a mutex protects the diagnostic totals across game threads. `t_hid` covers cached startup handles delivering a nonzero value after routing, mixed-batch diagnostics and concurrent sends; `t_hid_tsan` checks those sends for data races.
 - **Found on:** [Unicorn Overlord](../../dm/games/010069401ADB8000/README.md) (the Asian release, `010054B01AD92000`), in the log only: the game has no rumble of its own (it sends amplitude 0 throughout), so nothing could be felt before or after. Not yet checked on a game that rumbles.
 
+### A held hat D-pad let go by a button's key repeat (Android)
+
+- **Symptom:** Android only, with a controller whose D-pad is a hat, such as the AYN Thor's built-in controls. A direction held together with A or B registers for a moment, then stops, as if the D-pad had been let go. A stick works.
+- **Cause:** Android sends a hat's directions as axis values (`AXIS_HAT_X` / `AXIS_HAT_Y`) in motion events, and buttons as key events. `front_android.c` kept the hat's directions in `g_hat`, but a key event's pad state was `g_pad_btn` alone. Holding A starts Android's key repeat, a key-down every ~50 ms after ~400 ms, and each repeat sent the game a state with no direction. A held hat sends no new motion event, so the direction stayed released. Analog triggers past half were lost the same way, and a stick's motion event dropped a D-pad that sends keys.
+- **Fix:** `g_hat` holds every button that comes as an axis (hat directions and analog triggers), and a key event sends `g_pad_btn | g_hat`. A motion event starts from `g_pad_btn` whole, so a key D-pad stays held while a stick moves.
+- **Found on:** Picross S+ on an AYN Thor Pro (droidplay-core#527).
+
 ### Controller haptic engines without advanced players
 
 - **Symptom:** a controller (an Xbox Wireless Controller, a GameSir Super Nova, a GameSir Cyclone) never vibrates in a game on the Mac or the iPhone, though iOS Settings' Identify buzzes it; the log repeats `[RED] haptics: controller left handle create player: Couldn’t communicate with a helper application. (NSCocoaErrorDomain 4097)`. The engine itself starts.

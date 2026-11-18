@@ -117,6 +117,7 @@ void mtl_present_wait(uint64_t ticket) { (void)ticket; }
 void mtl_present_flush(void) {}
 double mtl_presented_time(uint64_t n) { (void)n; return 0; }
 int mtl_display_hz(void) { return 60; }
+void mtl_link_mode_set(int mode) { (void)mode; }   // the Mac's display-link pacing for 120 fps profiles (hle_nvn.c high_cap_tick); Android paces presents itself
 int mtl_has_window(void) { int front_has_window(void); return front_has_window(); }
 int mtl_fps_target(void) { return 60; }
 int mtl_link_active(void) { return 0; }
