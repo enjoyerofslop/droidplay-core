@@ -26,6 +26,7 @@
 #include "gfx_vk.h"
 #include "game_profile.h"   // DM_GAME_PAD_LAYOUT
 #include "hle_haptics.h"
+#include "app_version.h"
 
 int main(int argc, char **argv);   // main.c
 void dm_focus_set(int st);
@@ -674,6 +675,26 @@ static void gamepad_start(void) {
     (*e)->CallStaticVoidMethod(e, g_gp, (*e)->GetStaticMethodID(e, g_gp, "start", "(Landroid/app/Activity;)V"), act);
     if ((*e)->ExceptionCheck(e)) { (*e)->ExceptionDescribe(e); (*e)->ExceptionClear(e); }
 }
+// The app's version and this game's host's on one line (app_version.h): whether the game runs the runtime the app came with, or a host an older update packed
+static void log_app_version(void) {
+    JNIEnv *e = g_env; jobject act = g_app->activity->clazz; char app[64] = "";
+#define JOK(x) ((x) && !(*e)->ExceptionCheck(e))   // each step only after the one before it gave something and left no exception pending
+    jclass ac = (*e)->GetObjectClass(e, act);
+    jmethodID m = (*e)->GetMethodID(e, ac, "getPackageManager", "()Landroid/content/pm/PackageManager;");
+    jobject pm = JOK(m) ? (*e)->CallObjectMethod(e, act, m) : NULL;
+    m = JOK(pm) ? (*e)->GetMethodID(e, ac, "getPackageName", "()Ljava/lang/String;") : NULL;
+    jobject pn = JOK(m) ? (*e)->CallObjectMethod(e, act, m) : NULL;
+    m = JOK(pn) ? (*e)->GetMethodID(e, (*e)->GetObjectClass(e, pm), "getPackageInfo", "(Ljava/lang/String;I)Landroid/content/pm/PackageInfo;") : NULL;
+    jobject pi = JOK(m) ? (*e)->CallObjectMethod(e, pm, m, pn, 0) : NULL;
+    jfieldID f = JOK(pi) ? (*e)->GetFieldID(e, (*e)->GetObjectClass(e, pi), "versionName", "Ljava/lang/String;") : NULL;
+    jstring vn = JOK(f) ? (jstring)(*e)->GetObjectField(e, pi, f) : NULL;
+#undef JOK
+    if ((*e)->ExceptionCheck(e)) { (*e)->ExceptionClear(e); vn = NULL; }
+    if (vn) { const char *u = (*e)->GetStringUTFChars(e, vn, NULL); if (u) { snprintf(app, sizeof app, "%s", u); (*e)->ReleaseStringUTFChars(e, vn, u); } }
+    const char *dm_build_commit(void); const char *host = dm_build_commit(); int same = host_matches_app(host, app);
+    LOG("versions: the app %s, this game's host %s%s", *app ? app : "not recorded", host, same > 0 ? ": one build" : same < 0 ? "" :
+        ": a host built by another DroidPlay than the app, so the app's runtime fixes reach this game once its host is built again (Update games in DroidPlay for Windows and Linux)");
+}
 static void gamepad_reset(void) {   // the app went away: nothing stays held
     if (g_gp) { JNIEnv *e = g_env; (*e)->CallStaticVoidMethod(e, g_gp, (*e)->GetStaticMethodID(e, g_gp, "reset_", "()V")); if ((*e)->ExceptionCheck(e)) (*e)->ExceptionClear(e); }
     g_pad_btn = 0; memset(g_axis, 0, sizeof g_axis); pad_now(0);
@@ -833,6 +854,7 @@ void android_main(struct android_app *app) {
     const char *job = getenv("DM_OODLE_JOB");
     if (job && *job) { g_job = g_started = 1; LOG("Oodle job: started without waiting for a window"); start_host(); }
     (*app->activity->vm)->AttachCurrentThread(app->activity->vm, &g_env, NULL);
+    log_app_version();
     app->onAppCmd = on_cmd; app->onInputEvent = on_input;
     // The screen stays on while the game's window is up, as the launcher's does: Android counts only its own input events as activity, so a cutscene, a game
     // played with a controller the system does not see, or a run driven by DM_KEYS (input the host feeds the game itself) let it turn off at the screen timeout

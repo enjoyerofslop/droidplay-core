@@ -667,7 +667,9 @@ def make_game_app(sdk, g, game, patched, spv, font, aoc, defaults, so, meta, wor
     bi.PROG.set(step='packing the APK' + (' with the RomFS inside' if inside else ''))
     bi.run([sys.executable, REPO / 'dm/android/tools/build_apk.py', '--sdk', sdk, '--game-app', g.id, '--so', so, '--game-dir', stage,
             *[x for f in driver_libs(Path(so).parent) for x in ('--lib', f)], *(['--romfs', str(rom)] if inside else []), '--keystore', KEYSTORE, '-o', apk, '--label', meta.get('name') or g.id,
-            *(['--icon', icon] if icon.is_file() else [])], logs / 'android_game_apk.log', env=env)
+            *(['--icon', icon] if icon.is_file() else []),
+            # its version, as the launcher app's: the host logs it beside its own (front_android.c app_version.h), the same when one build packed both
+            *(['--version-name', v] if (v := core_version()) else [])], logs / 'android_game_apk.log', env=env)
     Path(f'{apk}.idsig').unlink(missing_ok=True)   # apksigner's v4 signature, for adb's incremental installs only: clutter beside an app to share
     if xapk:
         out = out_dir / f'{base}.xapk'; obb = f'Android/obb/{pkg}/main.1.{pkg}.obb'
