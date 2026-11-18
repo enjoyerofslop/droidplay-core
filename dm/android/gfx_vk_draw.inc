@@ -3258,6 +3258,25 @@ static void sr_put(sr_ent *e, VkDescriptorSetLayout l, VkDescriptorSet set) {   
 // the same descriptors in this recording (sr_find), else one from the chunk (ds_get; tf: of dsl_tf) written here. dseq: the chunk recorded when the draw's first stage began
 // (C->seq after cur()): nothing is written or taken once another is recorded (ds_moved), and the caller tells that 0 from another failure by ds_moved
 static int ubf_get(const vshader *s, int i, size_t n, VkBuffer *b, VkDeviceSize *o, int *found);   // below, with draw_view
+// A graphics stage's c0 bank (bank_c0: its storage buffer table, the base instance and the largest point size, 2 KB) was built and compared with the chunk's last copy (ucopy)
+// for every stage of every draw, though it changes only with the stage's storage buffer bindings, its table's place and the base instance: about 5,000 banks a frame in Ocarina
+// of Time. A stage whose inputs are those of the bank it copied last in this chunk binds that copy again. Compute's bank is built every time (it holds the group counts,
+// which an indirect dispatch's GPU copy writes into it). DM_VK_C0_MEMO=0 (env.txt): built and compared every time, as before
+static int c0_memo_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_C0_MEMO"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_C0_MEMO=0: every stage builds its c0 bank"); } return v; }
+typedef struct { uint64_t seq; uint32_t base, binst; size_t n; uint64_t sb[16][2]; VkBuffer b; VkDeviceSize off; uint8_t shadow[0x800]; } c0m_t;   // shadow: DM_VK_C0_CHECK's
+static c0m_t g_c0m[5]; static uint64_t g_c0m_hit, g_c0m_miss, g_c0m_checked, g_c0m_bad;
+// DM_VK_C0_CHECK=1 (env.txt; a diagnostic): a bank bound again is built anyway and compared with the bytes of the copy it binds; one that differs is counted, logged (the first 8) and copied
+static int c0_check(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_C0_CHECK"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_C0_CHECK=1: c0 banks bound again are built and compared too"); } return v; }
+static int c0m_same(const c0m_t *m, int nst, uint32_t base_inst, size_t n) {
+    if (!C || m->seq != C->seq || m->n != n || m->base != c_bases[nst] || m->binst != base_inst) return 0;
+    for (int r = 0; r < 16; r++) if (m->sb[r][0] != D.ssbo[nst][r].addr || m->sb[r][1] != D.ssbo[nst][r].size) return 0;
+    return 1;
+}
+static void c0m_note(c0m_t *m, int nst, uint32_t base_inst, size_t n, VkBuffer b, VkDeviceSize off, const uint8_t *bank) {
+    if (c0_check()) memcpy(m->shadow, bank, n);
+    m->seq = C ? C->seq : 0; m->base = c_bases[nst]; m->binst = base_inst; m->n = n; m->b = b; m->off = off;
+    for (int r = 0; r < 16; r++) { m->sb[r][0] = D.ssbo[nst][r].addr; m->sb[r][1] = D.ssbo[nst][r].size; }
+}
 static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, const prog_t *pr, int prog_stage, uint32_t base_inst, uint64_t dseq) {
     g_alias_key = s->key;
     int bcs = s->stage == SH_CS && bc_on(); if (bcs) { g_bc_dn = 0; g_bc_desc[0] = 0; }   // the bindings text of a dispatch's breadcrumb (gfx_vk_bc.inc)
@@ -3282,6 +3301,16 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
     } else g_sup_skipped++;
     for (int i = 0; i < s->ncb; i++) {
         int slot = s->cb[i].slot, uf = 0; size_t n = 16; const void *src = NULL; uint8_t bank[0xA00];
+        int c0m = slot == 0 && nst < 5 && c0_memo_on() && !bcs && !ext_check();   // (c0m_t: the graphics stages')
+        if (c0m) { size_t n0 = s->cb[i].ext && 0x800 > s->cb[i].ext ? s->cb[i].ext : 0x800;
+            int same = c0m_same(&g_c0m[nst], nst, base_inst, n0);
+            if (same && c0_check()) { bank_c0(nst, bank, base_inst); g_c0m_checked++;
+                if (memcmp(bank, g_c0m[nst].shadow, n0)) { same = 0; if (g_c0m_bad++ < 8) LOG("[RED] [vk] DM_VK_C0_CHECK: stage %d's c0 bank (%zu bytes, shader %s) differs from the copy it would bind again", nst, n0, s->key); } }
+            if (same) { b = g_c0m[nst].b; off = g_c0m[nst].off; g_c0m_hit++;
+                int dy = s->cbdyn[i] != 0xff; if (dy) dyn[s->cbdyn[i]] = (uint32_t)off;
+                bi[nbi] = (VkDescriptorBufferInfo){b, dy ? 0 : off, (n0 + 15) & ~(size_t)15};
+                wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)s->cb[i].binding, 0, 1, dy ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, NULL, &bi[nbi++], NULL};
+                continue; } }
         if (slot == 0) { bank_c0(nst, bank, base_inst); src = bank; n = 0x800; }
         else if (slot == 2) { if (!c2) bank_c2(nst, bank); src = c2 ? c2 : bank; n = C2_SIZE; }
         else if (slot == DMSH_PUSH_BANK) { src = D.push[nst == 5]; n = DMSH_PUSH_SIZE; }   // NVN2 push constants: compute's block or the graphics stages' (OP_PUSH_CONST)   // c2 read as a constant buffer: 81 of Breath of the Wild's 19,592 shaders, none of a measured frame's
@@ -3316,6 +3345,7 @@ static int stage_set(vshader *s, int tf, VkDescriptorSet *pset, uint32_t *dyn, c
         else if (slot >= 3 && slot - 3 < 16 && src && src == (const void *)(uintptr_t)D.ubo[nst][slot - 3].addr && ub_inplace(D.ubo[nst][slot - 3].addr, n, &b, &off, &al)) {}   // in its placed pool (gfx_vk_gmem_inplace.inc)
         else if ((g_uc_guest = slot == 1 || (slot >= 3 && slot - 3 < 16)), !ucopy(src, n, al, &b, &off)) return 0;
         if (slot == 0 && nst == 5) { g_c0_b = b; g_c0_off = off; }   // (vk_dispatch: an indirect dispatch's counts copied here on the GPU)
+        if (c0m) { c0m_note(&g_c0m[nst], nst, base_inst, n, b, off, bank); g_c0m_miss++; }
         int dy = s->cbdyn[i] != 0xff; if (dy) dyn[s->cbdyn[i]] = (uint32_t)off;   // a dynamic one's offset goes to the bind, its descriptor at 0
         bi[nbi] = (VkDescriptorBufferInfo){b, dy ? 0 : off, al};
         wr[nw++] = (VkWriteDescriptorSet){VK_STRUCTURE_TYPE_WRITE_DESCRIPTOR_SET, NULL, set, (uint32_t)s->cb[i].binding, 0, 1, dy ? VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER_DYNAMIC : VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER, NULL, &bi[nbi++], NULL};
