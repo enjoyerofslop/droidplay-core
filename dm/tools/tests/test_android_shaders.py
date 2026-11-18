@@ -488,39 +488,54 @@ class RunTimeShaders(unittest.TestCase):
 
 
 
-class OodleCacheStamp(unittest.TestCase):
-    """A split produced before DM_OODLE_CACHE was complete records unreadable files in pkg.key and re-splits when the cache changes; complete splits write the stamp without deleting."""
+class SplitProfile(Profile):   # the parts of game.py's profile that split_shaders reads
+    def modules_in(self, d): return []
+    def get(self, name, default=''): return default
+
+
+class SplitOodleCache(unittest.TestCase):
+    """split_shaders (build_ipa_from_nsp.py) fingerprints DM_OODLE_CACHE with its inputs: a split made before the cache was complete (a --no-push build, then one with the phone) runs
+    again by itself, and a split the unchanged cache belongs to is reused as it is. The split here is a mocked run: it writes the tables and package the stage expects, and the log
+    the stage reads its shader count from"""
     def setUp(self):
         self.tmp = Path(tempfile.mkdtemp()); self.addCleanup(shutil.rmtree, self.tmp, True)
         self.work = self.tmp / 'work'; self.logs = self.work / 'logs'; self.logs.mkdir(parents=True)
         self.cache = self.tmp / 'oodle_cache'; self.cache.mkdir()
-        (self.cache / '1.idx').write_text('abc\t10\t0\n')
-        self.provisional = Profile(self.tmp / 'profile' / GID)
-        for p in (mock.patch.object(ba.bi, 'run', side_effect=lambda cmd, log, **k: (self.work / 'spv').mkdir(exist_ok=True)),
-                  mock.patch.object(ba.bi, 'PROG', mock.MagicMock()),
-                  mock.patch.object(ba.bi.rfs, 'source', side_effect=lambda p: p),
-                  mock.patch.object(ba, 'say')):
+        self.roms = self.tmp / 'v0'; (self.roms / 'shaders').mkdir(parents=True)
+        self.main = self.tmp / 'v0main'; self.main.write_bytes(b'main')
+        self.provisional = SplitProfile(self.tmp / 'profile' / GID)
+        self.provisional.dir.mkdir(parents=True)   # the split copies its tables beside a provisional profile's
+        self.split_ran = 0
+        def run(cmd, log, env=None, on_line=None):   # shader_split.py: its tables and package, and the count of shaders the stage reads from its log
+            self.split_ran += 1
+            for c in map(Path, cmd):
+                if c.name.endswith('.tsv'): c.parent.mkdir(parents=True, exist_ok=True); c.write_text('name\tvalue\n')
+                elif c.name == 'pkg': c.mkdir(parents=True, exist_ok=True); (c / 'a.shader').write_bytes(b'x')
+            Path(log).write_text('shaders: 2 (3 files)\n')
+        for p in (mock.patch.object(ba.bi, 'run', side_effect=run), mock.patch.object(ba.bi, 'PROG', mock.MagicMock()),
+                  mock.patch.object(ba.bi, 'say'), mock.patch.object(ba, 'say')):
             p.start(); self.addCleanup(p.stop)
 
-    def run_build(self):
-        with mock.patch.object(ba.bi, 'split_shaders') as sp:
-            ba.build_shaders(['v0'], {'v0': self.tmp / 'v0'}, self.work, self.logs, {'DM_OODLE_CACHE': str(self.cache)}, self.provisional)
-        return sp
+    def split(self):
+        return ba.bi.split_shaders(sys.executable, REPO, [self.roms], [self.main], self.work / 'shader' / 'pkg',
+                                   {'DM_OODLE_CACHE': str(self.cache)}, self.logs, self.provisional, provisional=True)
 
-    def test_re_splits_when_existing_split_had_unreadable_files(self):
-        sh = self.work / 'shader'; (sh / 'pkg').mkdir(parents=True); (sh / 'pkg.key').write_text('deadbeef\n32 shaders, 44409 file(s) unreadable\n')
-        spv = self.work / 'spv'; spv.mkdir(); (spv / 'old.spv').write_bytes(b'old')
-        sp = self.run_build()
-        sp.assert_called_once()
-        self.assertFalse((spv / 'old.spv').exists())
-        self.assertTrue((sh / 'oodle_cache.stamp').is_file())
+    def test_a_split_the_unchanged_cache_belongs_to_is_reused(self):
+        self.split(); self.assertEqual(self.split_ran, 1)
+        self.split()
+        self.assertEqual(self.split_ran, 1)   # inputs unchanged: the split ran once
 
-    def test_keeps_complete_split_and_writes_stamp_without_deleting(self):
-        sh = self.work / 'shader'; (sh / 'pkg').mkdir(parents=True); (sh / 'pkg.key').write_text('deadbeef\n10,792 shaders\n')
-        spv = self.work / 'spv'; spv.mkdir(); (spv / 'keep.spv').write_bytes(b'keep')
-        self.run_build()
-        self.assertTrue((spv / 'keep.spv').exists())
-        self.assertTrue((sh / 'oodle_cache.stamp').is_file())
+    def test_a_cache_that_filled_in_after_the_split_runs_it_again(self):
+        self.split(); self.assertEqual(self.split_ran, 1)
+        (self.cache / '1.pack').write_bytes(b'decoded streams'); (self.cache / '1.idx').write_text('abc\t10\t0\n')
+        self.split()
+        self.assertEqual(self.split_ran, 2)   # the cache's contents are split inputs: the split ran again
+
+    def test_a_split_runs_without_a_cache_and_reuses_without_one(self):
+        def nocache():
+            return ba.bi.split_shaders(sys.executable, REPO, [self.roms], [self.main], self.work / 'shader' / 'pkg', {}, self.logs, self.provisional, provisional=True)
+        nocache(); self.assertEqual(self.split_ran, 1)
+        nocache(); self.assertEqual(self.split_ran, 1)   # the same, with no DM_OODLE_CACHE in the environment
 
 
 if __name__ == '__main__':

@@ -356,24 +356,6 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derive
     def promote(reason):   # the split calls it only after its strict DLC-only or additive-compute comparison passed, and only when derive was given
         assert derive is not None
         got['g'] = derive(reason); return got['g']
-    # A split produced before the phone's Oodle cache was complete records '<N> file(s) unreadable' in pkg.key;
-    # only re-split and re-translate when the existing split had unreadable files (or lacks a complete pkg.key).
-    stamp = sh / 'oodle_cache.stamp'; ident = ''
-    if env.get('DM_OODLE_CACHE'):
-        cd = Path(env['DM_OODLE_CACHE'])
-        try: ident = hashlib.sha256(repr(sorted((f.name, f.stat().st_size) for f in cd.iterdir() if f.is_file())).encode()).hexdigest()[:16]
-        except OSError: ident = ''
-        try: old_ident = stamp.read_text().strip()
-        except OSError: old_ident = ''
-        if ident and old_ident != ident:
-            pkg_note = (sh / 'pkg.key').read_text(errors='replace') if (sh / 'pkg.key').is_file() else ''
-            if (sh / 'pkg').is_dir() and (sh / 'pkg.key').is_file() and 'unreadable' not in pkg_note:
-                try: sh.mkdir(parents=True, exist_ok=True); stamp.write_text(ident)
-                except OSError: pass
-            else:
-                say('the shader split predates the phone\'s Oodle cache: splitting again')
-                bi.rmtree(sh); bi.rmtree(work / 'spv')
-        env['DM_OODLE_CACHE_ID'] = ident
     dd = (lambda: promote('the installed DLC shader content differs from the registered tables')) if derive and not own else None
     dc = (lambda: promote('the reader decoded additional compute kernels from this registered build')) if derive and not own else None
     try: bi.split_shaders(sys.executable, REPO, [bi.rfs.source(dirs[v]) for v in sv], [dirs[v] / 'ExeFS/main' for v in sv], sh / 'pkg', env, logs, g, own,   # its own stage (a DLC's shaders too)
@@ -389,9 +371,6 @@ def build_shaders(sv, dirs, work, logs, env, g, dlc_roms=(), derive=None, derive
             'then run this build again with --update-shaders (DroidPlay for Windows: Manage › Update shaders from the phone) to bring them in: '
             'docs/android.md, "Games that compile their shaders while they run"'); return None, g   # a provisional profile: shaders compiled at run time, captured later
     g = got.get('g', g)
-    if ident:
-        try: sh.mkdir(parents=True, exist_ok=True); stamp.write_text(ident)
-        except OSError: pass
     bi.PROG.stage('shaders for Vulkan', step='translating')
     out = work / 'spv'
     def counted(ln):   # spv_build.py's 'progress: <done>/<total>': the shaders left to translate in this run (droidplay-core#307, a translation of hours showed no count)

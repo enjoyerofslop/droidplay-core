@@ -2186,6 +2186,8 @@ def split_shaders(py, repo, roms, mains, pkg, env, logs, g, provisional=False, o
             capture = Path(env.get(setting) or r.parent / folder)
             inputs += [('stat', capture) if provisional else ('files', sorted(capture.glob(pattern)))]   # its files, not where it is: the same build reached through a moved folder or a link keeps its split
     if env.get('DM_NRO_DIR'): inputs += [('files', sorted(Path(env['DM_NRO_DIR']).glob('*.nro')))]   # NROs captured from a boot (capture_nro)
+    if env.get('DM_OODLE_CACHE'):   # the decoded Oodle streams a reader reads in place of the Mac host's: a cache that filled in after the split (a --no-push build, then one with the phone) must split again, or every package the first split could not read stays unread (Stray: 32 shaders, 44,409 files)
+        inputs += [('tree', Path(env['DM_OODLE_CACHE']))]
     inputs += [item for r in dlc_roms for item in (('dlc', Path(r).name), ('stat', r))]   # DLC has no registered module build to pin its contents: include its index and re-extraction times, even when file sizes stay the same
     if oodle:   # a host or rewriter fix can change what the game's decoder produces
         PROG.set(step='building the Mac host for the game\'s Oodle decoder'); env = dict(env, **oodle())
