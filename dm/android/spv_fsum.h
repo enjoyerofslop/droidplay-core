@@ -4,7 +4,9 @@
 // a load and an atomic each, and the subgroups of a dispatch compete again. Ocarina of Time's scene analysis sums luminance into four words this way (6e28359aa3558f61,
 // one workgroup of 256, 295 us of a OnePlus Pad 3's frame) and its probe filter into four more (1bba09ec4bc8ff67, 443 us). Here a loop whose word is a constant element
 // of a global buffer, and whose result is not used after it (a RED), gets the subgroup's sum of the values (OpGroupNonUniformFAdd Reduce over the invocations that reach
-// it) and runs in the one invocation OpGroupNonUniformElect picks: the same total, in another order of adds, as a float atomic add already is. A loop of another form, a
+// it) and runs in the one invocation OpGroupNonUniformElect picks: the same total, in another order of adds, as a float atomic add already is. The elected invocations of a
+// dispatch's subgroups still compete, so the word is read once before the loop and each retry starts from the value its compare-and-swap found, instead of a load of its
+// own (1bba09ec4bc8ff67, one add per 32-lane warp in 96 workgroups: about 150 us of compare-and-swaps after the sum). A loop of another form, a
 // word at a computed element, or a result used later is left as it is. Run after the subgroup rewrites (spv_wide), which would otherwise take the new reduction for a
 // 32-lane warp's (gfx_vk_lmod.inc lm_code). Self-contained (no libc) for dm/tools/tests/test_spv_fsum.py.
 #pragma once
@@ -13,11 +15,14 @@
 
 enum { SPV_FSUM_FORM = 1, SPV_FSUM_ROOM = 2 };   // why a module was left: none of its float add loops in the form; out too small
 #define SPV_FSUM_MAX 32   // loops rewritten at most in one module
-#define SPV_FSUM_EXTRA(nl) (16 + (size_t)(nl) * 28)   // words a rewrite adds at most for nl loops: two capabilities, a constant, and each loop's load, sum, elect, merge and block
+#define SPV_FSUM_EXTRA(nl) (24 + (size_t)(nl) * 48)   // words a rewrite adds at most for nl loops: two capabilities, a constant, a pointer type, and each loop's load, sum,
+                                                    // elect, merge, block, local, its first read and stores
 
-typedef struct { size_t pre, head, mlab, add, cas; uint32_t m, m2, var, lty, src, bc, t, v, fty, sum, el, vpos; } spv_fsum_loop;   // pre: the preheader's OpBranch; head: the header's OpLoopMerge;
+typedef struct { size_t pre, head, mlab, add, cas, ld, fb; uint32_t m, m2, var, lty, src, bc, t, v, fty, sum, el, vpos, ve, c, e0; } spv_fsum_loop;   // pre: the preheader's OpBranch; head: the header's OpLoopMerge;
 // mlab: the merge's OpLabel; add: the OpFAdd, vpos its value's word (3 or 4); the value: a load (type lty) of the local var the loop doesn't store, or the id src from before
-// the loop, through an OpBitcast to float in the loop where bc; fty: the float type; t, v: the preheader's load and bitcast
+// the loop, through an OpBitcast to float in the loop where bc; fty: the float type; t, v: the preheader's load and bitcast; ld: the loop's load of the word, which then
+// reads the local ve instead (0: kept), the word read once in the preheader (chain c, load e0) and each compare-and-swap's result stored there; fb: where its function's
+// first block starts (the local is declared there)
 
 // Whether the module may have such loops: a compare-and-swap and a loop
 static int spv_fsum_wanted(const uint32_t *w, size_t n) {
@@ -106,6 +111,15 @@ static size_t spv_fsum(const uint32_t *w, size_t n, uint32_t *sc, uint32_t *o, s
             if (op == 251 && len >= 3) { if (w[j + 2] == m) out = 1; for (uint32_t q = 4; q < len; q += 2) if (w[j + q] == m) out = 1; } }   // OpSwitch selector default (literal label)...
         if (out) continue;
         { int dup = 0; for (int k = 0; k < nl; k++) if (L[k].head == lm) dup = 1; if (dup) continue; }   // one CAS a loop
+        // the loop's load of the word (the old value's root): through a chain on the same variable with the same indices, so the word can be read once before the loop
+        // and each retry start from the value its compare-and-swap found, instead of a load of its own
+        l->ld = 0; l->fb = 0;
+        if (FS_OP(old) == 61 && def[old] > lm && def[old] < i && w[def[old] + 1] == x[1] && FS_OP(w[def[old] + 3]) == 65) {
+            const uint32_t *lc = w + def[w[def[old] + 3]]; int same = (lc[0] >> 16) == acl && lc[1] == ac[1];
+            for (uint32_t q = 3; q < acl && same; q++) same = lc[q] == ac[q];
+            size_t fs = 0; for (size_t j = i_fn; j < lm; j += w[j] >> 16) if ((w[j] & 0xffff) == 54) fs = j;
+            size_t fb = 0; for (size_t j = fs; j < lm && !fb; j += w[j] >> 16) if ((w[j] & 0xffff) == 248) fb = j;
+            if (same && fb) { l->ld = def[old]; l->fb = fb; } }
         nl++;
     }
     if (!nl) { *why = seen ? SPV_FSUM_FORM : 0; return 0; }
@@ -113,14 +127,23 @@ static size_t spv_fsum(const uint32_t *w, size_t n, uint32_t *sc, uint32_t *o, s
     uint32_t nb_ = bound;
     if (!c3) c3 = nb_++;
     for (int k = 0; k < nl; k++) { L[k].m2 = nb_++; L[k].sum = nb_++; L[k].el = nb_++; L[k].t = L[k].var ? nb_++ : L[k].src; L[k].v = L[k].bc ? nb_++ : L[k].t; }
+    uint32_t pfu = 0; int anyld = 0; for (int q = 0; q < nl; q++) anyld |= L[q].ld != 0;   // a Function pointer to uint for the locals: the module's, else new
+    for (size_t i = 5; i < i_fn && anyld && !pfu; i += w[i] >> 16) if ((w[i] & 0xffff) == 32 && (w[i] >> 16) == 4 && w[i + 2] == 7 && w[i + 3] == uty) pfu = w[i + 1];
+    if (anyld && !pfu) pfu = nb_++;
+    for (int q = 0; q < nl; q++) if (L[q].ld) { L[q].ve = nb_++; L[q].c = nb_++; L[q].e0 = nb_++; }
     size_t k = 0;
     for (int q = 0; q < 5; q++) o[k++] = w[q];
     for (size_t i = 5; i < n; ) { uint32_t len = w[i] >> 16, op = w[i] & 0xffff; const uint32_t *x = w + i;
         if (i == i_cap) { if (!has61) { o[k++] = 2u << 16 | 17; o[k++] = 61; } if (!has63) { o[k++] = 2u << 16 | 17; o[k++] = 63; } }
         if (i == i_fn && c3 >= bound) { o[k++] = 4u << 16 | 43; o[k++] = uty; o[k++] = c3; o[k++] = 3; }
+        if (i == i_fn && anyld && pfu >= bound) { o[k++] = 4u << 16 | 32; o[k++] = pfu; o[k++] = 7; o[k++] = uty; }
         const spv_fsum_loop *l = 0; for (int q = 0; q < nl && !l; q++) if (i >= L[q].pre && i <= L[q].mlab) l = &L[q];
         if (l && i == l->pre) {   // the sum and the election before the loop, and the loop made the elected invocation's
             uint32_t v = l->v;
+            if (l->ld) { const uint32_t *ac = w + def[w[l->cas + 3]]; uint32_t acl = ac[0] >> 16;   // the word read once: a chain like the loop's, its load into the local
+                o[k++] = acl << 16 | 65; o[k++] = ac[1]; o[k++] = l->c; for (uint32_t q = 3; q < acl; q++) o[k++] = ac[q];
+                o[k++] = 4u << 16 | 61; o[k++] = w[l->cas + 1]; o[k++] = l->e0; o[k++] = l->c;
+                o[k++] = 3u << 16 | 62; o[k++] = l->ve; o[k++] = l->e0; }
             if (l->var) { o[k++] = 4u << 16 | 61; o[k++] = l->lty; o[k++] = l->t; o[k++] = l->var; }
             if (l->bc) { o[k++] = 4u << 16 | 124; o[k++] = l->fty; o[k++] = v; o[k++] = l->t; }
             o[k++] = 6u << 16 | 350; o[k++] = l->fty; o[k++] = l->sum; o[k++] = c3; o[k++] = 0; o[k++] = v;   // OpGroupNonUniformFAdd Subgroup Reduce
@@ -129,6 +152,7 @@ static size_t spv_fsum(const uint32_t *w, size_t n, uint32_t *sc, uint32_t *o, s
             o[k++] = 4u << 16 | 250; o[k++] = l->el; o[k++] = x[1]; o[k++] = l->m;
             i += len; continue; }
         if (l && i == l->mlab) { o[k++] = 2u << 16 | 248; o[k++] = l->m2; o[k++] = 2u << 16 | 249; o[k++] = l->m; }   // the loop's own merge, then on to the old one
+        if (l && l->ld && i == l->ld) { o[k++] = 4u << 16 | 61; o[k++] = x[1]; o[k++] = x[2]; o[k++] = l->ve; i += len; continue; }   // the word as the local holds it
         for (uint32_t q = 0; q < len; q++) o[k + q] = x[q];
         if (l && i > l->pre && i < l->mlab) {
             if (op == 246) o[k + 1] = l->m2;
@@ -137,6 +161,8 @@ static size_t spv_fsum(const uint32_t *w, size_t n, uint32_t *sc, uint32_t *o, s
             if (i == l->add) o[k + l->vpos] = l->sum;   // the subgroup's sum where the value was
         }
         k += len; i += len;
+        if (l && l->ld && i - len == l->cas) { o[k++] = 3u << 16 | 62; o[k++] = l->ve; o[k++] = x[2]; }   // what the compare-and-swap found: the next try's expected value
+        if (op == 248) for (int q = 0; q < nl; q++) if (L[q].ld && L[q].fb == i - len) { o[k++] = 4u << 16 | 59; o[k++] = pfu; o[k++] = L[q].ve; o[k++] = 7; }   // the locals, first in their function
     }
     #undef FS_ROOT
     #undef FS_OP

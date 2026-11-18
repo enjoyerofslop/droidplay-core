@@ -167,6 +167,12 @@ class SpvFsum(unittest.TestCase):
             j = next(i for i, (op, y) in enumerate(o) if op == 248 and y[0] == x[0])
             self.assertEqual(o[j + 1][0], 249)   # the new merge block: a branch on
         self.assertEqual(len([x for op, x in o if op == 230]), loops)   # the compare-and-swaps stay
+        # each loop reads the word once before it (into a new local) and starts each retry from what its compare-and-swap found
+        oi = ops(data); before = {x[1] for op, x in oi if op == 59 and x[2] == 7}
+        new = {x[1] for op, x in o if op == 59 and x[2] == 7} - before; self.assertEqual(len(new), loops)
+        cas = {x[1] for op, x in o if op == 230}
+        self.assertEqual(len({x[0] for op, x in o if op == 62 and x[0] in new and x[1] in cas}), loops)
+        self.assertEqual(len([x for op, x in o if op == 61 and x[2] in new]), loops)   # the loop's load of the word, now of the local
         return o
 
     def test_debug_form(self): self.check(cs(), 'dbg', 1)
