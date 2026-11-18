@@ -37,6 +37,8 @@ The size of the 3D picture, from 50 to 100 %. Below 100 % the size is fixed ther
 
 Hades II goes up to 300 %: it renders its whole picture, the HUD and text included, at 1280x720 docked and handheld, and above 100 % it renders larger instead of being scaled up: 150 % is 1920x1080, 200 % 2560x1440, 300 % 3840x2160. Sharper on a large screen or window, at more GPU time (about 2.5 times the GPU time at 200 % on an Apple M6); on a small screen the difference is slight. [Its note](../dm/games/0100A00019DE0000/README.md#rendering) has the measurements.
 
+Ocarina of Time (Switch 2) takes one of its own scene sizes, the one nearest the slider: in handheld mode 1440x810 at 100 %, 1280x720 at 90 %, 960x540 at 65 % and 854x480, the game's handheld floor, from 60 % down; its upscaler brings each to the 1920x1080 window, and the HUD and text stay sharp. The picture is softer the lower it goes, as the game's own dynamic resolution makes it on the console. [Its note](../dm/games/0400486024DEC000/README.md#render-scale) has the table and what each size buys on a phone.
+
 ### Console mode
 
 **Docked** renders at the Switch's TV resolution, **Handheld** at its lower handheld resolution, which is lighter on the phone and can give a higher frame rate.

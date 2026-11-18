@@ -126,6 +126,27 @@ class Registry(unittest.TestCase):
                         rule['stub'](ctx)
                         self.assertTrue(all(0x100000 <= off < 0x100000 + rule['size'] for off in rest), f'{p}: {rule["name"]} writes outside its function without its others')
 
+    def test_ocarina_level_stub_takes_a_render_scale(self):
+        # Ocarina of Time's level-function stub (dynamic_resolution): with both functions found it is placed at the level function's start, marks the build with a render-scale
+        # stub (RENDER_SCALE 1: the launchers offer the slider) and the DYNAMIC_RESOLUTION capability, and its code reads the host's scale (state +0x10) before the climb's own
+        # switch (state +0x40), the climb's words kept whole after it; with the update's function not found, nothing is placed and nothing marked
+        m = MODS[REPO / 'dm/games/0400486024DEC000/patches.py']
+        def run(others):
+            words, puts = [], []
+            ctx = docs_patches.types.SimpleNamespace(here=lambda: 0x8000000 + 4 * len(words), emit=words.append, site=lambda off, orig: None, put=lambda off, w, why: puts.append((off, why)),
+                                                     state=0x9000000, render_scale=0, base=0x100000, others=others, capabilities=set())
+            m.dynamic_resolution(ctx); return ctx, words, puts
+        ctx, words, puts = run({'dynamic resolution': 0x8065e0, 'dynamic resolution update': 0x805aa0})
+        self.assertEqual((ctx.render_scale, ctx.capabilities, [off for off, _ in puts]), (1, {'DYNAMIC_RESOLUTION'}, [0x8065e0]))
+        self.assertIn('DM_RENDER_SCALE', puts[0][1])
+        self.assertEqual(words[1], 0xb9401211, 'ldr w17,[x16,#0x10]: the render scale is read first')   # words[0] is the ADRP of the state page
+        climb = words.index(0xb9404211); self.assertGreater(climb, 1, 'the climb (ldr w17,[x16,#0x40]) comes after the render-scale pick')
+        self.assertEqual(words[climb:climb + 4], [0xb9404211, 0x35000071, 0x2a1f03e0, 0xd65f03c0], 'the climb starts as before: off, level 0')
+        self.assertEqual(words[-2:], [0x2a0203e0, 0xd65f03c0], 'and ends as before: the current level')
+        self.assertEqual(words.count(0xd65f03c0), 7, 'every path returns')   # the nearest level and no levels, then the climb's 5
+        ctx, words, puts = run({'dynamic resolution': 0x8065e0, 'dynamic resolution update': None})
+        self.assertEqual((ctx.render_scale, ctx.capabilities, words, puts), (0, set(), [], []))
+
     def test_sdk_wide_rules_change_what_their_names_say(self):
         # the rules were taken from registered SDK cuts, and the builds they reproduce exactly have no row any more: each cut replaces the constant its rule names (0x3fe00000, the node
         # area; 0x400000, 0x2000000 and 0x40000000, the alignments of the 4 MB, 32 MB and 1 GB classes; as movz or orr from wzr) with the reviewed one (62 MB; SDK 20's 2 MB) in the same register

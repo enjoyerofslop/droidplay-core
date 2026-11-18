@@ -1,5 +1,5 @@
 # Switches this game gets on Android (build_android_from_nsp.py puts them in the game's defaults.txt; env.txt and the settings screen still win)
-# DM_VK_RAW_GMEM: raw global memory (gfx_vk_gmem.inc, enjoyerofslop/droidplay-core#150), off unless a game turns it on, and only on Qualcomm's Adreno. 2,247 of this game's
+# DM_VK_RAW_GMEM: raw global memory (gfx_vk_gmem.inc, enjoyerofslop/droidplay-core#150), off unless a game turns it on, and only on Qualcomm's Adreno, Samsung's Xclipse and Arm's Mali. 2,247 of this game's
 # shaders load from addresses they read from memory, through the translator's raw pool table; without it each such load reads 0. On a OnePlus Pad 3 (Adreno 830) Link and the
 # Kokiri drew as near-black silhouettes without it and lit with it (2026-11-10). In Kokiri Forest on a Galaxy Z Fold 8 (Adreno 840) storage buffers bound in their placed pools
 # took the replay from 2.3-2.8 to about 10 fps. Its large pools are placed in 2 MiB chunks as bindings and pointers reach them and its shader-code pools are left out
