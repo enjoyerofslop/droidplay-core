@@ -54,6 +54,7 @@
 #include "rec_desc.h"   // a descriptor set's writes packed for the recorder (gfx_vk_rec.inc R_UPDDS)
 #include "rc_pend.h"   // the counter reports replayed last, by address (rc_note, rc_value)
 #include "sb_reuse.h"   // a read-only storage buffer's copy bound again while its pages are unwritten (gfx_vk_sbcopy.inc)
+#include "ub_stable.h"   // a game uniform buffer bound in place once its pages have gone unwritten for a while (gfx_vk_gmem_inplace.inc ub_inplace)
 #include "apipe_rule.h"   // which draws are left out while their new pipeline builds in the background (gfx_vk_draw.inc apipe_ok)
 #include "wb_promote.h"   // whether a read of a draw's pending storage buffer write takes its copy on the GPU after a barrier (gfx_vk_draw.inc wb_promote)
 #include "ofw.h"   // storage buffer bindings written in an order-free way, their copies' identity and how they land (gfx_vk_draw.inc ofw_bind, chunk_done ofw_apply)
