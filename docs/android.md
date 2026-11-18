@@ -68,14 +68,14 @@ Until all four are done, a launch opens on the checklist and the top bar's **Set
 - **Library:** the games you added (**+ Build game** picks a folder with a game's NSP or XCI files, or a Switch 2 game's `.nup` or dump; Windows' folder picker shows no files, so pick the folder that holds them), each with its box art, version and status on the phone picked at the top.
   The big button does what comes next: **Build and install**, **Install on phone** (a game built before, without building again) or **Play**. **Manage** has the rest:
   **Options** has the game's version, language and **Game data** (Phone storage, or the SD card when the picked phone has one: [the game data on an SD card](#the-game-data-on-an-sd-card)),
-  build only, update the app on the phone, remove the game, import a save to the phone, restore its save from a backup ([Saves](#saves)). A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
+  build only, update the app and games on the phone ([after DroidPlay updates](#after-droidplay-updates)), remove the game, import a save to the phone, restore its save from a backup ([Saves](#saves)). A game with no profile gets **Experimental build**: the script surveys the game, writes a guessed
   provisional profile into the game's folder and packs it; once built it is marked *Experimental* and can be installed like any other.
 - **Builds:** the running build's stages, progress and messages (the bar at the bottom of every page follows it); a build started from a console shows here too.
   When a build fails, a banner says what went wrong in plain words, with the button that fixes it where there is one (**Install again** once the phone has room,
   **Choose prod.keys** for keys older than the game). Otherwise it is likely a bug: **Copy report** copies a short report to paste in #help on the Discord, and
   **Save full report** saves the whole log; both leave out your user folder, the phone's serial and anything that looks like a key.
-- **Phones:** adb devices over USB and Wi-Fi (pair, connect, discover), each one's battery and free space, the app version and the games on each phone, saves
-  backed up to the computer and put back (**Restore a backup…**). **How to connect a phone** (also the checklist's **Set up my phone**) walks through turning on USB debugging for the phone's brand
+- **Phones:** adb devices over USB and Wi-Fi (pair, connect, discover), each one's battery and free space, the app version and the games on each phone,
+  **Update the app and games** ([after DroidPlay updates](#after-droidplay-updates)), saves backed up to the computer and put back (**Restore a backup…**). **How to connect a phone** (also the checklist's **Set up my phone**) walks through turning on USB debugging for the phone's brand
   (Samsung's Auto Blocker, Xiaomi's Install via USB, a Pixel's driver) and what to try when the phone doesn't show up; a phone below 20% battery gets a warning,
   since a PC's USB port charges slowly and an install takes minutes. A phone on a cable and on Wi-Fi at once is one phone: the list at the top shows it once, over
   the cable. What DroidPlay keeps for a phone (the one you picked, its backups) follows the phone itself, not its Wi-Fi address, which changes each time wireless
@@ -85,6 +85,25 @@ Until all four are done, a launch opens on the checklist and the top bar's **Set
 
 A rebuild only does what changed: the extraction, the rewritten code and the translated shaders are reused when their inputs are the same, and the RomFS image is not
 copied to the phone again when the phone already holds the same one.
+
+### After DroidPlay updates
+
+Each game runs on its own copy of DroidPlay's engine, its host (`libdmhost_<title ID>.so` inside the DroidPlay app), built when the game was built. A fix to the
+engine, such as the controls, the picture or the sound, reaches a game once its engine is built again, and DroidPlay can do that for every game it built, with no
+game files:
+
+- **Update games:** when the DroidPlay app on the picked phone is older than DroidPlay on the computer, or a game's engine was built by an older DroidPlay, a bar
+  under the top bar offers **Update games** and says about how long it takes (about 7 seconds a game, then half a minute for the app). It builds each game's engine
+  again from this DroidPlay, then updates the app on the phone. Game files, saves and settings stay. Each game's first start afterwards may prepare its shaders again,
+  as after any install. **Not now** puts it off until the next DroidPlay.
+- **Any time:** **Phones › Update the app and games**, or a game's **Manage › Update the app and games on the phone**, does the same. **Install on phone** and
+  **Build and install** build the other games' engines that need it too, so the app on the phone carries engines from one DroidPlay.
+- **What it doesn't reach:**
+  - A fix to how a game's code is adapted or its shaders translated needs **Build and install**; the release notes say which fixes do.
+  - A game built on another computer has no engine on this one, so the updated app can't start it until it's built and installed from here. Update games asks
+    first when the phone has such a game.
+  - **Game apps** carry their own engine: build them again for the fixes ([Game apps](#game-apps)).
+- **In the log:** each start's `versions:` line names the app's version and the game's engine's, and ends `: one build` when they match.
 
 If the phone drops off during an install (it slept, Wi-Fi roamed, wireless debugging restarted on a new port, or the cable came out), the install waits up to
 three minutes for it to come back, finds it again by its serial number (over Wi-Fi it connects to it again by itself) and goes on: the game data, the shaders
@@ -295,6 +314,9 @@ without the DroidPlay app or a connection to your computer: copy the file over a
 - **DroidPlay on a Mac:** **Build Game App**.
 - **The command line:** `--game-apk`, or `--game-apk --xapk` ([Packing from the command line](#packing-from-the-command-line)).
 
+A game app carries its own engine, built with it, so neither updating DroidPlay nor **Update games** changes it: build it again after an update to give it the
+fixes, then install it over the old one (its save stays).
+
 A game whose data is more than an APK holds (2 GB) gets it beside the APK, as `<name>.romfs`: copy that file anywhere on the device or its SD card, and pick it
 once when the game first starts. On the command line, `--romfs-beside` does this for a smaller game too, so the APK stays small and the data can live on the SD card
 (DLC that fits stays in the APK). An XAPK carries the data as the app's OBB file instead, for an XAPK installer app. A game app is for your own devices only: it
@@ -356,7 +378,8 @@ python scripts/build_android_from_nsp.py "<folder with your NSP / XCI files>" -k
     --push-only          install the app and copy a game built before, without building
     --romfs-dir sd       put the game's data (its RomFS image) on the phone's SD card, not its own storage; or give a folder on the phone
     --no-romfs           with --romfs-dir: copy no data; you copy RomFS.img there yourself
-python scripts/build_android_from_nsp.py --apk-only    pack the app with every game built on this computer and install it
+python scripts/build_android_from_nsp.py --apk-only    build every game's host on this computer again from this checkout (no game files needed), then pack the app with them and install it
+    --keep-hosts         with --apk-only, --push-only or a build: pack the hosts as they were built, without building them again first
 python scripts/build_android_from_nsp.py --import-save "<save folder or archive>" --title <title ID>    send a save to the phone (Saves)
 python scripts/build_android_from_nsp.py --restore-backup "<backup folder>" [--title <title ID>]       send a game's save, or every game's, from a backup
 python scripts/build_android_from_nsp.py --check       what the build needs on this computer, as JSON

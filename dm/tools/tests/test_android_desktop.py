@@ -1,6 +1,7 @@
 """DroidPlay for Windows' first run, as the desktop app (scripts/nxnative_android.py) shows it, from its Qt-free helpers in dm/android/desktop: the "Get started"
 checklist's four steps worked out from what the computer has (first_run.py), Install tools' one bar across --setup's stages, and plain words for what went wrong
-with the report for #help (explain.py), matched against the packing script's, nx_extract's and adb's own messages. No PySide6, phone or network needed."""
+with the report for #help (explain.py), matched against the packing script's, nx_extract's and adb's own messages; when to offer Update games for the picked phone and what
+it says (host_update.py). No PySide6, phone or network needed."""
 from pathlib import Path
 import shutil
 import sys
@@ -12,6 +13,7 @@ sys.path.insert(0, str(REPO / 'dm/android/desktop'))
 import first_run as fr   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/desktop, put on the path above)
 import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]
 import game_data as gd   # noqa: E402  # pyright: ignore[reportMissingImports]
+import host_update as hu   # noqa: E402  # pyright: ignore[reportMissingImports]
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]
 sys.path.insert(0, str(REPO / 'dm/android/tools'))
 import phone_id   # noqa: E402  # pyright: ignore[reportMissingImports]  (dm/android/tools, put on the path above)
@@ -601,6 +603,51 @@ class GameDataTests(unittest.TestCase):
     def test_the_words_say_what_it_means(self):
         for w in ('on the SD card', 'rest of the game stays on the phone', "won't start without the card", 'copies the data back', 'delete'): self.assertIn(w, gd.MEANING)
         self.assertIn("won't start without the card", gd.MEANING_APP)
+
+
+class UpdateGames(unittest.TestCase):   # the bar after DroidPlay updates: the games on the phone still run the engine each was built with (build_android_from_nsp.py refresh_hosts)
+    NEW = '0.8.14'
+    def hosts(self, *cores): return {f'01000000000{i}0000': {'name': f'Game {i}', 'core': c} for i, c in enumerate(cores)}
+
+    def test_droidplay_updated_and_the_phone_not(self):   # an older library: its hosts recorded no version
+        o = hu.behind('0.8.13', self.NEW, self.hosts(None, None, None), ['0100000000000000'])
+        assert o is not None
+        self.assertTrue(o['app_old']); self.assertEqual(len(o['stale']), 3); self.assertEqual(o['missing'], [])
+        self.assertEqual(o['seconds'], 3 * hu.PER_GAME + hu.APP)
+        text = hu.bar_text(o, 'Galaxy S25 Edge', self.NEW)
+        for w in ("The games on Galaxy S25 Edge don't have DroidPlay 0.8.14's fixes yet", 'builds 3 engines again', 'no game files needed', 'Saves, settings and game files stay',
+                  'Game apps carry their own engine: build them again'):
+            self.assertIn(w, text)
+
+    def test_nothing_to_do_once_updated(self):
+        self.assertIsNone(hu.behind('0.8.14', self.NEW, self.hosts('0.8.14', '0.8.14')))
+        self.assertIsNone(hu.behind('v0.8.14', 'v0.8.14', self.hosts('0.8.14')))   # a release's tag and its VERSION file are one version
+
+    def test_no_app_no_library_no_version_no_offer(self):
+        self.assertIsNone(hu.behind(None, self.NEW, self.hosts(None)))   # no DroidPlay on the phone: the first Build and install puts it there
+        self.assertIsNone(hu.behind('0.8.13', self.NEW, {}))   # nothing built on this computer: nothing to build again
+        self.assertIsNone(hu.behind('0.8.13', None, self.hosts(None)))   # a copy of no release and no checkout
+
+    def test_hosts_built_before_on_an_up_to_date_app(self):   # the app updated by the old Update the app: the same version, the hosts as they were
+        o = hu.behind(self.NEW, self.NEW, self.hosts('0.8.14', None))
+        assert o is not None
+        self.assertFalse(o['app_old']); self.assertEqual(o['stale'], ['Game 1'])
+        self.assertTrue(hu.bar_text(o, 'Pad 3', self.NEW).startswith('1 of your games was built with an older DroidPlay, so on Pad 3 '))
+
+    def test_only_the_app_behind(self):   # every host built from this DroidPlay already (for another phone): only the app goes
+        o = hu.behind('0.8.13', self.NEW, self.hosts('0.8.14'))
+        assert o is not None
+        self.assertEqual((o['stale'], o['seconds']), ([], hu.APP)); self.assertIn('updates the app on the phone with the engines built from this DroidPlay', hu.bar_text(o, 'Pad 3', self.NEW))
+
+    def test_games_with_no_host_here_are_named(self):   # built on another computer: the updated app has no engine for them
+        o = hu.behind('0.8.13', self.NEW, self.hosts(None), ['0100000000000000', '010057D006492000'])
+        assert o is not None
+        self.assertEqual(o['missing'], ['010057D006492000'])
+        self.assertIn("OCTOPATH TRAVELER is on Razr but wasn't built on this computer, so the updated app has no engine for it", hu.missing_text(['OCTOPATH TRAVELER'], 'Razr'))
+        self.assertIn("weren't built on this computer, so the updated app has no engine for them", hu.missing_text(['A', 'B'], 'Razr'))
+
+    def test_the_time_said(self):
+        self.assertEqual(hu.duration(30), 'about 30 s'); self.assertEqual(hu.duration(2), 'about 5 s'); self.assertEqual(hu.duration(14 * hu.PER_GAME + hu.APP), 'about 2 min')
 
 
 if __name__ == '__main__':

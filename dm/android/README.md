@@ -34,7 +34,9 @@ cream on ink, with a monochrome layer), which `tools/build_apk.py` links unless 
 
 - **A host per game.** The host is built for one profile, so the APK holds one per game, `lib/arm64-v8a/libdmhost_<title ID>.so`. The NativeActivity's library is
   `libnxloader.so` (`loader.c`): it reads the intent extra `game` (the title ID) and forwards `ANativeActivity_onCreate` to that game's host. A game folder whose host the APK
-  lacks is listed as needing an app update.
+  lacks is listed as needing an app update. Every pack of the app first builds each library host again that wasn't built from the checkout
+  (`build_android_from_nsp.py refresh_hosts`), so the app's hosts come from one commit; at start the host logs `versions: the app <versionName>, this game's host <commit
+  (version)>`, with `: one build` when they match (`app_version.h`).
 - **A process per game.** The game runs in `:game` (`apk/AndroidManifest.xml`): a host is loaded once per process, so starting another game ends the running one, after
   asking, and starts a fresh process.
 - **Per-game paths** (`front_android.c`): the game's files in `files/games/<id>/`, its settings in `files/games/<id>/launcher.txt` (and `env.txt`, for every game, in `files/`);
@@ -104,7 +106,10 @@ On Windows, Git Bash rewrites `/data/...` arguments: set `MSYS_NO_PATHCONV=1` fo
 `scripts/build_android_from_nsp.py <NSP folder> -k <prod.keys>` does it all for a game you own: extraction, the Android rewrite, the host for the
 profile (kept in the computer's host library, `%LOCALAPPDATA%\nxnative\android\hosts\<id>\` on Windows, `~/.local/share/nxnative/android` elsewhere), the APK with every host in
 the library, then installs it and copies the modules, the RomFS, the DLC, the button-icon font and a `game.json` to `Android/data/org.nxnative.android/files/games/<id>/`.
-`--push-only` installs and copies a game built before without building; `--apk-only` packs and installs the app alone; `--migrate --title <id>` moves a one-game install;
+`--push-only` installs and copies a game built before without building; `--apk-only` packs and installs the app alone; before any of them packs the app, each host in the
+library not built from this checkout is built again from it, from its profile with no game files (`refresh_hosts`: the profile `meta.json` records, a derived or
+provisional one kept in `hosts/<id>/profile/<id>`; one CMake folder, `<data>/host_build`, reconfigured per game, about 6 s a game), unless `--keep-hosts`;
+`--migrate --title <id>` moves a one-game install;
 `--check` and `--info <NSP folder>` print the requirements and a game's details as JSON; `--progress json` prints the build's progress as JSON events.
 adbd may not create folders there, so the folder tree is made first by a mkdir script run in the shell. The shell makes them `drwxrws---` for itself, which an Android 15 phone (a Galaxy S21 Ultra) kept the app out of (it found no game and ran the self test, logging `[RED] the game in … cannot be read`), so the script opens the copied tree to everyone at the end (`chmod 0777` folders, `0666` files; `Android/data/<package>` is reachable only by the app and the shell). Every build is signed with
 `~/.android/nxnative-debug.jks`: an app signed with another key cannot be updated, and uninstalling it deletes its saves and game files.
@@ -126,7 +131,8 @@ leave out a Wi-Fi phone's mDNS name, which carries its serial number.
 
 `--game-apk` builds one game as an app of its own, to install on any device without this computer or the launcher: package `org.nxnative.game.t<title ID>`
 (`tools/build_apk.py game_package`), the game's name and icon, `apk/AndroidManifest.game.xml`. Several install side by side, apart from the DroidPlay app, each with its own
-saves. Nothing goes into the host library, so the DroidPlay app is left as it was.
+saves. Nothing goes into the host library, so the DroidPlay app is left as it was. Its host is the one built with it: an update of DroidPlay reaches it only when
+it's built again. Its `versionName` is the core version, as the launcher app's.
 
 - **What the APK carries:** the game's host alone (the NativeActivity's library; no loader) and the game's files under `assets/game/`, laid out as `games/<id>/` with a
   `files.txt` list. Its entry is `java GameStart`, which unpacks everything but the RomFS to `Android/data/<package>/files/games/<id>/` at the first start and after an
@@ -161,7 +167,8 @@ saves. Nothing goes into the host library, so the DroidPlay app is left as it wa
   on phone* (no build) and *Play*. A game without a profile gets *Experimental build* (`--no-push`: the survey, a provisional profile in `<NSP folder>/<id>_build/profile`,
   found through `DM_GAMES_DIR`); once built it is marked *Experimental* and installs like the others.
 - **Phones**: the adb devices over USB and Wi-Fi (*Pair over Wi-Fi*, *Connect*, *Discover*, *Disconnect*); for the phone picked at the top, the app version and the games
-  on it, *Update the app*, *Move the old one-game install*, *Back up saves to this computer* (the app's `files/backups/`), *Restore a backup* and *Remove game from
+  on it, *Update the app and games* (`--apk-only`; also the *Update games* bar under the top bar when the phone's app or a host is older than this DroidPlay,
+  `desktop/host_update.py`), *Move the old one-game install*, *Back up saves to this computer* (the app's `files/backups/`), *Restore a backup* and *Remove game from
   phone* (its save stays); a game's *Manage* menu has *Import a save to the phone* and *Restore its save from a backup*.
   A phone is known by its ID (`dm/android/tools/phone_id.py`: `ro.serialno`, or the shell's Android ID where that is empty or a placeholder), asked once per adb
   serial: the picker shows a phone on USB and Wi-Fi once, over USB; the picked phone, its backups (`<data>/backups/<id>`) and the first-start notice are kept by ID, as

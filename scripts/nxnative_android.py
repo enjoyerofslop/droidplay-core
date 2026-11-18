@@ -46,6 +46,7 @@ import wifi   # noqa: E402  # pyright: ignore[reportMissingImports]  (what adb p
 import explain as ex   # noqa: E402  # pyright: ignore[reportMissingImports]  (plain words for what went wrong, and the report for #help)
 import phone_guide as pg   # noqa: E402  # pyright: ignore[reportMissingImports]  (how to connect a phone, by brand; its battery and free space)
 import update as upd   # noqa: E402  # pyright: ignore[reportMissingImports]  (the newest release, and its Setup or AppImage downloaded and checked)
+import host_update as hu   # noqa: E402  # pyright: ignore[reportMissingImports]  (Update games: whether the phone's games run an older engine than this DroidPlay's)
 import procs   # noqa: E402  # pyright: ignore[reportMissingImports]  (Stop: a build and every tool it started)
 import menu_entry   # noqa: E402  # pyright: ignore[reportMissingImports]  (Linux: the AppImage's entry in the applications menu)
 
@@ -216,7 +217,7 @@ def alive(pid):
 
 
 def journal_title(argv):   # what a build from the console does, from its command line
-    if '--apk-only' in argv: return 'Update the app'
+    if '--apk-only' in argv: return UPDATE_GAMES
     if '--migrate' in argv: return 'Move the old install'
     if '--setup' in argv: return fr.SETUP_TITLE
     folder = next((x for x in argv if not x.startswith('-') and Path(x).is_dir()), None)
@@ -227,6 +228,9 @@ def journal_title(argv):   # what a build from the console does, from its comman
     what = ('Build the game app of ' if '--game-apk' in argv or '--xapk' in argv else 'Update the shaders of ' if '--update-shaders' in argv
             else 'Install ' if '--push-only' in argv else 'Build ')
     return what + (name or (Path(folder).name if folder else 'a game'))
+
+
+UPDATE_GAMES = 'Update the app and games'   # --apk-only: every game's host built again from this DroidPlay, then the app updated (build_android_from_nsp.py refresh_hosts)
 
 
 def label(text, name=None, wrap=False):
@@ -572,6 +576,8 @@ class LibraryPage(QWidget):
         lay.addWidget(label(gd.MEANING_APP + ' With XAPK, the data is in the file.', 'muted', wrap=True))
         xapk.toggled.connect(lambda on: sd.setEnabled(not on)); sd.setEnabled(not xapk.isChecked())
         lay.addSpacing(6); lay.addWidget(label(f'It goes in the game\'s folder, {g.folder}, beside the other kind if that was built too.', 'muted', wrap=True))
+        lay.addWidget(label('A game app carries its own copy of DroidPlay\'s engine, made now: Update games doesn\'t reach it, so build it again after DroidPlay '
+                            'updates to give it the fixes.', 'muted', wrap=True))
         bb = QDialogButtonBox(QDialogButtonBox.Cancel); bb.addButton('Build', QDialogButtonBox.AcceptRole); bb.accepted.connect(d.accept); bb.rejected.connect(d.reject)
         foot = QWidget(); fl = QVBoxLayout(foot); fl.setContentsMargins(24, 8, 24, 24); fl.addWidget(bb); outer.addWidget(foot)
         # as tall as its text at its width, within the screen, and the text scrolls beyond that: left to Qt, a new window keeps within 2/3 of the screen's
@@ -628,7 +634,7 @@ class LibraryPage(QWidget):
                  lambda: self.run(g, ['--update-shaders'], 'Update shaders'), bool(g.provisional and g.host and s))
         if n or later: f = up.font(); f.setBold(True); up.setFont(f)   # the next thing to do for this game
         self.menu.addSeparator()
-        act('Update the app on the phone', lambda: self.win.builds.start('Update the app', ['--apk-only', '--serial', s], after=self.after_task), bool(s and ba.library()))
+        act('Update the app and games on the phone', lambda: self.win.builds.start(UPDATE_GAMES, ['--apk-only', '--serial', s], after=self.after_task), bool(s and ba.library()))
         act('Remove from the phone…', lambda: self.win.phones.remove_game(g.id, g.name), bool(s and g.id in self.win.phone_games))
         act('Import a save to the phone…', lambda: self.win.phones.import_save(g.id, g.name), bool(s and g.id in self.win.phone_games))
         act('Restore its save from a backup…', lambda: self.win.phones.restore_backup(g.id, g.name), bool(s and g.id in self.win.phone_games))
@@ -1058,7 +1064,7 @@ class PhonesPage(QWidget):
         lay.addSpacing(10); self.ph = label('The picked phone', 'h2'); lay.addWidget(self.ph); self.app = label('—', 'meta', wrap=True); lay.addWidget(self.app)
         self.games = QListWidget(); lay.addWidget(self.games, 1)
         row = QHBoxLayout()
-        for text, fn, name in (('Update the app', self.update_app, None), ('Back up saves to this computer', self.backup, None), ('Restore a backup…', self.restore_all, None),
+        for text, fn, name in ((UPDATE_GAMES, self.update_app, None), ('Back up saves to this computer', self.backup, None), ('Restore a backup…', self.restore_all, None),
                                ('Move the old one-game install…', self.migrate, 'ghost')):
             b = QPushButton(text); b.clicked.connect(fn); row.addWidget(b)
             if name: b.setObjectName(name)
@@ -1159,7 +1165,7 @@ class PhonesPage(QWidget):
         self.win.toast(f'Connecting to {name} over Wi-Fi…'); bg(run, got)
     def update_app(self):
         s = self.win.serial()
-        if s: self.win.builds.start('Update the app', ['--apk-only', '--serial', s], after=self.win.refresh_phone)
+        if s: self.win.builds.start(UPDATE_GAMES, ['--apk-only', '--serial', s], after=self.win.refresh_phone)
     def migrate(self):
         s = self.win.serial()
         if not s: return
@@ -1172,7 +1178,7 @@ class PhonesPage(QWidget):
         if QMessageBox.question(self, 'Move', 'First the save backups on the phone are copied to this computer, then the game folder moves and the app is updated; '
                                 'the app copies the save when it next opens. Go on?') != QMessageBox.Yes: return
         self.backup(then=lambda: self.win.builds.start('Move the old install', ['--migrate', '--title', gid, '--serial', s],
-                                                       after=lambda: self.win.builds.start('Update the app', ['--apk-only', '--serial', s], after=self.win.refresh_phone)))
+                                                       after=lambda: self.win.builds.start(UPDATE_GAMES, ['--apk-only', '--serial', s], after=self.win.refresh_phone)))
     def backup(self, then=None):
         s = self.win.serial()
         if not s: return
@@ -1579,6 +1585,31 @@ class UpdateBar(QWidget):   # under the top bar, on every page, while a newer re
         self.win.st.setValue('update/later' if self.tag else 'switch/later', self.tag or '1'); self.hide()
 
 
+class GamesBar(QWidget):   # under the top bar while the games on the picked phone run an older engine than this DroidPlay's (host_update.py), with Update games
+    def __init__(self, win):
+        super().__init__(); self.win = win; self.offer = None; self.key = None; self.setObjectName('gamesbar'); self.setAttribute(Qt.WA_StyledBackground, True)
+        self.setStyleSheet('QWidget#gamesbar { background: rgba(245,184,46,0.10); border-bottom: 1px solid rgba(245,184,46,0.25); }')
+        lay = QHBoxLayout(self); lay.setContentsMargins(28, 10, 28, 10); lay.setSpacing(14)
+        self.text = label('', wrap=True); self.text.setStyleSheet('font-size: 13px'); lay.addWidget(self.text, 1)
+        self.go_btn = QPushButton('Update games'); self.go_btn.clicked.connect(self.go); lay.addWidget(self.go_btn)
+        self.later_btn = QPushButton('Not now'); self.later_btn.setObjectName('ghost'); self.later_btn.clicked.connect(self.later); lay.addWidget(self.later_btn)
+        self.hide()
+    def consider(self, app_version, games):   # the picked phone's DroidPlay version (None: no app) and games, as refresh_phone read them
+        s = self.win.serial(); self.key = f'gamesbar/later/{self.win.phone_key(s)}' if s else None
+        self.offer = hu.behind(app_version, self.win.version, {gid: m for gid, (_, m) in ba.library().items()}, games) if s else None
+        if not self.offer or self.win.st.value(self.key, '') == self.win.version: self.hide(); return   # put off until the next DroidPlay
+        self.text.setText(hu.bar_text(self.offer, self.win.phone_name() or 'the phone', self.win.version)); self.show()
+    def go(self):
+        if not self.offer: return
+        if self.win.builds.busy() or self.win.builds.ext: self.win.toast('A build is running: wait for it to finish, or stop it, then Update games'); return
+        names = [(self.win.phone_games.get(g) or {}).get('name') or g for g in self.offer['missing']]
+        if names and QMessageBox.question(self, 'Update games', hu.missing_text(names, self.win.phone_name() or 'the phone')) != QMessageBox.Yes: return
+        self.hide(); self.win.phones.update_app()
+    def later(self):
+        if self.key: self.win.st.setValue(self.key, self.win.version)
+        self.hide()
+
+
 # ---------------- The window ----------------
 class Window(QMainWindow):
     def __init__(self):
@@ -1609,6 +1640,7 @@ class Window(QMainWindow):
         self.version = ba.core_version()   # the VERSION file a release carries (its installer's copy too), git describe in a checkout
         self.release = None; self.updating = None   # the newest release as GitHub last said; a running update's download (its cancel flag)
         self.updatebar = UpdateBar(self); root.addWidget(self.updatebar)
+        self.gamesbar = GamesBar(self); root.addWidget(self.gamesbar)
         self.pages = QStackedWidget(); root.addWidget(self.pages, 1)
         self.builds = BuildsPage(self); self.phones = PhonesPage(self); self.perf = PerformancePage(self); self.settings = SettingsPage(self); self.setup = SetupPage(self)
         self.library = LibraryPage(self)
@@ -1808,7 +1840,7 @@ class Window(QMainWindow):
         self.refresh_phone()
     def refresh_phone(self):   # the app and the games on the picked phone: the Library's statuses and the Phones page
         s = self.serial()
-        if not s: self.phone_games = {}; self.library.refresh_status(); self.phones.show_phone('', {}, False); return
+        if not s: self.phone_games = {}; self.library.refresh_status(); self.phones.show_phone('', {}, False); self.gamesbar.hide(); return
         def look():
             _, pkg = adb_run(s, 'shell', f'dumpsys package {PKG} | grep -E "lastUpdateTime|versionName" | head -2')
             # game.json on one line, its \r too: a build on Windows wrote it with \r\n, and splitlines() below cut the JSON at each \r
@@ -1828,6 +1860,8 @@ class Window(QMainWindow):
             pkg, games, legacy = r
             self.phone_games = games if 'lastUpdateTime' in pkg else {}; self.phone_legacy = legacy
             self.library.refresh_status(); self.phones.show_phone(pkg, games, legacy)
+            ver = re.search(r'versionName=(\S+)', pkg) if 'lastUpdateTime' in pkg else None   # the app's own version, else no app (a first build installs it)
+            self.gamesbar.consider(ver[1] if ver else None, list(self.phone_games))
         bg(look, got)
     def refresh_devices(self):
         def look():
