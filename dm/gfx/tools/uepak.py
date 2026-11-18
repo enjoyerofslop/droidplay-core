@@ -634,6 +634,28 @@ def unreal_paks(romfs, inline=None, mains=()):
         if inline is None or inl == inline: out.append(p)
     return out
 
+def inline_needs_decoder(romfs, mains=()):
+    """Whether an inline-shader pak under romfs (or the IoStore containers beside it) holds Oodle streams, which only the game's own decoder reads, so the build decodes the paks on the
+    phone before the split (build_android_from_nsp.py's ue_legacy_oodle). Python reads a pak's Zlib, Gzip and LZ4 blocks itself, and LZ5 (DRAGON QUEST XI S) the Mac host decodes
+    (hle_oodle.c, through a decode function given to Pak.read), so none of those sends a build to the phone. A legacy pak (versions 4 and 8) is read per entry: version 4 has no method
+    names (flag 4, Custom, is its Oodle), and version 8's footer names every method the engine could use, not only the ones the pak holds; a version 11 pak in its footer's names"""
+    keys = Keys(mains)
+    for p in unreal_paks(romfs, inline=True, mains=mains):
+        try:
+            with open(p, 'rb') as f: _, _, _, methods, ver = footer(f)
+            if ver in LEGACY:
+                pk = Pak(p, keys(p) if mains else None)
+                try: need = any(e['method'] in ('Oodle', 'Custom') for e in pk.files.values())
+                finally: pk.f.close()
+                if need: return True
+            elif 'Oodle' in methods: return True
+        except (OSError, ValueError, struct.error): continue   # shorter than a footer, no Unreal pak, or an index no key in main opens
+        if inline_in_containers(p):
+            folder = os.path.dirname(os.path.abspath(p))
+            for t in io_tocs(folder):
+                if os.path.dirname(t.path) == folder and 'Oodle' in t.methods: return True
+    return False
+
 def job(romfs, main_nso, work, decode=None):
     """The shader code archives of every pak under the RomFS into <work>/archives, and one Oodle job (<work>/oodle.job) of every compressed shader in them; <work>/job.json lists them.
     The shader libraries of IoStore containers (Unreal Engine 5.6, FINAL FANTASY RESONANCE: no archive in the pak) go there already decoded: their container blocks and shader groups are
