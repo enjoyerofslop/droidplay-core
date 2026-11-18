@@ -61,6 +61,7 @@
 #include "tbuf_rows.h"   // a buffer texture read through a 2D slot as rows of 16384 texels (vt_create, vt_upload_, gfx_vk_draw.inc tex_rows_slot)
 #include "rd_home.h"   // the home ranges of storage buffers draws under rasterizer discard write (gfx_vk_draw.inc rd_bind_w)
 #include "stream_clip.h"   // where an indexed draw's stream is looked up to among forwardable write-backs (gfx_vk_draw.inc stream_clip)
+#include "rc_pend.h"   // conditional rendering's pending timestamp reports (rc_note, rc_value)
 #include "nvn_fstep.h"   // FSTEP_FIT: the performance hint's target (hint_frame)
 #include "nvn_queue.h"   // the queue scheduler (hle_nvn.c nvn_queue.inc): event publication and GPU progress
 #include <stdatomic.h>
@@ -2369,8 +2370,7 @@ static unsigned g_place_cpu[16], g_place_n;   // under g_bk
 // before a signal lost its condition
 static int g_rc_skip;   // a render-enable block evaluated false is active
 static uint64_t g_rc_skipped;   // clears and draws dropped by it (the first is logged)
-#define RC_PEND 256
-static struct { uint64_t addr; int kind; } g_rc_pend[RC_PEND]; static int g_rc_npend;   // reports replayed in this submission: kind 1 = timestamp (counter 0), 2 = another counter (unknown)
+static rcp_list g_rc_pend;   // timestamp reports replayed and not known to have landed (rc_pend.h): counter 0, or unknown once another counter's report followed to that address
 // Addresses ever written by a non-timestamp report, each with the NVN fence of the submission its last samples-passed report is in (RC_ANY: a counter kind the host does not
 // implement, unknown for good). A samples-passed result is written when its chunk completes (post_apply, before the fence: chunk_thread), so a condition on it reads memory once
 // that fence has completed, and keeps drawing while it is in flight, as the Mac does ([Occlusion conditions read once landed]): every such condition drew before, and Ocarina of
@@ -2403,13 +2403,12 @@ static void rc_occ_add(uint64_t a, uint64_t fence) {
 static int rc_occ_get(uint64_t a, uint64_t *fence) { if (!g_rc_cap || !a) return 0; uint32_t i = rc_occ_slot(g_rc_occ, g_rc_cap, a); if (g_rc_occ[i] != a) return 0; *fence = g_rc_occf[i]; g_rc_occr[i] = 1; return 1; }
 static void rc_note(uint64_t a, int kind) {   // kind 1 a timestamp, 2 a counter kind the host does not implement, 3 samples passed
     if (kind >= 2) rc_occ_add(a, kind == 3 && rc_landed_on() ? atomic_load(&g_fence) + 1 : RC_ANY);   // (the fence this submission completes: mtl_sub_commit)
-    if (kind == 3) kind = 2;   // (in this submission: not landed)
-    for (int i = 0; i < g_rc_npend; i++) if (g_rc_pend[i].addr == a) { g_rc_pend[i].kind = kind; return; }
-    if (g_rc_npend == RC_PEND) { memmove(g_rc_pend, g_rc_pend + RC_PEND / 2, sizeof *g_rc_pend * (RC_PEND / 2)); g_rc_npend = RC_PEND / 2; }   // the older half has landed by now
-    g_rc_pend[g_rc_npend].addr = a; g_rc_pend[g_rc_npend++].kind = kind;
+    uint64_t dropped = g_rc_pend.dropped;
+    rcp_note(&g_rc_pend, a, kind == 1);   // another kind only marks a timestamp entry of that address unknown: the address set above holds it (rc_pend.h)
+    if (!dropped && g_rc_pend.dropped) LOG("[vk] conditional rendering: more than %d timestamp reports pending, the older half let go (rc_pend.h)", RC_PEND);
 }
 static int rc_value(uint64_t a, uint64_t *v) {   // 0 = unknown at replay
-    for (int i = g_rc_npend - 1; i >= 0; i--) if (g_rc_pend[i].addr == a) { if (g_rc_pend[i].kind != 1) return 0; *v = 0; return 1; }   // a report of this submission first: not landed
+    int pk = rcp_find(&g_rc_pend, a); if (pk) { if (pk != RCP_TIMESTAMP) return 0; *v = 0; return 1; }   // a pending timestamp report first: not landed
     uint64_t f;
     if (rc_occ_get(a, &f)) {
         if (f == RC_ANY || atomic_load(&g_done) < f) { if (f != RC_ANY) g_rc_flying++; return 0; }
