@@ -70,6 +70,7 @@ static uint32_t *lm_code(const char *path, uint32_t miss, int alpha, int tff, ui
     uint32_t *pf = NULL; size_t pn = spv_pool_fit(code, n, path, &pf); if (pn) { free(code); code = pf; n = pn; }   // the texture pool by ID moved into the pool set
     uint32_t *ha = NULL; size_t hn = spv_fit_harr(code, n, path, &ha); if (hn) { free(code); code = ha; n = hn; }   // arrays past what stage_set writes shortened to it
     uint32_t *fit = NULL; size_t fn = spv_fit(code, n, path, &fit); if (fn) { free(code); code = fit; n = fn; }
+    uint32_t *fs = NULL; size_t fsn = spv_fit_fsum(code, n, path, &fs); if (fsn) { free(code); code = fs; n = fsn; }   // after the subgroup rewrites: float atomic adds summed across the subgroup (spv_fsum.h)
     uint32_t *ly = NULL; size_t ln = spv_fit_layer(code, n, path, &ly); if (ln) { free(code); code = ly; n = ln; }
     uint32_t *lb = NULL; size_t lbn = tff == 1 || tff == 2 || tff == 4 || alpha ? 0 : spv_fit_lbase(code, n, path, &lb); if (lbn) { free(code); code = lb; n = lbn; }   // the layer less or plus a base (not in the capture's wrapper, nor beside the alpha test's push constant)
     uint32_t *ts = NULL; size_t tn = spv_fit_tgs(code, n, path, &ts); if (tn) { free(code); code = ts; n = tn; }   // shared memory past the GPU's limit (spv_tgspill)

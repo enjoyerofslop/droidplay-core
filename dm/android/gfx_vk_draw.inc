@@ -637,6 +637,23 @@ static size_t spv_fit_xor(const uint32_t *code, size_t nw, const char *what, uin
 }
 // The module without subgroup operations in a stage where the GPU runs none (spv_limits.h), in *out (to free); 0 when it needs nothing. A GPU that runs them in
 // every graphics stage gets every module as translated, untouched; so does one that runs them in the module's stage. DM_SPV_LIMITS=0 (env.txt): modules as translated
+// The compute module with its float atomic add loops on a fixed word summed across the subgroup first, the elected invocation adding the sum (spv_fsum.h), in *out (to
+// free); 0 when it has none in that form, isn't a compute shader, or the GPU's subgroups lack basic or arithmetic operations in compute. Compute only: a fragment shader's
+// helper invocations would add their values to the sum. DM_SPV_FSUM=0 (env.txt): every invocation runs its own compare-and-swap loop, as translated
+static size_t spv_fit_fsum(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_FSUM"); on = !(e && *e == '0'); if (!on) LOG("[vk] DM_SPV_FSUM=0: float atomic adds stay a compare-and-swap loop in every invocation"); }
+    *out = NULL;
+    if (!on || !(g_sg_stages & VK_SHADER_STAGE_COMPUTE_BIT) || (g_sg_ops & (VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT)) != (VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT)) return 0;
+    if (!spv_fsum_wanted(code, nw)) return 0;
+    int cs = 0; for (size_t i = 5; i < nw; i += code[i] >> 16) { if (!(code[i] >> 16)) return 0; if ((code[i] & 0xffff) == 15) { cs = code[i + 1] == 5; break; } }   // OpEntryPoint GLCompute
+    if (!cs) return 0;
+    size_t cap = nw + SPV_FSUM_EXTRA(SPV_FSUM_MAX); uint32_t *s = malloc(3 * (size_t)code[3] * 4), *o = malloc(cap * 4); int why = 0;
+    size_t k = s && o ? spv_fsum(code, nw, s, o, cap, &why) : 0; free(s);
+    if (!k) { free(o); return 0; }
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1)) LOG("[vk] float atomic adds to a fixed word are summed across the subgroup, one invocation of it adding (DM_SPV_FSUM=0: each its own compare-and-swap loop). First: %s", what);
+    *out = o; return k;
+}
 static size_t spv_fit(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_LIMITS"); on = !(e && *e == '0'); }
     *out = NULL;

@@ -33,6 +33,7 @@
 #include "spv_vsinit.h"   // vertex shader outputs start as (0,0,0,1), as on the hardware (gfx_vk_draw.inc spv_fit_vsinit)
 #include "spv_inarr.h"   // attribute arrays: every location they cover (gfx_vk_draw.inc spv_io), and split into an input per location (spv_fit_inarr)
 #include "spv_gmcache.h"   // raw global memory helpers keep their last entry's range and delta in private words (gfx_vk_draw.inc spv_fit_gmcache)
+#include "spv_fsum.h"   // float atomic adds to one word summed across the subgroup first, one invocation adding (gfx_vk_draw.inc spv_fit_fsum)
 #include "spv_nophys.h"   // with raw global memory off, loads and stores through physical pointers taken out (gfx_vk_draw.inc spv_fit_nophys)
 #include "pk_guard.h"   // the start-up list's marker and skip list (gfx_vk_draw.inc pk_guard)
 #include "spv_pool.h"
@@ -82,6 +83,7 @@ static uint32_t g_sg_stages = VK_SHADER_STAGE_ALL;   // the stages that run subg
 static int g_layer_out = 1;   // vertex shaders may write the layer and viewport index: VK_EXT_shader_viewport_index_layer or Vulkan 1.2 (spv_layer.h)
 static int g_vs_layers;   // a vertex shader's layer reaches only layers below this (Arm's Mali driver: 8; gfx_vk_draw.inc vs_layer_groups), 0: all of them
 static uint32_t g_sg_size = 32;   // the subgroup size (subgroupSize): over 32, Maxwell's warps are 32-lane parts of a subgroup (spv_wide.h)
+static uint32_t g_sg_ops;   // the subgroup operations it runs (subgroupSupportedOperations; spv_fsum.h wants basic and arithmetic in compute); none when not known
 static VkPhysicalDeviceFeatures g_vk_feat; static int g_divisor;   // what the device was created with; VK_EXT_vertex_attribute_divisor or the KHR one   // what the device was created with
 // The KHR divisor without supportsNonZeroFirstInstance (the Pixel 9 Pro XL's Mali-G715): a draw with a stream stepping per N > 1 instances must start at instance 0, so its
 // base instance moves into the instance-rate streams' offsets instead (gfx_vk_draw.inc inst_shift)
@@ -124,7 +126,7 @@ static int vk_failed(char *why, size_t n, const char *what, const char *call, Vk
 // One try at the device, on the driver vk_driver_load opened: 1, or 0 with why (vk_create destroys the instance it made)
 static int vk_try(char *why, size_t nwhy) {
     // what a try whose driver then failed may have left: values, and a feature chain into its stack
-    g_sg_stages = VK_SHADER_STAGE_ALL; g_sg_size = 32; g_div_first0 = 0; g_mr_feat = (VkPhysicalDeviceDeviceMemoryReportFeaturesEXT){.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_MEMORY_REPORT_FEATURES_EXT};
+    g_sg_stages = VK_SHADER_STAGE_ALL; g_sg_size = 32; g_sg_ops = 0; g_div_first0 = 0; g_mr_feat = (VkPhysicalDeviceDeviceMemoryReportFeaturesEXT){.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_DEVICE_MEMORY_REPORT_FEATURES_EXT};
     uint32_t ni = 0; vkEnumerateInstanceExtensionProperties(NULL, &ni, NULL);
     VkExtensionProperties *ie = calloc(ni ? ni : 1, sizeof *ie); vkEnumerateInstanceExtensionProperties(NULL, &ni, ie);
     const char *iext[2]; uint32_t nie = 0;
@@ -143,7 +145,7 @@ static int vk_try(char *why, size_t nwhy) {
     if (VK_API_VERSION_MINOR(g_vk.props.apiVersion) >= 1 || VK_API_VERSION_MAJOR(g_vk.props.apiVersion) > 1) {
         VkPhysicalDeviceSubgroupProperties sg = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_SUBGROUP_PROPERTIES};
         VkPhysicalDeviceProperties2 p2 = {.sType = VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_PROPERTIES_2, .pNext = &sg};
-        vkGetPhysicalDeviceProperties2(g_vk.pd, &p2); g_sg_stages = sg.supportedStages; g_sg_size = sg.subgroupSize;
+        vkGetPhysicalDeviceProperties2(g_vk.pd, &p2); g_sg_stages = sg.supportedStages; g_sg_size = sg.subgroupSize; g_sg_ops = sg.supportedOperations;
     }
     VkPhysicalDeviceFeatures f; vkGetPhysicalDeviceFeatures(g_vk.pd, &f);
     g_vk.has_bc = f.textureCompressionBC; g_vk.has_astc = f.textureCompressionASTC_LDR;
@@ -288,7 +290,7 @@ static int vk_try(char *why, size_t nwhy) {
     ph_device_made(memreport);
     LOG("[vk] query resets: %s", g_qreset ? "on the host, the queries each chunk used, once read (VK_EXT_host_query_reset)" : qr_used() ? "in the command buffer, the queries the chunk used last time"
                                                                                                                                      : "in the command buffer, every pool at every chunk begin (DM_VK_QRESET_USED=0)");
-    LOG("[vk] descriptor sets bound at once: %u, subgroup operations in stages %#x, %u lanes", g_vk.props.limits.maxBoundDescriptorSets, g_sg_stages, g_sg_size);
+    LOG("[vk] descriptor sets bound at once: %u, subgroup operations in stages %#x (%#x of them), %u lanes", g_vk.props.limits.maxBoundDescriptorSets, g_sg_stages, g_sg_ops, g_sg_size);
     { void crash_set_gfx_hook(void (*)(void)); crash_set_gfx_hook(pb_dump); }   // a crash dump lists the pipelines being built (gfx_vk_draw.inc)
     { void crash_set_mark_hook(void (*)(void)); crash_set_mark_hook(pb_mark); }   // and a crash in a build is recorded first, for the next start (pk_guard.h)
     LOG("[vk] %s (Vulkan %u.%u.%u): BC %s, ASTC %s", g_vk.props.deviceName, VK_API_VERSION_MAJOR(g_vk.props.apiVersion), VK_API_VERSION_MINOR(g_vk.props.apiVersion),
