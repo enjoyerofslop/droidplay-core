@@ -604,12 +604,16 @@ kern_return_t vm_region_64(mach_port_t t, vm_address_t *a, vm_size_t *s, int f, 
 }
 
 // ---- thread_info: THREAD_BASIC_INFO from /proc/self/task/<tid>/stat (state) and the thread's CPU clock (user time; system time is not split) ----
+// A thread asking about itself is running, so it gets no /proc read. The NVN queue's replay thread asks twice a submission (hle_nvn.c thr_sys_ns, for a system time
+// this leaves at 0), and Ocarina of Time makes about 73 submissions a frame: the open, read and close were 4% of its replay thread on a Galaxy Z Fold 8 in Kokiri Forest
 kern_return_t thread_info(mach_port_t t, int flavor, thread_info_t out, mach_msg_type_number_t *n) {
     if (flavor != THREAD_BASIC_INFO || !out) return KERN_INVALID_ARGUMENT;
     thread_basic_info_data_t *bi = (thread_basic_info_data_t *)(void *)out; memset(bi, 0, sizeof *bi);
     clockid_t ck = (clockid_t)((~(unsigned)t << 3) | 6);   // MAKE_THREAD_CPUCLOCK(tid, CPUCLOCK_SCHED)
     struct timespec ts; if (clock_gettime(ck, &ts)) return KERN_FAILURE;
     bi->user_time.seconds = (int)ts.tv_sec; bi->user_time.microseconds = (int)(ts.tv_nsec / 1000);
+    if (n) *n = THREAD_BASIC_INFO_COUNT;
+    if ((pid_t)t == gettid()) { bi->run_state = TH_STATE_RUNNING; return KERN_SUCCESS; }
     char path[64], buf[256]; snprintf(path, sizeof path, "/proc/self/task/%u/stat", t);
     int fd = open(path, O_RDONLY | O_CLOEXEC);
     if (fd >= 0) {
@@ -620,7 +624,6 @@ kern_return_t thread_info(mach_port_t t, int flavor, thread_info_t out, mach_msg
                 case 'T': case 't': bi->run_state = TH_STATE_STOPPED; break; case 'Z': case 'X': bi->run_state = TH_STATE_HALTED; break;
                 default: bi->run_state = TH_STATE_WAITING; } }
     }
-    if (n) *n = THREAD_BASIC_INFO_COUNT;
     return KERN_SUCCESS;
 }
 
