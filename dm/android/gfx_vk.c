@@ -52,6 +52,7 @@
 #include "spv_nostore.h"   // that vertex shader without its writes, for its rasterized draws once the fragment form made them (gfx_vk_draw.inc vsw_pre)
 #include "wb_alias.h"   // a binding inside another binding's write-back of the same draw or dispatch (gfx_vk_draw.inc own_alias)
 #include "rec_desc.h"   // a descriptor set's writes packed for the recorder (gfx_vk_rec.inc R_UPDDS)
+#include "rc_pend.h"   // the counter reports replayed last, by address (rc_note, rc_value)
 #include "sb_reuse.h"   // a read-only storage buffer's copy bound again while its pages are unwritten (gfx_vk_sbcopy.inc)
 #include "apipe_rule.h"   // which draws are left out while their new pipeline builds in the background (gfx_vk_draw.inc apipe_ok)
 #include "wb_promote.h"   // whether a read of a draw's pending storage buffer write takes its copy on the GPU after a barrier (gfx_vk_draw.inc wb_promote)
@@ -2369,8 +2370,7 @@ static unsigned g_place_cpu[16], g_place_n;   // under g_bk
 // before a signal lost its condition
 static int g_rc_skip;   // a render-enable block evaluated false is active
 static uint64_t g_rc_skipped;   // clears and draws dropped by it (the first is logged)
-#define RC_PEND 256
-static struct { uint64_t addr; int kind; } g_rc_pend[RC_PEND]; static int g_rc_npend;   // reports replayed in this submission: kind 1 = timestamp (counter 0), 2 = another counter (unknown)
+static rc_pend g_rc_pend;   // the reports replayed last (rc_pend.h): kind 1 = timestamp (counter 0), 2 = another counter (unknown)
 // Addresses ever written by a non-timestamp report, each with the NVN fence of the submission its last samples-passed report is in (RC_ANY: a counter kind the host does not
 // implement, unknown for good). A samples-passed result is written when its chunk completes (post_apply, before the fence: chunk_thread), so a condition on it reads memory once
 // that fence has completed, and keeps drawing while it is in flight, as the Mac does ([Occlusion conditions read once landed]): every such condition drew before, and Ocarina of
@@ -2404,12 +2404,10 @@ static int rc_occ_get(uint64_t a, uint64_t *fence) { if (!g_rc_cap || !a) return
 static void rc_note(uint64_t a, int kind) {   // kind 1 a timestamp, 2 a counter kind the host does not implement, 3 samples passed
     if (kind >= 2) rc_occ_add(a, kind == 3 && rc_landed_on() ? atomic_load(&g_fence) + 1 : RC_ANY);   // (the fence this submission completes: mtl_sub_commit)
     if (kind == 3) kind = 2;   // (in this submission: not landed)
-    for (int i = 0; i < g_rc_npend; i++) if (g_rc_pend[i].addr == a) { g_rc_pend[i].kind = kind; return; }
-    if (g_rc_npend == RC_PEND) { memmove(g_rc_pend, g_rc_pend + RC_PEND / 2, sizeof *g_rc_pend * (RC_PEND / 2)); g_rc_npend = RC_PEND / 2; }   // the older half has landed by now
-    g_rc_pend[g_rc_npend].addr = a; g_rc_pend[g_rc_npend++].kind = kind;
+    rcp_note(&g_rc_pend, a, kind);
 }
 static int rc_value(uint64_t a, uint64_t *v) {   // 0 = unknown at replay
-    for (int i = g_rc_npend - 1; i >= 0; i--) if (g_rc_pend[i].addr == a) { if (g_rc_pend[i].kind != 1) return 0; *v = 0; return 1; }   // a report of this submission first: not landed
+    int k = rcp_kind(&g_rc_pend, a); if (k) { if (k != 1) return 0; *v = 0; return 1; }   // a report replayed last first: not landed
     uint64_t f;
     if (rc_occ_get(a, &f)) {
         if (f == RC_ANY || atomic_load(&g_done) < f) { if (f != RC_ANY) g_rc_flying++; return 0; }
