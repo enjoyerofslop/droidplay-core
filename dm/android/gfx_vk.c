@@ -35,6 +35,7 @@
 #include "spv_gmcache.h"   // raw global memory helpers keep their last entry's range and delta in private words (gfx_vk_draw.inc spv_fit_gmcache)
 #include "spv_gmpage.h"   // raw global memory helpers look a missed address up in the table's page map before they search (gfx_vk_draw.inc spv_fit_gmpage)
 #include "spv_fsum.h"   // float atomic adds to one word summed across the subgroup first, one invocation adding (gfx_vk_draw.inc spv_fit_fsum)
+#include "spv_cdim.h"   // whether a compute shader reads its group counts from c0 (gfx_vk_draw.inc vk_dispatch: an indirect dispatch's count copy)
 #include "spv_nophys.h"   // with raw global memory off, loads and stores through physical pointers taken out (gfx_vk_draw.inc spv_fit_nophys)
 #include "pk_guard.h"   // the start-up list's marker and skip list (gfx_vk_draw.inc pk_guard)
 #include "spv_pool.h"
@@ -2919,6 +2920,7 @@ void mtl_mem_stat(unsigned long long frame, unsigned long long mb) { LOG("[vk] f
     shadow_line();
     LOG("[vk] read on the GPU from a dispatch's pending write: vertex streams %llu (%llu looked up as far as the write-back's end), other bindings %llu, written in place by a later dispatch %llu; bound on another binding's copy of the same shader %llu; draws' in-place writes read by a dispatch %llu (cumulative; gfx_vk_draw.inc stream_fwd, buf_fwd, own_alias, fwd_hit)", (unsigned long long)g_fwd, (unsigned long long)g_stream_clip, (unsigned long long)g_buf_fwd[0], (unsigned long long)g_buf_fwd[1], (unsigned long long)g_alias, (unsigned long long)g_ip_read);
     LOG("[vk] render passes with every layer of their targets attached (a draw writes the layer): %llu (cumulative; gfx_vk_draw.inc rp_prepare_)", (unsigned long long)g_layered_passes);
+    LOG("[vk] indirect dispatches on the GPU's arguments whose shader reads no group count (no copy into its c0 bank, DM_VK_IND_CDIM): %llu, %llu of them after no barrier; compute shaders that read none: %llu (cumulative)", (unsigned long long)g_ind_nocpy, (unsigned long long)g_ind_nocpy_free, (unsigned long long)g_cdim_no);
     LOG("[vk] compute dispatches: %llu with no barrier before them, %llu after a barrier of the game's, %llu after a command of another kind (a full barrier), %llu runs closed by a later command (cumulative; %s)",
         (unsigned long long)g_cs_free, (unsigned long long)g_cs_gbarred, (unsigned long long)g_cs_first, (unsigned long long)g_cs_closed, cs_game() ? "ordered by the game's barriers, DM_VK_CS_BARRIER" : "DM_VK_CS_BARRIER=full");
     if (slot0_fill_on()) LOG("[vk] render passes given a scratch target in their empty colour slot 0: %llu, made with no colour slot as every one was empty: %llu (cumulative; gfx_vk_draw.inc slot0_fill_on)", (unsigned long long)g_slot0_fills, (unsigned long long)g_slot0_none);

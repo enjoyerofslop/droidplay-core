@@ -156,6 +156,7 @@ typedef struct {
     uint8_t gm;   // binds the raw pool table (a storage buffer under DMSH_GMEM_MAP_CB_SLOT): 1, 2 with the stores' write log too (gfx_vk_gmem.inc)
     uint64_t e5[2]; void *cpe5[2];   // compute: sets of storage image bindings bound to E5B9G9R9 textures, and its pipeline for each with those packed (cpipe_e5, spv_e5.h)
     uint8_t upsq;   // a compute shader DM_VK_UPSCALER_SQUARE_CS lists: its dispatches are replaced (gfx_vk_upsq.inc)
+    uint8_t cdim;   // a compute shader that may read its group counts from its c0 bank (spv_cdim.h): an indirect dispatch on the GPU's arguments copies them there first (vk_dispatch)
     const spv_bmap *bmap;   // its set's binding numbers compacted (spv_bind.h): NULL when none is at SPV_BIND_FROM or past it; its modules and its layout take it
     struct memu_t *memu;   // a task or mesh shader's compute form, on a GPU without VK_EXT_mesh_shader (gfx_vk_meshemu.inc: its facts, pipeline and pass-through vertex shader)
     uint8_t tbrows;   // a texture slot of it read a buffer texture as rows (tex_rows_slot, stage_textures): draw_view lands pending writes to those first
@@ -167,6 +168,19 @@ static int memu_on(void); static int memu_facts(vshader *s, const jv *e); static
 static int ofw_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_OFW"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_OFW=0: storage buffers draws write in an order-free way take a copy each, as before"); } return v; }
 static const char *ofw_name(uint32_t c) { static const char *n[] = {"-", "stores of one constant", "atomic adds", "atomic unsigned min", "atomic unsigned max", "atomic signed min", "atomic signed max", "atomic and", "atomic or", "atomic xor"}; return c < 10 ? n[c] : "?"; }
 static uint64_t g_ofw_shaders;   // shaders with a storage buffer written in an order-free way
+// Whether compute shader s may read its group counts from its c0 bank (spv_cdim.h), from its module as packed (the file's binding numbers, as res.json's): 0 only for a
+// shader that binds no c0 or reads none of the counts' elements. DM_VK_IND_CDIM=0 (env.txt): every shader taken to read them, as before (an indirect dispatch on the
+// GPU's arguments always copies them into its bank, between two full barriers)
+static int ind_cdim_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_IND_CDIM"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_IND_CDIM=0: every indirect dispatch on the GPU's arguments copies its group counts into its c0 bank, between two full barriers"); } return v; }
+static uint64_t g_cdim_no;   // compute shaders found not to read their group counts
+static uint8_t sh_cdim(const vshader *s, const uint32_t *w, size_t nw) {
+    if (!ind_cdim_on() || nw < 5 || !w[3]) return 1;
+    int k = 0; while (k < s->ncb && s->cb[k].slot != 0) k++;
+    if (k == s->ncb) { g_cdim_no++; return 0; }
+    uint32_t *sc = malloc((size_t)w[3] * sizeof *sc); if (!sc) return 1;
+    int r = spv_cdim_read(w, nw, (uint32_t)s->cb[k].binding, sc); free(sc);
+    g_cdim_no += !r; return (uint8_t)r;
+}
 // Which storage buffers a draw's shader writes in an order-free way (ofw.h), from its module as packed (the file's binding numbers, as res.json's). A dispatch's are left as
 // they are: a dispatch writes on its chunk's copy already, behind a barrier (buf_fwd); so is a task or mesh shader in compute form (its kernels are dispatches)
 static void ofw_note(vshader *s, const uint32_t *w, size_t nw) {
@@ -913,7 +927,7 @@ static vshader *sh_get(const char *key) {
     if (s->stage == SH_VS && rd_writes(s) && vsf_on()) { vsf_modules(s, p, sizeof p); s->nost = vsw_ok(s); }   // its writes run in the fragment stage, and its own modules (the capture's too) go without them
     snprintf(p, sizeof p, s->memu ? "%s/%s.cs.spv" : "%s/%s.spv", g_spv_dir, s->key); s->mod = s->nost ? lm_new_nost(p, s->bmap, &s->b0) : sh_module(s, p, &s->b0);   // (a task / mesh shader in compute form: its kernel, through the same rewrites and binding map)
     { size_t nw = 0; uint32_t *w = spv_read(p, &nw);
-      if (w) { if (s->stage == SH_CS || s->memu) s->tgs = tgs_bytes(w, nw, s->key); if (has_tf && nw > 1) { tf_outs = spv_tff_outs(w, nw); tf_ver = w[1]; } spv_io(w, nw, &s->io_in, &s->io_out); ofw_note(s, w, nw); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
+      if (w) { if (s->stage == SH_CS || s->memu) s->tgs = tgs_bytes(w, nw, s->key); if (has_tf && nw > 1) { tf_outs = spv_tff_outs(w, nw); tf_ver = w[1]; } spv_io(w, nw, &s->io_in, &s->io_out); ofw_note(s, w, nw); if (s->stage == SH_CS && !s->memu) s->cdim = sh_cdim(s, w, nw); s->vid = s->stage == SH_VS && spv_vid(w, nw); s->wlayer = s->stage != SH_PS && s->stage != SH_CS && spv_layer_out(w, nw); uint32_t ext[CB_MAX]; (cb_ext2_on() ? spv_cb_ext2 : spv_cb_ext)(w, nw, s->cb, s->ncb, ext); cb_ext_pick(s, ext, rext); free(w); } }
     sh_bind_apply(s);   // the layout and stage_set's writes from here on: the numbers the modules have (the matching above read the file's)
     if (s->stage == SH_VS || (s->stage == SH_MS && !s->memu)) { snprintf(p, sizeof p, "%s/%s.z.spv", g_spv_dir, s->key); s->modz = s->nost ? lm_new_nost(p, s->bmap, &s->b0) : sh_module(s, p, &s->b0); }
     if (t_lbase_info & 1) { s->lbpc = 1; s->lbase = s->stage == SH_VS && s->wlayer && !(t_lbase_info & 2); }   // its modules read the layer base (spv_fit_lbase)
@@ -2556,6 +2570,7 @@ static uint32_t g_cdim[3];   // the current dispatch's group counts (c0 + 0x200 
 // android_defaults.txt: Ocarina of Time's) turns it on; off by default until more games have run it
 static int ind_fwd_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_IND_FWD"); v = e && *e == '1'; if (v) LOG("[vk] DM_VK_IND_FWD=1: an indirect dispatch whose arguments a dispatch wrote runs on the GPU's copy of them"); } return v; }
 static VkBuffer g_c0_b; static VkDeviceSize g_c0_off;   // where stage_set put the compute c0 bank (the arena): the GPU writes the counts into it
+static uint64_t g_ind_nocpy, g_ind_nocpy_free;   // of g_ind_gpu, its shader reads no group count (no copy into its bank: spv_cdim.h); of them, after no barrier
 static uint64_t g_ind_gpu, g_ind_cpu, g_ind_cpu_wait, g_ind_seq, g_ind_inpl;   // g_ind_inpl: of g_ind_gpu, read in place in a placed pool   // indirect dispatches run on the GPU's copy of their arguments / with the arguments read on the CPU / of them, after a wait
 // The GPU's copy of the arguments is good only in the chunk they were looked up from: fwd_find keeps the writer's chunk (its arena holds the copy) from being recorded again
 // until that chunk completes (hold), and a writer in the chunk being recorded is kept by nothing. A sync between the lookup and the dispatch's record submits that chunk and
@@ -4314,10 +4329,12 @@ static int vk_dispatch(const p_dispatch *dp) {
     if (g_e5_need) { cpipe_t *ce = cpipe_e5(s, g_e5_need); if (!ce) return 0; cp = ce; }   // E5B9G9R9 storage images: the pipeline that packs RGB9E5 into their R32_UINT views
     g_cs_in_disp = 1; VkCommandBuffer c = cb(); g_cs_in_disp = 0; if (!c) return 0;
     if (gpu_args == 1 && C->seq != aseq && ind_again_on()) { RED_ONCE(202, "indirect dispatch %s: its chunk moved again after its arguments were looked up again: dropped", s->key); return 0; }
-    int chain = cs_game() && g_cs_chain && C->seq == g_cs_chain_seq && !gpu_args;   // the command before this one in the command buffer is a dispatch with its barrier deferred (gfx_vk.c cs_chain_close); the copy of the counts below reads the writer's output: a barrier first
+    int ccopy = gpu_args && s->cdim;   // the counts copied into the bank on the GPU, for a shader that may read them there (spv_cdim.h); one that doesn't runs on vkCmdDispatchIndirect alone
+    int chain = cs_game() && g_cs_chain && C->seq == g_cs_chain_seq && !ccopy;   // the command before this one in the command buffer is a dispatch with its barrier deferred (gfx_vk.c cs_chain_close); the copy of the counts below reads the writer's output: a barrier first
+    if (gpu_args && !ccopy) { g_ind_nocpy++; g_ind_nocpy_free += chain && !g_cs_gbar; }   // the arguments' writer is ordered before them by the game's barrier, as a dispatch's data is (NVN's indirect-data barrier)
     if (!chain) { cb_barrier(); g_cs_first++; g_cs_chain = 0; } else if (g_cs_gbar) { cb_barrier(); g_cs_gbarred++; g_cs_chain = 0; } else g_cs_free++;   // a run left open stays open: a return before the dispatch below leaves its barrier to the next
     g_cs_gbar = 0;
-    if (gpu_args) { VkBufferCopy cpy[2] = {{io, g_c0_off + DMSH_C0_DISPATCH, 12}, {io, g_c0_off + DMSH_C0_DISPATCH_NVN2, 12}};   // the group counts into the bank, where the shader reads them (bank_c0)
+    if (ccopy) { VkBufferCopy cpy[2] = {{io, g_c0_off + DMSH_C0_DISPATCH, 12}, {io, g_c0_off + DMSH_C0_DISPATCH_NVN2, 12}};   // the group counts into the bank, where the shader reads them (bank_c0)
         vkCmdCopyBuffer(c, ib, g_c0_b, dm_sdk_ounce() ? 2u : 1u, cpy); cb_barrier(); }
     cp->last = atomic_load(&g_presents); cp->seq = C->seq;   // (gfx_vk_pheavy.inc)
     vkCmdBindPipeline(c, VK_PIPELINE_BIND_POINT_COMPUTE, cp->p);
