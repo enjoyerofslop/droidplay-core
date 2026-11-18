@@ -1481,6 +1481,7 @@ typedef struct {
     uint8_t rbx;   // NVN RGBA4 / RGB5 / RGB5A1 / RGB565: the image holds the Vulkan format's order and guest bytes are exchanged where they cross (rb16.h: red's bit, 4 for RGBA4); 0: as they are
     uint8_t ds_copied;   // a depth image a copy wrote since its last render pass (copy_t2t; gfx_vk_dscopy.inc copied_depth_pass)
     uint8_t sparse; uint64_t vgen, vseen;   // uploaded through its sparse pool's page table (sparse_tex), and the mapping generations of that upload and of the last look
+    struct { VkImage img; VkImageViewType type; VkFormat fmt; uint32_t level, nlevels, layer, nlayers; VkImageAspectFlags aspect; uint8_t swz[4], has_swz, slice; VkImageView iv; } vm;   // view_get's last answer for this image, as asked (gfx_vk_draw.inc)
 } vtex;
 static nvn_hmap g_tex = {.klen = 8}, g_cpuw = {.klen = 8};   // serial → vtex; serials the CPU wrote (WriteTexels). Keyed by the 8-byte serial
 static uint64_t g_pkg_uploads, g_pkg_reuploads, g_pkg_edge_skips, g_up_bytes, g_draws_skipped;
@@ -1719,6 +1720,7 @@ static int vt_storage_up(vtex *v) {
     cb_barrier();
     vkb_frame_forget(v->serial);
     views_drop(v->img); dead_add(3, (uint64_t)v->img); vt_mem_drop(v);
+    v->vm.iv = VK_NULL_HANDLE;   // (its views went with the old image: views_drop)
     v->img = img; v->mem = mem; v->mem_type = mty; v->usage = u; v->ext_store = ext; v->mutable_ = 1; v->fixed_fmt = 0; g_vt_gen++; im_in(v, msz);
     if (g_st_up++ < 8) LOG("[vk] texture ser=%llu %ux%u format %d bound to an image slot without storage use: made again with it%s (%llu so far)", (unsigned long long)v->serial, v->w, v->h, f,
                            ext ? (f == VK_FORMAT_E5B9G9R9_UFLOAT_PACK32 ? ", stored through an R32_UINT view, RGB9E5 packed by the shader" : ", stored through its UNORM twin") : "", (unsigned long long)g_st_up);

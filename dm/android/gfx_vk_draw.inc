@@ -1214,7 +1214,23 @@ static int g_view_slice;   // view_get: a render target's view (rp_start): a 3D 
 static VkFormat g_view_fmt;   // view_get: a format other than the image's (a storage view in a shader's declared format; the image is mutable), 0 = the image's
 static nvn_hmap g_views = {.klen = sizeof(view_key)};
 static VkFormat view_format(const vtex *v, const view_t *vv);   // below: a texture view's own format (0: the image's)
+// The view asked last of each image is kept in it (vtex vm) with what it was asked with, and given again for the same question without the key and the table lookup: Ocarina
+// of Time's draws ask about 7,000 times a frame, nearly always the same view of each texture (view_get and its table lookup 3.7% of its replay thread on a Galaxy Z Fold 8).
+// A view goes only with its image (views_drop: the vtex is destroyed, or its image made again, which forgets the memo), so the kept handle is the table's. DM_VK_VIEW_MEMO=0
+// (env.txt): every lookup builds the key and searches the table, as before
+static int view_memo_on(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_VIEW_MEMO"); v = !(e && *e == '0'); if (!v) LOG("[vk] DM_VK_VIEW_MEMO=0: every view is looked up in the table"); } return v; }
+static VkImageView view_get_(const vtex *v, VkImageViewType type, uint32_t level, uint32_t nlevels, uint32_t layer, uint32_t nlayers, VkImageAspectFlags aspect, const uint8_t swz[4]);
 static VkImageView view_get(const vtex *v, VkImageViewType type, uint32_t level, uint32_t nlevels, uint32_t layer, uint32_t nlayers, VkImageAspectFlags aspect, const uint8_t swz[4]) {
+    if (!view_memo_on()) return view_get_(v, type, level, nlevels, layer, nlayers, aspect, swz);
+    vtex *w = (vtex *)(uintptr_t)v;   // (the memo only: what the vtex describes is not changed)
+    if (w->vm.iv && w->vm.img == v->img && w->vm.type == type && w->vm.fmt == g_view_fmt && w->vm.slice == (uint8_t)!!g_view_slice && w->vm.level == level && w->vm.nlevels == nlevels
+        && w->vm.layer == layer && w->vm.nlayers == nlayers && w->vm.aspect == aspect && w->vm.has_swz == !!swz && (!swz || !memcmp(w->vm.swz, swz, 4))) return w->vm.iv;
+    VkImageView iv = view_get_(v, type, level, nlevels, layer, nlayers, aspect, swz);
+    if (iv) { w->vm.img = v->img; w->vm.type = type; w->vm.fmt = g_view_fmt; w->vm.slice = (uint8_t)!!g_view_slice; w->vm.level = level; w->vm.nlevels = nlevels; w->vm.layer = layer;
+              w->vm.nlayers = nlayers; w->vm.aspect = aspect; w->vm.has_swz = !!swz; if (swz) memcpy(w->vm.swz, swz, 4); w->vm.iv = iv; }
+    return iv;
+}
+static VkImageView view_get_(const vtex *v, VkImageViewType type, uint32_t level, uint32_t nlevels, uint32_t layer, uint32_t nlayers, VkImageAspectFlags aspect, const uint8_t swz[4]) {
     view_key k; memset(&k, 0, sizeof k);
     if (level >= v->levels) level = v->levels - 1;
     if (g_view_slice && v->type == VK_IMAGE_TYPE_3D) {   // a render target's slice of a 3D image (layer = the depth slice): a 2D view of it, which the image is 2D_ARRAY_COMPATIBLE for (gfx_vk.c vt_new);
