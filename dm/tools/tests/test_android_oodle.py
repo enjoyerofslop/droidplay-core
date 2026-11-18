@@ -100,9 +100,9 @@ class FormatTest(unittest.TestCase):
 
 class PhoneTest(unittest.TestCase):
     """Phone.job against a stand-in for adb: what it runs on the phone, and what it does with the answers"""
-    def run_job(self, df_free_k, pulled, size_word=None, log='DM_OODLE_JOB: 1 records decoded', logged=None, host=1 << 40, pull_error=None):
+    def run_job(self, df_free_k, pulled, size_word=None, log='DM_OODLE_JOB: 1 records decoded', logged=None, host=1 << 40, pull_error=None, env=None):
         """log: what the grep of the game's log.txt finds; pulled[0] None: the game left no output. logged, a list: gets the job's log file as the build wrote it.
-        host: bytes free on this computer's drive; pull_error: what adb pull fails with"""
+        env, a list: gets the env.txt the job pushed. host: bytes free on this computer's drive; pull_error: what adb pull fails with"""
         calls = []
         def adb(serial, *args, check=True):
             calls.append(args)
@@ -124,6 +124,7 @@ class PhoneTest(unittest.TestCase):
             try: r = ph.job([(stream(b'abc'), 3)])
             except ValueError as e: r = e
             if logged is not None: logged.append((Path(d) / 'oodle_phone_1.log').read_text())
+            if env is not None: env.append((Path(d) / 'tmp' / 'oodle_env.txt').read_text())
             return r, calls
 
     def test_too_little_space_stops_before_the_job(self):
@@ -166,6 +167,14 @@ class PhoneTest(unittest.TestCase):
         self.assertIsInstance(r, ValueError); self.assertIn('stopped before it decoded anything', str(r))
         self.assertIn('---- ls -l /sdcard/x ----', logged[0]); self.assertIn('exited cleanly (0)', logged[0]); self.assertIn('no host for it', logged[0])
         self.assertFalse([c for c in calls if c[0] == 'pull'])
+
+    def test_the_job_mounts_an_empty_rom_of_its_own(self):   # the host's rom mount refuses a game whose files are all missing (hle_fs.c), and a job reads none: its env points DM_ROMFS
+        env, good = [], b'DMOR' + struct.pack('<I', 1) + struct.pack('<I', 3) + b'abc'   # at an empty folder beside the job, not at the game folder's RomFS
+        r, calls = self.run_job(10 << 20, [good], env=env)
+        self.assertEqual(r, [b'abc'])
+        self.assertTrue(any(c[0] == 'shell' and 'mkdir -p /sdcard/x/oodle_romfs' in c[1] for c in calls))
+        self.assertIn('DM_ROMFS=/sdcard/x/oodle_romfs', env[0])
+        self.assertFalse(any('games' in c[1] and 'RomFS' in c[1] for c in calls if c[0] == 'shell'))   # the game folder keeps no placeholder
 
 
 class SplitCacheTest(unittest.TestCase):

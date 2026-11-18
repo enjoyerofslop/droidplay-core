@@ -3,7 +3,7 @@
 # An Unreal game's shaders are Oodle-compressed (Octopath Traveler 0: each shader in its paks' shader code archives; FINAL FANTASY RESONANCE: its IoStore container's blocks and
 # each shader group), and only the decoder statically linked into main undoes it (dm/host/hle_oodle.c). The NSP scripts run it in the Mac host; a Windows or Linux PC cannot run
 # the game's arm64 code, but the phone can: the game's Android host runs the same job (DM_OODLE_JOB, before nnMain, then it exits), with only the game's rewritten code on the
-# phone (no RomFS: the job reads none). FINAL FANTASY RESONANCE's decoded shader group matched the Mac's archive byte for byte (35 of 35 shaders, OnePlus Pad 3).
+# phone (no RomFS: the job reads none, and its env.txt points DM_ROMFS at an empty folder of its own, since the host's rom mount refuses a game whose files are all missing). FINAL FANTASY RESONANCE's decoded shader group matched the Mac's archive byte for byte (35 of 35 shaders, OnePlus Pad 3).
 # A job is one launch of the game, so the decodes uepak.py asks for one at a time are batched (Rounds): uepak runs with a decoder that answers from what the phone decoded so far
 # and records the rest, the records go to the phone as one job, and uepak runs again until it asks for nothing new. An IoStore container takes two or three rounds (its blocks,
 # then the shader groups inside them).
@@ -118,6 +118,10 @@ class Phone:
         self.jobs += 1; t0 = time.time()
         local = self.work / 'tmp' / 'oodle_phone.job'; local.parent.mkdir(parents=True, exist_ok=True); local.write_bytes(job_bytes(records))
         rjob, rlog, renv = f'{self.remote}/oodle.job', f'{self.remote}/log.txt', f'{self.remote}/env.txt'
+        rom = f'{self.remote}/oodle_romfs'
+        # The job's host mounts the rom before anything runs (hle_fs.c) and refuses a game whose files are all missing, and a job reads none: env.txt points DM_ROMFS at an empty
+        # folder of the job's own, beside the job file. Not the game folder's RomFS, which start_host prefers over RomFS.img: an empty one left there would show a later launch an empty game
+        self.sh(f'mkdir -p {rom}; chmod 777 {rom}', check=False)   # 777: adb's shell user made it, and Android 16 lets the game read only what it can
         # the job writes its whole output next to its file, and the game's host does not stop when a write fails: on a phone short of space the output came back cut (issue #111)
         need, free = local.stat().st_size + out_size(records) + SPARE, free_bytes(self.sh(f'df -k {self.remote}', check=False))
         if free is not None and free < need:
@@ -127,7 +131,7 @@ class Phone:
         try:
             self.sh(f'am force-stop {self.pkg}; rm -f {rjob} {rjob}.out {rlog}')
             self.adb(self.serial, 'push', local, rjob)
-            envf = self.work / 'tmp' / 'oodle_env.txt'; envf.write_text(f'DM_OODLE_JOB={rjob}\n', encoding='utf-8', newline='\n')
+            envf = self.work / 'tmp' / 'oodle_env.txt'; envf.write_text(f'DM_OODLE_JOB={rjob}\nDM_ROMFS={rom}\n', encoding='utf-8', newline='\n')
             self.adb(self.serial, 'push', envf, renv)
             self.sh(f'chmod 666 {rjob} {renv}', check=False)   # Android 16 (a OnePlus Pad 3): the game cannot read what adb's shell user wrote otherwise
             self.sh(f'am start -n {self.pkg}/.Launcher --es game {self.gid} --ez play true')

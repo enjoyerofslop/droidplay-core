@@ -424,14 +424,14 @@ def ue_decode(dirs, pkg_ver, nsp_dir, patched, work, logs, env, g, serial, sdk, 
 
 def oodle_phone(serial, sdk, g, game, pkg_ver, nsp_dir, patched, work, logs, env):
     """The game's host into the app and its rewritten code to the phone, for the jobs of scripts/android_oodle.py Phone (ue_decode, oodle_decode): the host does not depend on the
-    shaders, which do not exist yet. Only the code goes: a job reads no RomFS"""
+    shaders, which do not exist yet. Only the code goes: a job reads no RomFS, and its env.txt points DM_ROMFS at an empty folder of its own (android_oodle.py), since the host's
+    rom mount refuses a game whose files are all missing and this game folder has neither RomFS nor RomFS.img yet"""
     import android_oodle   # pyright: ignore[reportMissingImports]
     so, loader, ndk = build_host(sdk, g.id, work, logs, env); st = build_selftest(ndk, work, logs, env)
     library_add(g.id, so, loader, st, {'title_id': g.id, 'name': bi.nacp.name(game / 'control.nacp') or g.get('name', ''), 'version': pkg_ver,
                                        'display': bi.nacp.version(game / 'control.nacp'), 'nsp_dir': str(nsp_dir)})
     install(serial, make_apk(sdk, logs, env), logs)
     dst = f'{REMOTE}/games/{g.id}'; adb(serial, 'shell', 'mkdir', '-p', dst); adb(serial, 'shell', 'rm', '-rf', f'{dst}/code')
-    adb(serial, 'shell', f'[ -e {sh_quote(dst + "/RomFS.img")} ] || mkdir -p {sh_quote(dst + "/RomFS")}')
     push_dir(serial, patched, dst, 'code', logs / 'adb_push_code_oodle.log'); open_tree(serial, dst)
     return android_oodle.Phone(adb, serial, g.id, REMOTE, PKG, work, logs, say)
 
