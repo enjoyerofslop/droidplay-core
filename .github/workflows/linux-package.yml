@@ -61,9 +61,12 @@ jobs:
           version: '0.13.7'
           enable-cache: false
       # The libraries DroidPlay takes from the system (a desktop has them; the runner's image doesn't have them all): stage.sh draws the icon and opens the
-      # window with the staged Qt
+      # window with the staged Qt. The image's package lists go stale: once Ubuntu replaces a package (a mesa security update did on 2026-11-18), the
+      # version they name is gone from the archive and the install fails with 404, so the lists are fetched first
       - name: The desktop libraries Qt needs
-        run: sudo apt-get install -y -qq libegl1 libgl1 libfontconfig1 libfreetype6 libglib2.0-0 libdbus-1-3 libx11-6 libx11-xcb1 libxcb1 > /dev/null
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq libegl1 libgl1 libfontconfig1 libfreetype6 libglib2.0-0 libdbus-1-3 libx11-6 libx11-xcb1 libxcb1 > /dev/null
       - name: Stage DroidPlay, check it and pack the AppImage
         env:
           VERSION: ${{ inputs.version }}   # through the environment, not pasted into the script
