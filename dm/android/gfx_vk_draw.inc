@@ -708,6 +708,33 @@ static size_t spv_fit(const uint32_t *code, size_t nw, const char *what, uint32_
         LOG("[RED] [vk] %s uses subgroup operations in a stage where the GPU has none (it runs them in stages %#x), some of which spv_limits does not rewrite: made as it is", what, g_sg_stages);
     *out = o; return k;
 }
+// Every shuffle as ShuffleXor by lane ^ index (spv_shx.h), after the subgroup rewrites above: Qualcomm's compiler in its V@07xx drivers crashes on the translator's
+// OpGroupNonUniformShuffle (SIGSEGV at fault address 0x48 in vkCreate*Pipelines: libllvm-qgl.so+0x2dcef0 on a Retroid Pocket 5's V@0746, +0x463e84 on a Retroid
+// Pocket G2's V@0762, where the crash guard skipped Ocarina of Time's and Tears of the Kingdom's shuffling shaders one per start, droidplay-core#512). The same lane
+// is read, so the module does the same. On by default on Qualcomm's own driver V@0700 to V@0799 (the major version in driverVersion bits 12-21: the Razr's 730 at
+// V@0615, the Odin 2's 740 at V@0676 and the 8xx phones at V@0800 and up build the shuffle as it is, and are left so). DM_SPV_SHX=1 (env.txt): on any GPU; 0: off
+static int shx_on(void) {
+    static int v = -1;
+    if (v < 0) {
+        const char *e = getenv("DM_SPV_SHX"); uint32_t ver = g_vk.props.driverVersion >> 12 & 0x3ff;
+        v = e && *e == '0' ? 0 : e && *e == '1' ? 1 : g_qcom_driver && ver >= 700 && ver < 800;
+    }
+    return v;
+}
+static size_t spv_fit_shx(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
+    *out = NULL;
+    int sh = shx_on() ? spv_shx_count(code, nw) : 0;
+    if (!sh) return 0;
+    size_t cap = nw + SPV_SHX_SITE * (size_t)sh; uint32_t *o = malloc(cap * 4); int ns = 0;
+    size_t k = o ? spv_shx(code, nw, o, cap, &ns) : 0;
+    if (!k) { free(o); RED_ONCE(203, "%s has shuffles but no SubgroupLocalInvocationId built-in: made with them as they are, which this driver's compiler may crash on", what); return 0; }
+    static _Atomic int logged;
+    if (!atomic_exchange(&logged, 1))
+        LOG("[vk] %s (driver %#x): shuffles are made ShuffleXor by the lane ^ their index, the same lane read, as this driver's compiler crashes on the shuffle (DM_SPV_SHX=0: as they are). First: %s, %d",
+            g_vk.props.deviceName, g_vk.props.driverVersion, what, ns);
+    if (vk_debug()) LOG("[vk] %s: %d shuffles made ShuffleXor", what, ns);
+    *out = o; return k;
+}
 static size_t spv_pool_fit(const uint32_t *code, size_t nw, const char *what, uint32_t **out);   // gfx_vk_pool.inc
 static size_t spv_fit_harr(const uint32_t *code, size_t nw, const char *what, uint32_t **out);   // after gfx_vk_pool.inc (POOL_SET)
 static int pool_on(void); static void pool_note_shader(vshader *s, int info); static void pool_drop_view(VkImageView iv);
