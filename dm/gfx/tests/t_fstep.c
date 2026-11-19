@@ -582,6 +582,17 @@ int main(void) {
         snprintf(b, sizeof b, "never-held, an overload: three long trials, then hold 3 stays (k %d, top-clock trials %llu, failed %llu)", m.s.k, (unsigned long long)m.s.tnewtrials, (unsigned long long)m.s.failed);
         check(m.s.k == 3 && m.s.tnewtrials == 3 && m.s.failed == 3 && m.s.dropped - d0 < 1 && (m.real - r0) - (m.game - g0) <= FSTEP_DEBT_MAX + 1, b);
     }
+    {   // A held hold under a thermal cap: the clock is read and the GPU would not fit hold 2 even at the top clock allowed now (34 ms at a 660 MHz cap): its trials keep the
+        // normal grace; with the cap lifted (the same 34 ms at 660 of 1,200 MHz) they get the long one
+        for (int capped = 0; capped < 2; capped++) {
+            sim m = {0}; m.s.tgrace = FSTEP_TGRACE; m.s.tnew = 1; run(&m, 60, 0.5, 1, 3, 0);
+            m.gpu = 1.6; m.s.gpu_top = 1.6 * 900 / 1200; run(&m, 400, 1.6, 1, 3, 0); run(&m, 3, 3.5, 1, 3, 0);   // hold 2 held, then a heavy moment
+            int grace = -1, tg = -1;
+            for (int i = 0; i < 3000 && grace < 0; i++) { int k0 = m.s.k; m.gpu = 2.05; m.s.gpu_top = capped ? 2.05 : 2.05 * 660 / 1200; run(&m, 1, 2.05, 1, 3, 0); if (k0 == 3 && m.s.k == 2) { grace = m.s.grace; tg = m.s.tg; } }
+            snprintf(b, sizeof b, "  a held hold %s: its trial's grace %d", capped ? "under a thermal cap (no fit at the top clock allowed)" : "with the cap lifted (fits at the top clock)", grace);
+            check(capped ? tg == 0 && grace == FSTEP_GRACE : tg == 1 && grace == FSTEP_TGRACE, b);
+        }
+    }
     printf("== %d checks, %d failed ==\n", checks, fail);
     return fail != 0;
 }

@@ -66,7 +66,9 @@
 // hold failing in a row stop the long grace there until the frames hold that hold again or a trial to it holds. Trials to kmin keep FSTEP_GRACE (kheld is not learned there)
 // A hold the scene never held gets the long grace too when the caller sets tnew and the GPU would fit it at its top clock: gpu_top, the frame's GPU time scaled by the clock
 // (GPU time x current MHz / top MHz, from the caller; 0 where the clock is not readable), averaged at the current hold (gtop), at most FSTEP_FIT of the hold. Without a clock
-// the cost of the frames on time at the current hold (ccur) stands in, which at a governor's low clock rarely fits. And such a fit, FSTEP_RUN frames in a row, starts a trial
+// the cost of the frames on time at the current hold (ccur) stands in, which at a governor's low clock rarely fits. Where the clock is read, a held hold needs that fit too:
+// under a thermal cap the top clock allowed falls, and a Galaxy S25 Edge capped at 660-734 MHz, where hold 2 never fits, took 48 long trials in 15 minutes (each held hold 2
+// for a few hundred frames once in a while, which ended the three-failure stop). And such a fit, FSTEP_RUN frames in a row, starts a trial
 // itself (no other rule would: no cost that held, no GPU fit at the current clock, no reference at kmin for a probe): Ocarina of Time on a Galaxy Z Fold 8, GPU 2.2 vsyncs at hold
 // 3 at 578 MHz, 1.2 at its top clock. The three-failure stop and the early ends hold for these as for the others
 #define FSTEP_TGRACE 180      // the long grace (the caller's default; hle_nvn.c DM_FSTEP_TRIAL_GRACE): 6 s at hold 2 when every frame shows 2 vsyncs, 9 s when every one shows 3
@@ -121,7 +123,8 @@ static inline int nvn_fstep_topfit(const nvn_fstep *s, int to) {
 // long ones there have not failed three times running
 static inline int nvn_fstep_tgrace(nvn_fstep *s, int to, int kmin) {
     s->tbad = 0;
-    s->tg = s->tgt = s->tgrace > 0 && to > kmin && to <= FSTEP_MAX && (s->kheld[to] > 0 || (s->tnew && nvn_fstep_topfit(s, to))) && s->tgfail[to] < 3;
+    int clock = s->gtn >= 8 && s->gtop > 0;   // the clock is read: a hold that does not fit even at the top clock allowed now (a thermal cap) gets no long grace, held or not
+    s->tg = s->tgt = s->tgrace > 0 && to > kmin && to <= FSTEP_MAX && (s->kheld[to] > 0 || (s->tnew && nvn_fstep_topfit(s, to))) && (!clock || nvn_fstep_topfit(s, to)) && s->tgfail[to] < 3;
     if (!s->tg) return FSTEP_GRACE;
     s->tgtrials++; return s->tgrace > FSTEP_GRACE ? s->tgrace : FSTEP_GRACE;
 }

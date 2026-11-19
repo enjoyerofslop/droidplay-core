@@ -2222,7 +2222,7 @@ static void fstep_tick(const win_t *o, int c) {
     g_fs.per_vsync = fstep_hz() / 60;
     g_fs.gpu = gpu;   // the soft-late rule and the GPU-fit trial (nvn_fstep.h FSTEP_LATE_SOFT)
 #if DM_ANDROID
-    { double sc = g_fs.tnew && gpu > 0 ? fstep_clock_scale() : 0; g_fs.gpu_top = sc > 0 ? gpu * sc : 0; }   // the GPU time at its top clock (nvn_fstep.h tnew)
+    { double sc = g_fs.tgrace > 0 && gpu > 0 ? fstep_clock_scale() : 0; g_fs.gpu_top = sc > 0 ? gpu * sc : 0; }   // the GPU time at its top clock (nvn_fstep.h tnew, and the long grace under a thermal cap)
 #endif
     int n = nvn_fstep_next(&g_fs, shown, cost, kmin, kmax, fixed, cslow || gslow);
     { static int tr = -1; if (tr < 0) { const char *e = getenv("DM_FSTEP_TRACE"); tr = e && atoi(e) > 0; }   // DM_FSTEP_TRACE=1: the controller's inputs every 15th frame (vsyncs)
