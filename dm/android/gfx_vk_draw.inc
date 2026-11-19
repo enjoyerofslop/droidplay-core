@@ -456,13 +456,39 @@ static size_t spv_fit_wide(const uint32_t *code, size_t nw, const char *what, ui
         LOG("[RED] [vk] %s uses subgroup operations spv_wide does not rewrite for the GPU's %u-lane subgroups: made as it is, lanes 32 and up may read other lanes", what, g_sg_size);
     *out = o; return k;
 }
+// A task / mesh kernel (compute form, <key>.cs.spv) with its 32-lane warp as its whole workgroup on a GPU whose subgroups are narrower (spv_wg32.h: the Pixel 9
+// Pro XL's Mali-G715, 16 lanes), in *out (to free); 0 when it needs nothing: 32 lanes or more, not a kernel of one warp a workgroup, or a subgroup operation it
+// does not take (red line). A module it rewrote skips spv_narrow (t_wg32). DM_SPV_WG32=0 (env.txt): kernels as before, through spv_narrow
+static __thread int t_wg32;
+static size_t spv_fit_wg32(const uint32_t *code, size_t nw, const char *path, uint32_t **out) {
+    static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_WG32"); on = !(e && *e == '0'); }
+    *out = NULL; t_wg32 = 0;
+    size_t pl = strlen(path);
+    if (!on || g_sg_size >= 32 || !(g_sg_stages & VK_SHADER_STAGE_COMPUTE_BIT) || pl < 7 || strcmp(path + pl - 7, ".cs.spv") || !spv_wg32_wanted(code, nw)) return 0;
+    uint32_t b = code[3]; uint8_t *div = malloc(b); uint32_t *sc = malloc(SPV_WG32_DIV_SC(b, nw) * 4), *o = NULL; size_t need = 0, k = 0; int what = 0, made = 0, part = 0, dok = 0;
+    if (div && sc) dok = spv_wg32_div(code, nw, div, sc);   // (0: every block divergent, all sites per subgroup)
+    free(sc); sc = malloc(2 * (size_t)b * 4);
+    if (div && sc) { spv_wg32(code, nw, g_sg_size, div, sc, NULL, 0, &need, &what, &made, &part); if (need && (o = malloc(need * 4))) k = spv_wg32(code, nw, g_sg_size, div, sc, o, need, &need, &what, &made, &part); }
+    free(sc); free(div);
+    if (!k) { free(o); o = NULL; }
+    static _Atomic int logged, nred;
+    if (k && !atomic_exchange(&logged, 1))
+        LOG("[vk] the GPU's subgroups have %u lanes: a task / mesh kernel's 32-lane warp is its whole workgroup (lane IDs and masks the invocation's index; ballots, anys "
+            "and shuffles through workgroup memory where every invocation is there, per subgroup where lanes may be apart; DM_SPV_WG32=0: as before). First: %s, %d / %d sites%s",
+            g_sg_size, path, made, part, dok ? "" : " (divergence not worked out: every site per subgroup)");
+    if (k && vk_debug()) LOG("[vk] %s: warp as the workgroup, %d sites through workgroup memory, %d per subgroup", path, made, part);
+    if (!k && (what & SPV_WG32_OTHER) && atomic_fetch_add(&nred, 1) < 8)
+        LOG("[RED] [vk] %s: a subgroup operation spv_wg32 does not take (or no room): the kernel's warp runs as a subgroup of %u lanes (spv_narrow)", path, g_sg_size);
+    t_wg32 = k != 0;
+    *out = o; return k;
+}
 // The module with each subgroup a warp of its own on a GPU whose subgroups are narrower than Maxwell's 32 lanes (spv_narrow.h: the Pixel 9 Pro XL's Mali-G715,
 // 16 lanes), in *out (to free); 0 when it needs nothing: 32 lanes or more, a stage that runs no subgroup operations (spv_limits'), or a module with no shuffle.
 // DM_SPV_NARROW=0 (env.txt): modules as translated
 static size_t spv_fit_narrow(const uint32_t *code, size_t nw, const char *what, uint32_t **out) {
     static int on = -1; if (on < 0) { const char *e = getenv("DM_SPV_NARROW"); on = !(e && *e == '0'); }
     *out = NULL;
-    if (!on || g_sg_size >= 32 || !spv_narrow_wanted(code, nw)) return 0;
+    if (!on || g_sg_size >= 32 || t_wg32 || !spv_narrow_wanted(code, nw)) return 0;   // (a kernel spv_wg32 rewrote: its shuffles are its)
     size_t sm = 4096; uint32_t *s = malloc((9 * (size_t)code[3] + 2 * sm) * 4), *o = NULL; size_t need = 0, k = 0; int got = 0;
     if (!s) return 0;
     spv_narrow(code, nw, g_sg_stages, g_sg_size, s, sm, NULL, 0, &need, &got);
