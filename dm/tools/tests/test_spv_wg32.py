@@ -331,6 +331,7 @@ class SpvWg32(unittest.TestCase):
     def test_divergence(self):   # the blocks after the lanes past the count return, and the leader's, may hold some lanes; the rest every lane
         data = self.asm(KERNEL, 'kd'); n = len(data) // 4; w = (ctypes.c_uint32 * n).from_buffer_copy(data)
         d, ok = self.div(w, n); self.assertEqual(ok, 1)
+        assert NDK is not None   # setUpClass skips without it
         dis = subprocess.run([NDK / 'shader-tools' / HOST / f'spirv-dis{EXE}', '--raw-id', self.tmp / 'kd.spv'], capture_output=True, text=True).stdout
         raw = [l.split()[0] for l in dis.splitlines() if l.strip().endswith('= OpLabel')]
         nam = [l.split()[0] for l in KERNEL.splitlines() if l.endswith('= OpLabel')]   # (the same order)
@@ -389,6 +390,7 @@ class SpvWg32(unittest.TestCase):
         if size < 32:
             out, what, made, part = self.run_on(data, size=size)
             self.assertEqual((made, part), (3, 1))   # the ballot, any and shuffle before the return; the ballot of true after it
+            assert out is not None, what
             (self.tmp / 'dev_out.spv').write_bytes(out); subprocess.run([adb, '-s', serial, 'push', self.tmp / 'dev_out.spv', d], check=True, capture_output=True)
             result = on_device('dev_out.spv')
         else: result = translated
