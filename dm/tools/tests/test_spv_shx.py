@@ -148,7 +148,7 @@ class SpvShx(unittest.TestCase):
             with self.subTest(name):
                 data = self.asm(text, name); before = self.dis(data, name + '0').count('OpGroupNonUniformShuffle ')
                 out, ns = self.shx(data)
-                self.assertIsNotNone(out); self.assertEqual(ns, before); self.assertGreater(ns, 0)
+                assert out is not None; self.assertEqual(ns, before); self.assertGreater(ns, 0)
                 ok, err = self.valid(out, name); self.assertTrue(ok, err)
                 d = self.dis(out, name)
                 self.assertNotIn('OpGroupNonUniformShuffle ', d); self.assertEqual(d.count('OpGroupNonUniformShuffleXor'), before + self.dis(data, name + '1').count('OpGroupNonUniformShuffleXor'))
@@ -212,7 +212,7 @@ class SpvShx(unittest.TestCase):
         compiled, rewritten = on_device('st.spv'), on_device('stx.spv')
         subprocess.run([adb, '-s', serial, 'shell', 'rm', '-r', d], capture_output=True)
         self.assertTrue(rewritten.endswith('exit 0'), rewritten)
-        self.assertTrue(compiled.endswith('exit 0') or compiled.endswith('exit 139'), compiled)   # 139: the compiler died on the plain shuffle
+        self.assertTrue(compiled.endswith(('exit 0', 'exit 139')), compiled)   # 139: the compiler died on the plain shuffle
 
 
 if __name__ == '__main__':
