@@ -248,6 +248,44 @@ int main(void) {
         snprintf(b, sizeof b, "GPU time follows the view, never fits hold 1 (OoT): one probe (probes %llu, frames at hold 1 after it %llu, reference %.2f)", (unsigned long long)m.s.probes, (unsigned long long)h1, g.ref);
         check(m.s.probes <= 1 && h1 == 0, b);
     }
+    {   // Ocarina of Time on a warm Galaxy S25 Edge (2026-11-18): the title at 0.54, then Kokiri Forest at 1.3 at holds 1 and 2; the probe from 2 to 1 fails and leaves a
+        // reference of about 1.2. A heat dip (2.2 at hold 2) steps to 3, where the governor keeps the clock down (2.2); once the phone has cooled, hold 2 takes 2.0 for 20
+        // frames while the clock rises, then 1.6. Held against kmin, the reference ruled out every probe and hold 3 stayed; held against the near probe's target (Android),
+        // one probe goes back to hold 2 and holds, and none goes to hold 1
+        for (int held_near = 0; held_near <= 1; held_near++) {
+            sim m = {0}; nvn_fgpu g = {0}; g.near_ref = held_near; m.s.probe_near = 1; int at2 = 0, h1 = 0; uint64_t probes = 0; double ref = 0;
+            for (int i = 0; i < 9000; i++) {
+                int k = m.s.k ? m.s.k : 1; double w;
+                if (i < 600) w = 0.54;
+                else if (i < 3000) w = 1.3;
+                else if (i < 3600) w = k >= 2 ? 2.2 : 1.3;
+                else { if (k != 2) at2 = 0; w = k == 3 ? 2.2 : k == 2 ? (at2++ < 20 ? 2.0 : 1.6) : 1.3; }
+                if (i == 3600) { probes = m.s.probes; ref = g.ref; }
+                m.gpu = w; m.slow = nvn_fstep_gpu_slowed(&g, w, k, 1, nvn_fstep_probe_phase(&m.s));
+                run(&m, 1, w, 1, 3, 0); h1 += i >= 3600 && m.s.k == 1;
+            }
+            if (!held_near) {
+                snprintf(b, sizeof b, "warm phone (OoT, S25), reference held against kmin: stuck at hold 3 (k %d, reference %.2f at the dip)", m.s.k, ref);
+                check(m.s.k == 3 && ref > 1 && m.s.probes == probes, b);
+            } else {
+                snprintf(b, sizeof b, "  held against the near probe's target: back to hold 2 (k %d, probes after the dip %llu, frames at hold 1 %d)", m.s.k, (unsigned long long)(m.s.probes - probes), h1);
+                check(m.s.k == 2 && m.s.probes - probes == 1 && h1 == 0, b);
+            }
+        }
+    }
+    {   // Saria's scene on a Galaxy S25 Edge (2026-11-18): the title at 0.54, the load steps to 3, where the governor keeps the GPU about 75 % busy (2.3 vsyncs, the clock at
+        // 389 of 1,200 MHz). FSTEP_FIT's headroom (2.26 at hold 3) made no probe for 15 minutes; FSTEP_NEAR_FIT's does, and hold 2 holds (2.05 for 20 frames, then 1.6)
+        sim m = {0}; nvn_fgpu g = {0}; g.near_ref = 1; m.s.probe_near = 1; int at2 = 0, h1 = 0;
+        for (int i = 0; i < 6000; i++) {
+            int k = m.s.k ? m.s.k : 1; double w;
+            if (i < 600) w = 0.54; else if (i < 603) w = 5.0;
+            else { if (k != 2) at2 = 0; w = k == 3 ? 2.3 : k == 2 ? (at2++ < 20 ? 2.05 : 1.6) : 1.3; }
+            m.gpu = w; m.slow = nvn_fstep_gpu_slowed(&g, w, k, 1, nvn_fstep_probe_phase(&m.s));
+            run(&m, 1, w, 1, 3, 0); h1 += i >= 603 && m.s.k == 1;
+        }
+        snprintf(b, sizeof b, "governor at 75 %% busy at hold 3 (OoT, S25): a probe to hold 2 that holds (k %d, probes %llu, failed %llu, at hold 1 %d)", m.s.k, (unsigned long long)m.s.probes, (unsigned long long)m.s.failed, h1);
+        check(m.s.k == 2 && m.s.probes == 1 && m.s.failed == 0 && h1 == 0, b);
+    }
     {   // Breath of the Wild on an iPhone (2026-10-21): frames of 0.80 / 0.92 vsyncs at hold 1 for 20 s, three pipeline compiles step to 2, and the scene costs the same there:
         // every other frame is above FSTEP_FIT, so no 30 fit in a row; the cost that held hold 1 starts one probe, which holds
         sim m = {0};

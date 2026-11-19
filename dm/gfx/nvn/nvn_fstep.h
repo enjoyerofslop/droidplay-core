@@ -38,6 +38,9 @@
 #define FSTEP_HOLD0 60.0      // vsyncs since the last step up before a trial: 1 s, doubled after each failed trial up to 8 s
 #define FSTEP_HOLD_MAX 480.0
 #define FSTEP_GRACE 30        // a probe's first frames, whose lateness neither fails it nor counts toward a step up (the controller lowered the clock within 10 frames of a step to 30)
+#define FSTEP_NEAR_FIT 1.0    // probe_near's headroom rule for a probe to a hold above kmin: the GPU's best time there against the hold itself, not FSTEP_FIT of it. A governor
+                              // that sizes the clock to about 75 % busy leaves Ocarina of Time at hold 3 at 2.25-2.4 vsyncs, past FSTEP_FIT's 2.26, so no probe to hold 2 was made
+                              // (Saria's scene on a Galaxy S25 Edge: 20 fps for 15 minutes at 389 of 1,200 MHz); a probe that fails there still shows its frames sooner than hold 3
 #define FSTEP_SAME 1.1        // the cost at the longer hold against the cost that held kmin: at most this much is the same scene (BotW at hold 2: 1.0–1.07 times its hold-1 GPU time)
 // The grace is renewed (nvn_fstep.ramp) while the probe's frames keep getting cheaper: a controller that raises the clock slowly is still raising it. macOS raises the GPU clock
 // of a game that misses its deadline at 85–100% GPU occupancy by about 100 MHz a second (Breath of the Wild on an M5 Pro: 338 → 432 MHz over a 33-frame probe, GPU 24.8 → 18.5 ms,
@@ -167,7 +170,7 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
     } else if (s->gfit_run >= FSTEP_RUN && s->k > kmin && s->gfail < 3 && s->since >= s->hold && !s->trial && !s->probe) {   // the GPU has fitted the shorter hold: try it, with a probe's grace
         s->k--; s->downs++; s->trial = FSTEP_RUN; s->gtrial = 1; s->grace = FSTEP_GRACE; s->fit_run = s->fit_miss = s->late_run = s->gfit_run = s->gfit_miss = 0; s->pa = s->pb = 0; s->plate = s->ptotal = 0;
     } else if ((slow || nvn_fstep_same(s)) && s->k > kmin && s->since >= s->hold && !s->trial
-               && !(s->probe_near && s->gpu > 0 && s->gpu * s->gpu / s->k > FSTEP_FIT * (s->k - 1 > kmin ? s->k - 1 : kmin))) {   // probe: straight to kmin, so the controller sees the whole deadline
+               && !(s->probe_near && s->gpu > 0 && s->gpu * s->gpu / s->k > (s->k - 1 > kmin ? FSTEP_NEAR_FIT * (s->k - 1) : FSTEP_FIT * kmin))) {   // probe: straight to kmin, so the controller sees the whole deadline
         // probe_near's headroom rule: a governor that sizes the clock to the busy share can raise it at most in proportion to the idle share, so the GPU's time at hold k, gpu, can
         // fall to about gpu * (gpu / k) at best; a probe whose target that does not fit is not made (Ocarina of Time on a Galaxy Z Fold 8: at hold 2 with a GPU of 1.6 vsyncs a
         // probe to 1 failed every time and doubled the hold-off, which then kept hold 3 longer)
@@ -191,10 +194,15 @@ static inline int nvn_fstep_next(nvn_fstep *s, double shown, double cost, int km
 // whatever the longer hold added, kmin was not held without it. Ocarina of Time on the Odin 3 (GPU clock at its maximum at every hold) costs 1.2-2.1 vsyncs of GPU time
 // in Kokiri Forest by where the camera looks; a failed probe left a reference of 1.3, the heavy views were 1.5 times it, and each turn of the camera started another
 // probe: 60-90 late frames at hold 1, then hold 3 (4 probes in 17 s, 358 late frames of 900; t_fstep: the view case)
+// With probe_near (Android) a probe from a hold two or more above kmin goes to the next shorter hold, so the reference is held against that hold, not kmin: it says
+// whether the GPU fits the probe's target. Ocarina of Time on a warm Galaxy S25 Edge: one failed probe from hold 2 to 1 left a reference of about 1.2 vsyncs, a heat dip
+// later stepped to hold 3, where the governor took the GPU clock down to 525-607 MHz (2.1-2.25 vsyncs a frame), and with the reference above kmin no probe to hold 2
+// was made again: 20 fps for the remaining 8-11 minutes of a 15-minute run, with the thermal cap back at 1,200 MHz (t_fstep: the warm-phone case)
 #define FSTEP_GPU_SLOW 1.3    // GPU time at the longer hold against its time at kmin
 #define FSTEP_GPU_N 30        // frames at the longer hold before the comparison counts
-typedef struct { double ref, cur; int n, k, kmin; double ref_at[FSTEP_MAX + 1]; } nvn_fgpu;   // GPU time at kmin (running mean; of every kmin in ref_at); at the current hold k and its frame count; the kmin ref belongs to
-static inline int nvn_fgpu_slow(const nvn_fgpu *g) { return g->n >= FSTEP_GPU_N && g->ref > 0 && g->ref <= g->kmin && g->cur >= FSTEP_GPU_SLOW * g->ref && g->cur > FSTEP_FIT * (g->k - 1); }
+typedef struct { double ref, cur; int n, k, kmin, near_ref; double ref_at[FSTEP_MAX + 1]; } nvn_fgpu;   // GPU time at kmin (running mean; of every kmin in ref_at); at the current hold k and its frame count; the kmin ref belongs to;
+                                                                                                  // near_ref: set by the caller (kept), as nvn_fstep.probe_near
+static inline int nvn_fgpu_slow(const nvn_fgpu *g) { return g->n >= FSTEP_GPU_N && g->ref > 0 && g->ref <= (g->near_ref && g->k - 1 > g->kmin ? g->k - 1 : g->kmin) && g->cur >= FSTEP_GPU_SLOW * g->ref && g->cur > FSTEP_FIT * (g->k - 1); }
 // What nvn_fstep_gpu_slowed's probe takes: 0 no probe's trial, 1 a probe's trial in its grace, 2 a probe's trial after it
 static inline int nvn_fstep_probe_phase(const nvn_fstep *s) { return s->probe != 1 ? 0 : s->grace > 0 ? 1 : 2; }
 // Once per frame, with the frame's GPU time (vsyncs; 0 = none finished yet), the hold it ran under and the probe phase (nvn_fstep_probe_phase)
