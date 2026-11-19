@@ -132,6 +132,11 @@ static void pool_drop_view(VkImageView iv) {
     if (!g_nplist || !iv) return;
     for (uint32_t q = 0; q < g_nplist; q++) { uint32_t i = g_plist[q]; if (g_pimg[i] == iv) { g_pimg[i] = VK_NULL_HANDLE; g_pimg_chg[i] = ++g_ppos; g_prm = g_ppos; } }
 }
+static uint32_t *g_seen_cp;   // pool_sync's copy of the marks
+static int pool_snap(void) {   // DM_VK_POOL_SNAP=0 (env.txt): the marks scanned word by word in their buffer, as before
+    static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_POOL_SNAP"); v = !(e && *e == '0') && (g_seen_cp = malloc((size_t)g_pool_n * 4)) != NULL; }
+    return v;
+}
 static int pool_log(void) { static int v = -1; if (v < 0) { const char *e = getenv("DM_VK_POOL_LOG"); v = e && *e == '1'; } return v; }   // DM_VK_POOL_LOG=1: a line per ID first read
 // Under g_bk, before a pool shader's draw or dispatch takes its sets, once a chunk: the IDs read since, made; every ID read so far looked at again; the samplers registered since
 static void pool_sync(void) {
@@ -142,10 +147,16 @@ static void pool_sync(void) {
     if (g_pool_texn > (int)g_pool_n) RED_ONCE(155, "the game's texture pools grew to %d IDs after the pool set was made with %u: IDs past it read the last one", g_pool_texn, g_pool_n);
     if (base != g_ptex_base) { if (g_ptex_base >= 0) RED_ONCE(153, "draws reading the texture pool by ID now bind another texture pool (base %d, was %d): the IDs read before are taken from it", base, g_ptex_base); g_ptex_base = base; }
     uint32_t was = g_nplist, nread = 0;
-    // the marks taken and cleared: a read in a later chunk marks the ID again. Looked at two words a load (an aligned 64-bit load is one access): almost every word is 0, and
-    // the walk of Ocarina of Time's 33,792 marks in each chunk that draws a pool shader was 2.6% of its replay thread on a Galaxy Z Fold 8
+    // The marks taken and cleared: a read in a later chunk marks the ID again. They are read in one copy first (pool_snap): where the GPU has no memory that is both
+    // cached and coherent (Arm's Mali-G715), the marks buffer is uncached, and the word-by-word scan of Ocarina of Time's 33,792 IDs took 2.45 ms a sync on a Pixel 9 Pro
+    // XL (17 a frame), against 0.33 ms on an Adreno. A word set in the copy is read again before it is cleared, so a bit the GPU set meanwhile is taken with it; one set
+    // after the copy stays for the next sync. Without the copy (DM_VK_POOL_SNAP=0) the buffer is looked at two words a load (an aligned 64-bit load is one access):
+    // almost every word is 0, and that walk was 2.6% of the replay thread on a Galaxy Z Fold 8
+    const uint32_t *snap = pool_snap() ? g_seen_cp : NULL;
+    if (snap) memcpy((void *)snap, (const void *)g_seen, (size_t)g_pool_n * 4);
     for (uint32_t i = 1; i < g_pool_n; i++) {
-        if (!(i & 1) && i + 1 < g_pool_n && !((const volatile uint64_t *)(uintptr_t)g_seen)[i >> 1]) { i++; continue; }
+        if (snap) { if (!snap[i]) continue; }
+        else if (!(i & 1) && i + 1 < g_pool_n && !((const volatile uint64_t *)(uintptr_t)g_seen)[i >> 1]) { i++; continue; }
         uint32_t m = g_seen[i]; if (!m) continue;
         g_seen[i] = 0;
         uint32_t first = !g_pwant[i]; if (first) g_plist[g_nplist++] = i;
