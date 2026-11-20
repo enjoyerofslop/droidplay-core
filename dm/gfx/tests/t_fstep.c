@@ -427,6 +427,66 @@ int main(void) {
         snprintf(b, sizeof b, "hold 3 with an odd heavier frame: a trial to 2 within %d frames, held through 3 slow first frames (k %d, failed %llu)", waited, m.s.k, (unsigned long long)m.s.failed);
         check(at3 && waited >= 0 && waited < 120 && m.s.k == 2 && m.s.failed == 0, b);
     }
+    {   // Hitches at the title (Pokémon Legends: Arceus): late frames that cost 0.3 vsyncs end trials back to 60; the hold-off stays 1 s up to FSTEP_HITCH_MAX of them
+        sim m = {0}; run(&m, 120, 0.2, 1, 3, 0);
+        for (int i = 0; i < 3; i++) m.next = nvn_fstep_next(&m.s, 3.0, 0.3, 1, 3, 0, 0);
+        check(m.s.k == 2 && m.s.hold == FSTEP_HOLD0, "hitches: three late frames of small cost step up to 30");
+        int ok = 1;
+        for (int f = 0; f < FSTEP_HITCH_MAX && ok; f++) {
+            for (int i = 0; i < 400 && !m.s.trial; i++) run(&m, 1, 0.2, 1, 3, 0);
+            ok = m.s.trial && m.s.k == 1; run(&m, 10, 0.2, 1, 3, 0);
+            for (int i = 0; i < 3; i++) m.next = nvn_fstep_next(&m.s, 3.0, 0.3, 1, 3, 0, 0);
+            ok = ok && m.s.k == 2 && m.s.hold == FSTEP_HOLD0;
+        }
+        snprintf(b, sizeof b, "  %d trials failed on hitches alone: the hold-off stays 1 s (hold %.0f, failed %llu)", FSTEP_HITCH_MAX, m.s.hold, (unsigned long long)m.s.failed);
+        check(ok && m.s.failed == FSTEP_HITCH_MAX, b);
+        for (int i = 0; i < 400 && !m.s.trial; i++) run(&m, 1, 0.2, 1, 3, 0);
+        run(&m, 10, 0.2, 1, 3, 0); for (int i = 0; i < 3; i++) m.next = nvn_fstep_next(&m.s, 3.0, 0.3, 1, 3, 0, 0);
+        check(m.s.k == 2 && m.s.hold == 2 * FSTEP_HOLD0, "  one more in a row doubles it, as any failed trial");
+        for (int i = 0; i < 400 && !m.s.trial; i++) run(&m, 1, 0.2, 1, 3, 0);
+        run(&m, 60, 0.2, 1, 3, 0);
+        check(m.s.k == 1 && m.s.hitch_fails == 0, "  a trial that holds forgets the hitches: 60 fps");
+        sim c = {0}; run(&c, 120, 0.2, 1, 3, 0);   // the same trial failing on cost: doubled at once
+        for (int i = 0; i < 3; i++) c.next = nvn_fstep_next(&c.s, 3.0, 0.3, 1, 3, 0, 0);
+        for (int i = 0; i < 400 && !c.s.trial; i++) run(&c, 1, 0.2, 1, 3, 0);
+        run(&c, 10, 0.2, 1, 3, 0); run(&c, 3, 1.5, 1, 3, 0);
+        check(c.s.k == 2 && c.s.hold == 2 * FSTEP_HOLD0, "  a trial failing on its frames' cost doubles the hold-off");
+    }
+    {   // Hitch-only failures next to the GPU-fit trials (3d9f479c): soft-late frames, GPU-fit trials and a change of cap
+        sim m = {0}; m.gpu = 0.5; run(&m, 120, 0.2, 1, 3, 0);
+        for (int i = 0; i < 3; i++) m.next = nvn_fstep_next(&m.s, 3.0, 0.3, 1, 3, 0, 0);
+        for (int i = 0; i < 400 && !m.s.trial; i++) run(&m, 1, 0.2, 1, 3, 0);
+        int tried = m.s.trial && m.s.k == 1 && !m.s.gtrial; run(&m, 10, 0.2, 1, 3, 0);
+        for (int i = 0; i < 2; i++) m.next = nvn_fstep_next(&m.s, 1.4, 1.4, 1, 3, 0, 0);   // soft late (GPU 0.5 fits 1): not in late_run, nor in late_cmax
+        for (int i = 0; i < 3; i++) m.next = nvn_fstep_next(&m.s, 3.0, 0.3, 1, 3, 0, 0);
+        snprintf(b, sizeof b, "hitches after soft-late frames of 1.4: still a hitch-only failure (late_cmax %.2f, hold %.0f)", m.s.late_cmax, m.s.hold);
+        check(tried && m.s.k == 2 && m.s.hold == FSTEP_HOLD0 && m.s.hitch_fails == 1 && m.s.late_cmax <= FSTEP_FIT, b);
+        run(&m, 1, 0.2, 2, 3, 0);
+        check(m.s.hitch_fails == 0, "  a change of cap forgets the hitch-only failures");
+        sim w = {0}; w.gpu = 0.5; run(&w, 120, 0.2, 1, 3, 0);   // a trial that is late most of the time at a cost that fits (Breath of the Wild at a 60 fps target on a OnePlus Pad 3): the scene's cost showing as lateness
+        for (int i = 0; i < 3; i++) w.next = nvn_fstep_next(&w.s, 3.0, 0.3, 1, 3, 0, 0);
+        for (int i = 0; i < 400 && !w.s.trial; i++) run(&w, 1, 0.2, 1, 3, 0);
+        int wtried = w.s.trial && w.s.k == 1 && !w.s.gtrial; run(&w, 6, 0.2, 1, 3, 0);
+        for (int i = 0; i < 8; i++) w.next = nvn_fstep_next(&w.s, 1.3, 0.6, 1, 3, 0, 0);   // soft late: no step up, but counted in the trial
+        int wk = w.s.k, wl = w.s.tlate;
+        for (int i = 0; i < 3; i++) w.next = nvn_fstep_next(&w.s, 1.7, 0.6, 1, 3, 0, 0);   // three that count, still cheap
+        snprintf(b, sizeof b, "  a trial late most of the time at a cost that fits is not hitch-only: the hold-off doubles (late in the trial %d, hold %.0f)", wl, w.s.hold);
+        check(wtried && wk == 1 && wl == 8 && w.s.k == 2 && w.s.hold == 2 * FSTEP_HOLD0 && w.s.hitch_fails == 0, b);
+        sim x = {0}; x.gpu = 0.5; run(&x, 120, 0.2, 1, 3, 0);   // up to FSTEP_HITCH_LATE other late frames are still a hitch-only failure
+        for (int i = 0; i < 3; i++) x.next = nvn_fstep_next(&x.s, 3.0, 0.3, 1, 3, 0, 0);
+        for (int i = 0; i < 400 && !x.s.trial; i++) run(&x, 1, 0.2, 1, 3, 0);
+        run(&x, 6, 0.2, 1, 3, 0);
+        for (int i = 0; i < FSTEP_HITCH_LATE; i++) { x.next = nvn_fstep_next(&x.s, 1.3, 0.6, 1, 3, 0, 0); run(&x, 2, 0.2, 1, 3, 0); }
+        for (int i = 0; i < 3; i++) x.next = nvn_fstep_next(&x.s, 3.0, 0.3, 1, 3, 0, 0);
+        snprintf(b, sizeof b, "  %d late frames besides the failing run keep it hitch-only (hold %.0f, hitch_fails %d)", FSTEP_HITCH_LATE, x.s.hold, x.s.hitch_fails);
+        check(x.s.k == 2 && x.s.hold == FSTEP_HOLD0 && x.s.hitch_fails == 1, b);
+        sim g = {0}; g.gpu = 0.5; run(&g, 120, 0.2, 1, 3, 0); run(&g, 3, 1.6, 1, 3, 0);   // hold 2 at a cost of 1.5 that does not fit 1, a GPU of 0.5 that does
+        for (int i = 0; i < 400 && !g.s.trial; i++) run(&g, 1, 1.5, 1, 3, 0);
+        int gtried = g.s.trial && g.s.gtrial && g.s.k == 1; run(&g, 35, 0.2, 1, 3, 0);
+        for (int i = 0; i < 3; i++) g.next = nvn_fstep_next(&g.s, 3.0, 0.3, 1, 3, 0, 0);
+        snprintf(b, sizeof b, "  a GPU-fit trial back to 1 failing on hitches doubles the hold-off and counts in gfail (hold %.0f, gfail %d)", g.s.hold, g.s.gfail);
+        check(gtried && g.s.k == 2 && g.s.hold == 2 * FSTEP_HOLD0 && g.s.gfail == 1 && g.s.hitch_fails == 0, b);
+    }
     {   // The pipeline's lateness at a hold the GPU fits (FSTEP_LATE_SOFT): Ocarina of Time on a OnePlus Pad 3, GPU 1.3 vsyncs, frames of 2.2 at hold 2 (late by 0.2)
         sim m = {0}; m.gpu = 1.3; run(&m, 120, 0.5, 1, 3, 0); run(&m, 60, 2.4, 1, 3, 0);
         check(m.s.k == 2 && m.s.ups == 1, "soft late: frames of 2.4 with 1.3 of GPU step from 1 to 2 and stay at 2 (not 3)");
