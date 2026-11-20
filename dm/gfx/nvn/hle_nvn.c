@@ -2240,8 +2240,9 @@ static void fstep_tick(const win_t *o, int c) {
         if (gslow) w += snprintf(why + w, sizeof why - w, ", GPU %.2f× its time at hold %d (%.2f)", g_fg.cur / g_fg.ref, kmin, g_fg.ref);
         if (nvn_fstep_same(&g_fs)) snprintf(why + w, sizeof why - w, ", cost %.2f× the cost that held hold %d", g_fs.ccur / g_fs.cref, kmin);
         if (g_fs.k > k0 && g_fs.cref > 0) snprintf(held, sizeof held, "; hold %d held at %.2f", kmin, g_fs.cref);   // what a probe compares the longer hold's cost with
+        char trial[64]; snprintf(trial, sizeof trial, "trial%s%s", g_fs.mtrial ? ", a hold that held" : g_fs.gtrial ? ", the GPU fits it" : g_fs.ttrial ? ", the top-clock fit" : "", g_fs.tg ? ", the long grace" : "");
         LOG("[nvn] frame step: hold %d → %d %s at present %llu (%s; cost %.2f, GPU %.2f%s)%s", k0, g_fs.k, fps_high() ? "ticks of 1/120 s" : "vsyncs", (unsigned long long)o->presents,
-            fixed ? "the game's own step" : kmin0 > FSTEP_MAX ? "the game's own step ended" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? "3 late frames" : g_fs.probes != probes0 ? why : "trial", cost, gpu, held, ++nlog == 40 ? "; further changes only counted below" : "");
+            fixed ? "the game's own step" : kmin0 > FSTEP_MAX ? "the game's own step ended" : kmin != kmin0 ? "the cap changed" : g_fs.k > k0 ? "3 late frames" : g_fs.probes != probes0 ? why : trial, cost, gpu, held, ++nlog == 40 ? "; further changes only counted below" : "");
     }
     if (probe0 == 1 && g_fs.probe != 1 && !fixed && nlog < 40)   // whether the controller raised the clock for the shorter deadline
         LOG("[nvn] frame step: the probe %s at present %llu (CPU %d%% on performance cores)%s", g_fs.probe == 2 ? "held" : "failed", (unsigned long long)o->presents, g_fs_pshare, ++nlog == 40 ? "; further changes only counted below" : "");
@@ -2254,11 +2255,11 @@ static void fstep_tick(const win_t *o, int c) {
         double q[4] = {0, 0, 0, 0};   // the window's cost p50 / p95 and GPU part p50 / p95
         for (int h = 0; h < 2; h++) { const uint32_t *hb = h ? ghist : chist; acc = 0;
             for (int b = 0, i = 0; b <= 160 && i < 2; b++) { acc += hb[b]; while (i < 2 && cn && acc * 100 >= cn * (i ? 95 : 50)) q[2 * h + i++] = b / 20.0; } }
-        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials, %llu with the long grace, %llu of those ended early, %llu started by the top-clock fit); "
+        if (t0) LOG("[nvn] frame step: game time %.2f s in %.2f s (%.3f of real time); held 1 / 2 / 3 vsyncs %llu / %llu / %llu frames, %llu late, %llu vsyncs paid back, %.0f dropped, %llu up / %llu down (%llu probes, %llu failed trials, %llu with the long grace, %llu of those ended early, %llu started by the top-clock fit, %llu three-failure stops lifted); "
                     "cost p50 %.2f / p95 %.2f vsyncs (GPU part p50 %.2f / p95 %.2f, the larger in %llu frames, none finished in %llu), pacing taken out %.2f ms a frame at the acquire and %.2f in the present",
                     (vs - v0) / 60.0, (t - t0) / 1e9, (vs - v0) / 60.0 / ((t - t0) / 1e9), (unsigned long long)held[1], (unsigned long long)held[2], (unsigned long long)held[3],
                     (unsigned long long)g_fs.late, (unsigned long long)g_fs.paid, g_fs.dropped, (unsigned long long)g_fs.ups, (unsigned long long)g_fs.downs, (unsigned long long)g_fs.probes, (unsigned long long)g_fs.failed,
-                    (unsigned long long)g_fs.tgtrials, (unsigned long long)g_fs.tgends, (unsigned long long)g_fs.tnewtrials, q[0], q[1], q[2], q[3], (unsigned long long)cgb, (unsigned long long)cg0, cn ? cpw / 1e6 / cn : 0, cn ? cps / 1e6 / cn : 0);
+                    (unsigned long long)g_fs.tgtrials, (unsigned long long)g_fs.tgends, (unsigned long long)g_fs.tnewtrials, (unsigned long long)g_fs.tlifts, q[0], q[1], q[2], q[3], (unsigned long long)cgb, (unsigned long long)cg0, cn ? cpw / 1e6 / cn : 0, cn ? cps / 1e6 / cn : 0);
         t0 = t; v0 = vs; memset(held, 0, sizeof held); memset(chist, 0, sizeof chist); memset(ghist, 0, sizeof ghist); cn = cpw = cps = cgb = cg0 = 0;
     }
 }
