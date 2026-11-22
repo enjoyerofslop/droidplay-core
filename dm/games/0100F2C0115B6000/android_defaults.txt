@@ -6,3 +6,11 @@
 # governor at 525 MHz), against 20.2 without it (three vsyncs, 342 MHz); the opening cave 30 fps against 20. Before the live copies it made the save slower (a recorder
 # drain at each of the then 16 waits a frame, droidplay-core#504). The process takes more CPU a second with it (about 64 ms a frame at 30 fps against 69 at 20)
 DM_VK_RECORDER=1
+# DM_VK_GPU_FLOOR=100: the launcher's Keep the GPU clock up, on by default for this game (gfx_vk_floor.inc; it acts only where the phone has Qualcomm's KGSL device,
+# others ignore it, and the settings screen still turns it off). Looking up at the sky (droidplay-core#555) leaves the GPU less work a frame: on a Galaxy S25 Edge at
+# #457's save the governor then took the clock from 342-525 MHz down to 160-222, the sky's frames still took 21-28 ms of GPU, and after a late frame or two at the camera's
+# move the frame step held 3 vsyncs (20 fps) where the camp around it ran at 30. Three interleaved launches each way at that save, the camp and the sky 25 s at a time,
+# twice: with the floor every view at 30 fps or more (one launch ran the sky at 60), the GPU near 1,200 MHz taking 11 ms a frame at the camp and 4.5 in the sky; without
+# it one launch in three fell to 20 fps in both views (the clock at 342 MHz, then 160 in the sky), and a longer session went from 28.8 fps at the camp to 20 at the sky.
+# The cost is heat: the battery 29.8 -> 33.4 °C over one 4-minute launch with it, 33.4 -> 31.7 °C over one without (2026-11-18, q399)
+DM_VK_GPU_FLOOR=100
